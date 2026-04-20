@@ -1,0 +1,692 @@
+import { AIProviderFactory } from './aiProviderFactory';
+import { WaterfallService, WaterfallStep } from './waterfallService';
+import { WaterfallContext, WaterfallResult, WaterfallPausedResult, OpenFileContext } from '../types/waterfall';
+import { contextService, getHarnessSnapshot, ContextProvenance, ProvenanceItem } from './contextService';
+import { ChatRequestData, ChatMessage, CompletionOptions } from '../types/ai';
+import { randomUUID as uuidv4 } from 'crypto';
+import { traceLogger, RetrievalTrace } from './traceLogger';
+import path from 'path';
+import fs from 'fs/promises';
+import { SolventError } from '../utils/errors';
+import { searchService } from './searchService';
+import { vectorService } from './vectorService';
+import { pollinationsService } from './pollinationsService';
+import { localImageService } from './localImageService';
+import { huggingFaceService } from './huggingFaceService';
+import { falService } from './falService';
+import { memoryConsolidationService } from './memoryConsolidationService';
+import { logger } from '../utils/logger';
+import { config, APP_CONSTANTS } from '../config';
+import { MODELS } from '../constants/models';
+import type { WaterfallModelSelection } from '../constants/models';
+import { telemetryService } from './telemetryService';
+import { supervisorService } from './supervisorService';
+import type { AgentEvent } from '../types/agentEvents';
+import { BaseOpenAIService } from './baseOpenAIService';
+import { normalizeMessages } from '../utils/messageUtils';
+import { fitConversation } from '../utils/conversationWindow';
+import { getContextBudget } from '../utils/tokenEstimator';
+import { ProviderSemaphore } from './providerSemaphore';
+
+const providerSemaphore = new ProviderSemaphore(parseInt(process.env.MAX_CONCURRENT_PROVIDER_CALLS || '5', 10));
+
+// --- Named Constants ---
+
+/**
+ * Keywords that indicate image generation intent
+ */
+const IMAGE_INTENT_KEYWORDS = [
+  'generate an image', 'create an image', 'draw', 'paint', 'make a picture',
+  'show me a picture', 'generate a picture', 'imagine', 'visualize',
+  'generate image', 'make image', 'render', 'create image'
+];
+
+/**
+ * Regex pattern for explicit image generation intent at start of message
+ */
+const EXPLICIT_IMAGE_INTENT_REGEX = /^(?:(draw|imagine|visualize)\b|(generate|make|create|render)\b.{0,60}\b(image|picture|photo|art|illustration|graphic|sketch|painting)\b)/i;
+
+/**
+ * Regex pattern for removing image intent phrases from prompt
+ */
+const IMAGE_INTENT_CLEANUP_REGEX = /generate an image of|create an image of|draw|paint|make a picture of|show me a picture of|generate a picture of|create a picture of|imagine|render|visualize|generate image of|make image of|generate|draw|make|create|please|can you|could you|i want you to|i'd like you to/gi;
+
+/**
+ * Regex pattern for detecting code-related requests in vision mode
+ */
+const CODE_REQUEST_REGEX = /code|build|implement|create|react|html|css|component/i;
+
+/**
+ * Gemini model fallback chain. Kept short since Gemini is deprioritized
+ * operationally (rate limits make it unreliable) — we don't want to spend
+ * minutes cycling through flavors. Real workload runs on Fireworks/Groq/etc.
+ */
+const GEMINI_MODEL_CHAIN = ['gemini-3-pro-preview', 'gemini-3-flash-preview'];
+
+// --- Types ---
+
+interface ImageIntentResult {
+  isImageRequest: boolean;
+  imagePrompt: string;
+}
+
+interface CompletionResponse {
+  response: string;
+  model: string;
+  info?: string;
+  waterfall?: WaterfallResult | WaterfallPausedResult;
+  provenance?: ContextProvenance;
+  isGeneratedImage?: boolean;
+  imageUrl?: string;
+  traceId?: string;
+}
+
+interface EnrichedContextResult {
+  messages: ChatMessage[];
+  provenance: ContextProvenance;
+}
+
+// --- AIService Class ---
+
+export class AIService {
+  private waterfallService = new WaterfallService();
+  // Maps sessionId → last trace id for that session (used for auto-accepted signal).
+  // Ephemeral: cleared on backend restart. Phase C will persist this.
+  private lastTraceBySession = new Map<string, string>();
+
+  async performSearch(query: string, page?: number) {
+    return searchService.webSearch(query, page);
+  }
+
+  async runWaterfallStep(step: WaterfallStep, input: string, context: WaterfallContext | undefined, globalProvider?: string) {
+    return this.waterfallService.runStep(step, input, context, globalProvider);
+  }
+
+  async processChat(data: ChatRequestData): Promise<CompletionResponse> {
+    const startTime = Date.now();
+    const { provider, model, image, mode, smartRouter, fallbackModel, temperature, maxTokens, apiKeys, thinkingModeEnabled, imageProvider } = data;
+
+    try {
+      const lastUserMessage = data.messages[data.messages.length - 1]?.content || "";
+
+      // --- GUARDIAN ANGEL HOOK (Proactive Value) ---
+      const contextFocus = `${lastUserMessage} ${data.openFiles ? data.openFiles.map(f => f.path).join(', ') : ''}`;
+      supervisorService.provideGuidance(contextFocus).catch(err => {
+        logger.warn(`[AIService] Guardian Angel check failed: ${err.message}`);
+      });
+      // ---------------------------------------------
+
+      // 1. Detect Image Intent
+      const imageIntent = this.detectImageIntent(lastUserMessage, mode);
+      if (imageIntent.isImageRequest) {
+        return this.handleImageRequest(imageIntent.imagePrompt, imageProvider, apiKeys, startTime);
+      }
+
+      logger.info(`Processing chat request with provider: ${provider}, model: ${model}`);
+
+      // 2. Enrich Context
+      const enrichStart = Date.now();
+      const { messages: enrichedMessages, provenance } = await this.enrichContext(data);
+      const pipelineMs = Date.now() - enrichStart;
+      const normalizedMessages = normalizeMessages(enrichedMessages);
+
+      // Auto-signal: if this session already has a pending trace, mark it accepted.
+      // The user sending a new message is implicit acceptance of the prior response.
+      const sessionId = data.sessionId || 'unknown';
+      const prevTraceId = this.lastTraceBySession.get(sessionId);
+      if (prevTraceId) {
+        traceLogger.updateOutcome(prevTraceId, 'accepted').catch(() => {});
+      }
+
+      // 2.1 Log retrieval trace (fire-and-forget — never blocks the response)
+      const trace: RetrievalTrace = {
+        id: uuidv4(),
+        ts: new Date().toISOString(),
+        responseId: uuidv4(), // Phase B will correlate this with the actual response id
+        sessionId: data.sessionId || 'unknown',
+        mode: data.mode || 'chat',
+        provider,
+        model,
+        query: data.messages[data.messages.length - 1]?.content?.slice(0, 500) || '',
+        harnessSnapshot: getHarnessSnapshot(),
+        active: provenance.active.map((p: ProvenanceItem) => ({
+          id: p.id,
+          text: p.text.slice(0, 200),
+          type: p.type,
+          tier: (p as ProvenanceItem & { tier?: string }).tier || '',
+          score: p.score,
+          source: p.source || '',
+          status: 'active' as const,
+        })),
+        suppressed: provenance.suppressed.map((p: ProvenanceItem) => ({
+          id: p.id,
+          text: p.text.slice(0, 200),
+          type: p.type,
+          tier: (p as ProvenanceItem & { tier?: string }).tier || '',
+          score: p.score,
+          reason: p.reason || 'unknown',
+          status: 'suppressed' as const,
+        })),
+        promptTokens: provenance.promptTokens ?? {
+          memory: 0, rules: 0, workspace: 0, conversationHistory: 0,
+          systemPrompt: 0, total: 0, budget: 0,
+        },
+        counts: provenance.counts,
+        pipelineMs,
+        outcome: null,
+      };
+      traceLogger.appendTrace(trace).catch(() => {}); // fire-and-forget
+      this.lastTraceBySession.set(sessionId, trace.id);
+
+      // 2.5. Fit conversation to token budget (sliding window with summarization)
+      const contextBudget = getContextBudget(model, maxTokens || 2048);
+      const { messages: windowedMessages, wasTruncated } = await fitConversation(
+        normalizedMessages, contextBudget.history
+      );
+      if (wasTruncated) {
+        logger.info(`[AIService] Conversation windowed: ${normalizedMessages.length} -> ${windowedMessages.length} messages`);
+      }
+
+      // 3. Inject Thinking Instructions
+      const finalMessages = this.injectThinkingMode(windowedMessages, thinkingModeEnabled);
+
+      // 4. Execute Completion
+      let responseData: CompletionResponse;
+      if (provider === 'gemini') {
+        responseData = await this.executeGeminiCompletion(
+          finalMessages, model, image, mode, smartRouter !== false, fallbackModel,
+          temperature, maxTokens, apiKeys, data.openFiles
+        );
+      } else {
+        responseData = await this.executeProviderCompletion(
+          provider, finalMessages, model, temperature, maxTokens, apiKeys,
+          fallbackModel, mode, data
+        );
+      }
+
+      // 5. Attach Provenance
+      responseData = { ...this.attachProvenance(responseData, provenance), traceId: trace.id };
+
+      // 6. Consolidate Memory (fire-and-forget)
+      this.consolidateMemory(mode, data.messages, responseData);
+
+      // 7. Log Telemetry
+      await telemetryService.logTransaction({
+        id: uuidv4(),
+        type: 'chat',
+        model: responseData.model || model,
+        provider: provider,
+        latencyMs: Date.now() - startTime,
+        tokensOut: responseData.response?.length ? Math.ceil(responseData.response.length / 4) : 0,
+        status: 'success'
+      });
+
+      return responseData;
+
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      await telemetryService.logTransaction({
+        id: uuidv4(),
+        type: 'chat',
+        model: model,
+        provider: provider,
+        latencyMs: Date.now() - startTime,
+        status: 'error',
+        error: err.message
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Agent chat: uses the event-emitting tool loop so the frontend
+   * can display real-time tool activity via SSE.
+   */
+  async processAgentChat(
+    data: ChatRequestData,
+    onEvent: (event: AgentEvent) => void
+  ): Promise<string> {
+    const { provider, model, temperature, maxTokens, apiKeys, tier, traits } = data;
+
+    logger.info(`[AIService] Processing agent chat with provider: ${provider}, model: ${model}`);
+
+    // Enrich context (same as processChat)
+    const { messages: enrichedMessages } = await this.enrichContext(data);
+    const normalizedMessages = normalizeMessages(enrichedMessages);
+    const finalMessages = this.injectThinkingMode(normalizedMessages, data.thinkingModeEnabled);
+
+    // Get the provider instance — must support generateChatCompletionWithEvents
+    const selectedProvider = await AIProviderFactory.getProvider(provider);
+
+    if (selectedProvider instanceof BaseOpenAIService) {
+      return selectedProvider.generateChatCompletionWithEvents(
+        finalMessages,
+        {
+          model: model || selectedProvider.defaultModel,
+          temperature,
+          maxTokens,
+          apiKey: apiKeys?.[provider],
+        },
+        onEvent,
+        tier,
+        traits
+      );
+    }
+
+    // Fallback: provider doesn't support events (e.g., Gemini) — use normal completion
+    const response = await providerSemaphore.run(() => selectedProvider.complete(finalMessages, {
+      model,
+      temperature,
+      maxTokens,
+      apiKey: apiKeys?.[provider],
+    }));
+    onEvent({ type: 'text_complete', content: response });
+    return response;
+  }
+
+  // --- Decomposed Methods ---
+
+  /**
+   * Detects if the user message has image generation intent.
+   * Public so the /api/detect-intent route can call it directly,
+   * keeping the regex logic in one place.
+   */
+  detectImageIntent(message: string, mode?: string): ImageIntentResult {
+    const isExplicitIntent = EXPLICIT_IMAGE_INTENT_REGEX.test(
+      message.trim().replace(/^(please|can you|could you|i want to|i need to|i'd like to)\s+/i, '')
+    );
+    const isImageIntent = IMAGE_INTENT_KEYWORDS.some(k => message.toLowerCase().includes(k)) ||
+                         /\b(draw|generate|imagine|render|visualize|make|create)\b.*\b(image|picture|photo|graphic|art|sketch)\b/i.test(message) ||
+                         isExplicitIntent;
+
+    if (isImageIntent && (mode === 'vision' || isExplicitIntent)) {
+      const cleanedPrompt = message.replace(IMAGE_INTENT_CLEANUP_REGEX, '').trim() || message;
+      return { isImageRequest: true, imagePrompt: cleanedPrompt };
+    }
+
+    return { isImageRequest: false, imagePrompt: '' };
+  }
+
+  /**
+   * Handles image generation requests.
+   */
+  private async handleImageRequest(
+    prompt: string,
+    imageProvider: string | undefined,
+    apiKeys: Record<string, string> | undefined,
+    startTime: number
+  ): Promise<CompletionResponse> {
+    logger.info(`[AIService] Image intent detected: "${prompt}"`);
+    
+    try {
+      const result = await this.generateImage(prompt, undefined, apiKeys?.gemini, imageProvider || 'auto', { apiKeys });
+
+      await telemetryService.logTransaction({
+        id: uuidv4(),
+        type: 'image',
+        model: imageProvider || 'auto',
+        provider: imageProvider || 'auto',
+        latencyMs: Date.now() - startTime,
+        status: 'success'
+      });
+
+      return {
+        response: `I've generated the image for you: "${prompt}"`,
+        model: imageProvider === 'huggingface' ? 'Hugging Face' : imageProvider === 'local' ? 'Local Juggernaut' : 'Image Router',
+        isGeneratedImage: true,
+        imageUrl: result.imageUrl
+      };
+    } catch (err: unknown) {
+      const error = err instanceof Error ? err : new Error(String(err));
+      logger.error(`[AIService] Inline image generation failed: ${error.message}`);
+      throw SolventError.provider(`Image generation failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Enriches messages with context from vector memory.
+   */
+  private async enrichContext(data: ChatRequestData): Promise<EnrichedContextResult> {
+    return contextService.enrichContext(data);
+  }
+
+  /**
+   * Injects thinking mode instructions if enabled.
+   */
+  private injectThinkingMode(messages: ChatMessage[], thinkingModeEnabled?: boolean): ChatMessage[] {
+    if (!thinkingModeEnabled) return messages;
+
+    const thinkingInstruction: ChatMessage = {
+      role: 'system',
+      content: `[DEEP THINKING MODE ACTIVE]
+You MUST perform structured reasoning inside <thinking> tags BEFORE providing your final answer.
+
+Follow this framework:
+1. **Problem Decomposition** — Break the request into discrete sub-problems. Identify what is being asked vs. what is implied.
+2. **Constraint Identification** — Check project rules, open files, memory entries, and technical limitations that bound the solution space.
+3. **Hypothesis Generation** — Propose 2-3 candidate approaches. State each in one sentence.
+4. **Evaluation** — For each approach, identify strengths, risks, and trade-offs. Select the best fit.
+5. **Execution Plan** — Outline the specific steps you will take before writing the final answer.
+
+After </thinking>, deliver the answer cleanly without restating the reasoning.`
+    };
+    return [thinkingInstruction, ...messages];
+  }
+
+  /**
+   * Executes completion using Gemini provider.
+   */
+  private async executeGeminiCompletion(
+    messages: ChatMessage[],
+    model: string,
+    image: import('../types/ai').ImageContent | null | undefined,
+    mode: string | undefined,
+    shouldSearch: boolean,
+    fallbackModel: string | undefined,
+    temp: number | undefined,
+    maxTokens: number | undefined,
+    apiKeys?: Record<string, string>,
+    openFiles?: OpenFileContext[]
+  ): Promise<CompletionResponse> {
+    const modelChain = GEMINI_MODEL_CHAIN.includes(model)
+      ? [model, ...GEMINI_MODEL_CHAIN.filter(m => m !== model)]
+      : [model, ...GEMINI_MODEL_CHAIN];
+    
+    const gemini = await AIProviderFactory.getProvider('gemini');
+
+    try {
+      const hasImage = image || messages.some(m => m.image);
+      if (hasImage) {
+        return this.handleVisionRequest(messages, image, model, temp, maxTokens, apiKeys?.gemini, openFiles);
+      }
+
+      for (const currentModel of modelChain) {
+        try {
+          const response = await providerSemaphore.run(() => gemini.complete(messages, {
+            model: currentModel,
+            shouldSearch,
+            temperature: temp,
+            maxTokens,
+            apiKey: apiKeys?.gemini
+          }));
+          return { response, model: currentModel };
+        } catch (err: unknown) {
+          logger.warn(`Gemini ${currentModel} failed, trying next...`);
+        }
+      }
+      throw new Error('Gemini chain exhausted.');
+    } catch (e: unknown) {
+      const error = e instanceof Error ? e : new Error(String(e));
+      return this.handleFallbacks(messages, mode, fallbackModel, temp, maxTokens, error, apiKeys, 'gemini');
+    }
+  }
+
+  /**
+   * Executes completion using a non-Gemini provider with fallback support.
+   */
+  private async executeProviderCompletion(
+    provider: string,
+    messages: ChatMessage[],
+    model: string,
+    temp: number | undefined,
+    maxTokens: number | undefined,
+    apiKeys: Record<string, string> | undefined,
+    fallbackModel: string | undefined,
+    mode: string | undefined,
+    _data: ChatRequestData
+  ): Promise<CompletionResponse> {
+    try {
+      const selectedProvider = await AIProviderFactory.getProvider(provider);
+      const response = await providerSemaphore.run(() => selectedProvider.complete(messages, {
+        model,
+        temperature: temp,
+        maxTokens,
+        apiKey: apiKeys?.[provider]
+      }));
+      return { response, model };
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      logger.warn(`${provider} failed, initiating fallback: ${err.message}`);
+      return this.handleFallbacks(messages, mode, fallbackModel, temp, maxTokens, err, apiKeys, provider);
+    }
+  }
+
+  /**
+   * Attaches provenance information to the response.
+   */
+  private attachProvenance(response: CompletionResponse, provenance: ContextProvenance): CompletionResponse {
+    return { ...response, provenance };
+  }
+
+  /**
+   * Consolidates memory from the conversation (fire-and-forget).
+   */
+  private consolidateMemory(
+    mode: string | undefined,
+    messages: ChatMessage[],
+    response: CompletionResponse
+  ): void {
+    if (!mode || !response.response) return;
+
+    const allMessages: ChatMessage[] = [...messages, { role: 'assistant' as const, content: response.response }];
+    // Use scheduled consolidation for reliable retry via BullMQ
+    memoryConsolidationService.scheduleConsolidation(mode, allMessages);
+    memoryConsolidationService.scheduleKnowledgeExtraction(response.response);
+  }
+
+  // --- Existing Helper Methods (unchanged) ---
+
+  private async handleVisionRequest(messages: ChatMessage[], image: import('../types/ai').ImageContent | string | null | undefined, model: string, temp: number = 0.7, maxTokens: number = 2048, apiKey?: string, openFiles?: Array<{ path: string; content: string }>) {
+    const gemini = await AIProviderFactory.getProvider('gemini');
+    try {
+      const rawImage = typeof image === 'string' ? image : image?.data ? `data:${image.mimeType};base64,${image.data}` : null;
+      const targetImage = rawImage || messages.find(m => m.image)?.image;
+      if (!targetImage) throw SolventError.validation('No image for vision mode.');
+      const matches = targetImage.match(/^data:(.+);base64,(.+)$/);
+      if (!matches) throw SolventError.validation('Invalid image format.');
+
+      const lastMessage = messages[messages.length - 1]!.content;
+      const isCodeRequest = CODE_REQUEST_REGEX.test(lastMessage);
+
+      const response = await gemini.vision!(
+        lastMessage,
+        [{ data: matches[2]!, mimeType: matches[1]! }],
+        {
+          model,
+          temperature: temp,
+          maxTokens,
+          apiKey
+        }
+      );
+
+      if (isCodeRequest) {
+        logger.info("[AIService] Vision-to-Code bridge triggered.");
+        const waterfallResult = await this.runAgenticWaterfall(`Convert this UI analysis into production code: ${response}`, undefined, APP_CONSTANTS.WATERFALL.MAX_RETRIES, undefined, undefined, openFiles);
+        const executorCode = (waterfallResult.executor as { code?: string } | null)?.code ?? '(no code generated)';
+        return {
+          response: `### Vision Analysis\n${response}\n\n### Generated Implementation\n${executorCode}`,
+          model,
+          waterfall: waterfallResult
+        };
+      }
+
+      return { response, model };
+    } catch (error: unknown) {
+      if (error instanceof SolventError) throw error;
+      const err = error instanceof Error ? error : new Error(String(error));
+      throw SolventError.provider(`Vision failed: ${err.message}`);
+    }
+  }
+
+  private async handleFallbacks(messages: ChatMessage[], _mode: string = 'chat', _fallbackModel: string = '', temp: number = 0.7, maxTokens: number = 2048, _originalError: Error = new Error('Unknown'), apiKeys?: Record<string, string>, failedProvider?: string) {
+    // Normalize messages to ensure compatible roles across providers
+    const normalizedMessages = messages.map(m => ({
+      ...m,
+      role: m.role === 'model' ? 'assistant' : m.role
+    }));
+
+    let lastError = 'Unknown';
+    for (const step of MODELS.FALLBACK_CHAIN) {
+      if (step.provider === failedProvider) continue;
+      try {
+        const provider = await AIProviderFactory.getProvider(step.provider);
+        const res = await providerSemaphore.run(() => provider.complete(normalizedMessages, {
+          model: step.model,
+          temperature: temp,
+          maxTokens,
+          apiKey: apiKeys?.[step.provider],
+        }));
+        return { response: res, model: step.model, info: `${step.provider} fallback` };
+      } catch (e: unknown) {
+        lastError = e instanceof Error ? e.message : String(e);
+        logger.warn(`[Fallback] ${step.provider} failed: ${lastError}`);
+      }
+    }
+
+    throw SolventError.provider(`All providers failed. Last: ${lastError}`);
+  }
+
+  async generateImage(prompt: string, model?: string, _apiKey?: string, provider: string = 'auto', options: { apiKeys?: Record<string, string>; [key: string]: unknown } = {}) {
+    let targetProvider = provider;
+    if (provider === 'auto') {
+      targetProvider = (config.HUGGINGFACE_API_KEY || options.apiKeys?.huggingface) ? 'huggingface' : 'pollinations';
+    }
+
+    if (targetProvider === 'local') {
+      const result = await localImageService.generateImage(prompt, { model, ...options });
+      return this.saveImage(result.base64);
+    }
+
+    if (targetProvider === 'huggingface') {
+      const hfKey = options.apiKeys?.huggingface || config.HUGGINGFACE_API_KEY;
+      if (!hfKey) throw SolventError.validation('Hugging Face API Token missing');
+      const result = await huggingFaceService.generateImage(prompt, hfKey, model);
+      return this.saveImage(result.base64, 'Hugging Face');
+    }
+
+    if (targetProvider === 'fal') {
+      const falKey = options.apiKeys?.fal || config.FAL_API_KEY;
+      if (!falKey) throw SolventError.validation('FAL.ai API key missing — add FAL_API_KEY to .env');
+      const result = await falService.generateImage(prompt, falKey);
+      return this.saveImage(result.base64, 'FAL.ai');
+    }
+
+    try {
+      const result = await pollinationsService.generateImage(prompt);
+      return this.saveImage(result.base64, 'Pollinations.ai');
+    } catch (pollError: unknown) {
+      throw SolventError.provider('All image providers failed.');
+    }
+  }
+
+  private async saveImage(base64: string, info?: string) {
+    const fileName = `generated_${uuidv4()}.png`;
+    const dir = path.join(__dirname, '../../generated_images');
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(path.join(dir, fileName), Buffer.from(base64, 'base64'));
+    return { imageUrl: `/generated_images/${fileName}`, fileName, info };
+  }
+
+  async listAvailableModels() {
+    const providers = await AIProviderFactory.getAllProviders();
+    const models: Record<string, string[]> = {};
+
+    for (const provider of providers) {
+      if (provider.id === 'openrouter') {
+        models[provider.id] = MODELS.OPENROUTER_FREE;
+      } else if (provider.id === 'groq') {
+        models[provider.id] = MODELS.GROQ_MODELS;
+      } else {
+        models[provider.id] = [provider.defaultModel || 'default-model'];
+      }
+    }
+
+    return models;
+  }
+
+  async runAgenticWaterfall(prompt: string, globalProvider?: string, maxRetries: number = APP_CONSTANTS.WATERFALL.MAX_RETRIES, onProgress?: (phase: string, data?: import('../types/waterfall').WaterfallProgressData) => void, notepadContent?: string, openFiles?: OpenFileContext[], signal?: AbortSignal, forceProceed: boolean = false, resumeArchitect?: import('../types/waterfall').PlannerOutput | null, modelSelection?: WaterfallModelSelection, apiKeys?: Record<string, string>) {
+    return this.waterfallService.runAgenticWaterfall(prompt, globalProvider, maxRetries, onProgress, notepadContent, openFiles, signal, forceProceed, resumeArchitect, modelSelection, apiKeys);
+  }
+
+  async runWaterfall(prompt: string, globalProvider?: string, signal?: AbortSignal) {
+    return this.runAgenticWaterfall(prompt, globalProvider, undefined, undefined, undefined, undefined, signal);
+  }
+
+  async compareModels(
+    messages: ChatMessage[],
+    opts: { model1?: string; provider1?: string; model2?: string; provider2?: string } = {},
+  ) {
+    const p1Name = opts.provider1 || 'gemini';
+    const p2Name = opts.provider2 || 'ollama';
+    const m1 = opts.model1 || undefined;
+    const m2 = opts.model2 || undefined;
+
+    const runOne = async (providerName: string, modelOverride: string | undefined): Promise<string> => {
+      const provider = await AIProviderFactory.getProvider(providerName);
+      const model = modelOverride || provider.defaultModel || 'default';
+      return providerSemaphore.run(() => provider.complete(messages, { model }));
+    };
+
+    const [r1, r2] = await Promise.allSettled([
+      runOne(p1Name, m1),
+      runOne(p2Name, m2),
+    ]);
+
+    return {
+      model1: r1.status === 'fulfilled' ? r1.value : `Error: ${r1.reason?.message || r1.reason}`,
+      model2: r2.status === 'fulfilled' ? r2.value : `Error: ${r2.reason?.message || r2.reason}`,
+    };
+  }
+
+  async indexProject() {
+    return vectorService.indexProject(process.cwd());
+  }
+
+  async deprecateMemory(id: string, reason: string) {
+    return vectorService.deprecateEntry(id, reason);
+  }
+
+  async checkLocalImageStatus() {
+    return localImageService.checkModelAvailability();
+  }
+
+  async checkHealth() {
+    const providers = await AIProviderFactory.getAllProviders();
+    const health: Record<string, string> = {};
+
+    for (const provider of providers) {
+      health[provider.id] = provider.isReady() ? 'connected' : 'disconnected';
+    }
+
+    health.ollama = await this.checkOllamaHealth();
+
+    return {
+      ...health,
+      timestamp: new Date().toISOString()
+    };
+  }
+
+  async getSessionContext() {
+    try {
+      const recent = await vectorService.getRecentEntries(20);
+      const consolidation = recent
+        .filter(m => m.metadata.type === 'memory_consolidation' || m.metadata.type === 'meta_summary')
+        .pop();
+
+      return consolidation ? consolidation.metadata.text : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  private async checkOllamaHealth(): Promise<'connected' | 'disconnected'> {
+    try {
+      const response = await fetch(`${config.OLLAMA_HOST}/api/version`);
+      return response.ok ? 'connected' : 'disconnected';
+    } catch (e) {
+      return 'disconnected';
+    }
+  }
+}
+
+export const aiService = new AIService();

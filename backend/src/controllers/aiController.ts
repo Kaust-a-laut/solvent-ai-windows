@@ -1,0 +1,400 @@
+import { Request, Response } from 'express';
+import { aiService } from '../services/aiService';
+import { WaterfallStep } from '../services/waterfallService';
+import { metaMemoryService } from '../services/metaMemoryService';
+import { taskService } from '../services/taskService';
+import { traceLogger } from '../services/traceLogger';
+import { logger } from '../utils/logger';
+import { createSSEWriter } from '../utils/sseWriter';
+import { z } from 'zod';
+import { createReadStream } from 'fs';
+import { access } from 'fs/promises';
+import path from 'path';
+
+// Zod schemas for request validation
+const chatMessageSchema = z.object({
+  role: z.enum(['user', 'assistant', 'system', 'model']),
+  content: z.string(),
+  image: z.string().nullable().optional()
+});
+
+const chatRequestSchema = z.object({
+  provider: z.string(),
+  model: z.string(),
+  messages: z.array(chatMessageSchema),
+  image: z.object({ data: z.string(), mimeType: z.string() }).nullable().optional(),
+  mode: z.string().optional(),
+  smartRouter: z.boolean().optional(),
+  fallbackModel: z.string().optional(),
+  imageProvider: z.string().optional(),
+  temperature: z.number().optional(),
+  maxTokens: z.number().optional(),
+  apiKeys: z.record(z.string()).optional(),
+  thinkingModeEnabled: z.boolean().optional(),
+  tier: z.enum(['full-agentic', 'code-only']).optional(),
+  traits: z.object({
+    toolUse: z.enum(['strong', 'basic']),
+    multimodal: z.boolean(),
+    contextWindow: z.number(),
+  }).optional(),
+  deviceInfo: z.object({
+    isMobile: z.boolean(),
+    isTablet: z.boolean(),
+    isDesktop: z.boolean(),
+    windowSize: z.object({ width: z.number(), height: z.number() })
+  }).optional(),
+  notepadContent: z.string().optional(),
+  openFiles: z.array(z.object({ path: z.string(), content: z.string() })).optional(),
+  codingHistory: z.array(chatMessageSchema).optional(),
+  browserContext: z.object({
+    history: z.array(z.string()),
+    lastSearchResults: z.array(z.object({
+      title: z.string(),
+      link: z.string(),
+      snippet: z.string().optional()
+    })).nullable().optional()
+  }).optional(),
+  sessionId: z.string().optional()
+});
+
+const searchRequestSchema = z.object({
+  query: z.string().min(1, 'Query is required'),
+  page: z.number().int().min(1).optional(),
+  expandedQuery: z.string().optional(),
+});
+
+const compareRequestSchema = z.object({
+  messages: z.array(chatMessageSchema),
+  model1: z.string().optional(),
+  provider1: z.string().optional(),
+  model2: z.string().optional(),
+  provider2: z.string().optional(),
+});
+
+const phaseSelectionSchema = z.union([
+  z.enum(['A', 'B']),
+  z.object({ model: z.string(), provider: z.string() })
+]);
+
+const modelSelectionSchema = z.object({
+  planner: phaseSelectionSchema,
+  executor: phaseSelectionSchema,
+  reviewer: phaseSelectionSchema,
+}).optional();
+
+const waterfallRequestSchema = z.object({
+  prompt: z.string().min(1, 'Prompt is required'),
+  globalProvider: z.string().optional(),
+  notepadContent: z.string().optional(),
+  openFiles: z.array(z.object({ path: z.string(), content: z.string() })).optional(),
+  forceProceed: z.boolean().optional(),
+  modelSelection: modelSelectionSchema,
+  apiKeys: z.record(z.string()).optional(),
+});
+
+const waterfallStepRequestSchema = z.object({
+  step: z.enum([WaterfallStep.PLANNER, WaterfallStep.EXECUTOR, WaterfallStep.REVIEWER]),
+  input: z.string(),
+  context: z.record(z.unknown()).nullable().optional(),
+  globalProvider: z.string().optional()
+});
+
+export class AIController {
+  static async chat(req: Request, res: Response) {
+    try {
+      const parseResult = chatRequestSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        logger.error(`[AIController] Invalid request body: ${JSON.stringify(req.body)}`);
+        logger.error(`[AIController] Validation errors: ${JSON.stringify(parseResult.error.errors)}`);
+        return res.status(400).json({
+          error: 'Invalid request body',
+          details: parseResult.error.errors
+        });
+      }
+      const result = await aiService.processChat(parseResult.data);
+      res.json(result);
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      logger.error(`[AIController] Chat Error: ${err.message}`);
+      const status = 'status' in err && typeof err.status === 'number' ? err.status : 500;
+      const message = err.message || 'Chat processing failed';
+      res.status(status).json({ error: message });
+    }
+  }
+
+  static async generateImage(req: Request, res: Response) {
+    try {
+      const imageSchema = z.object({
+        prompt: z.string(),
+        model: z.string().optional(),
+        provider: z.string().optional(),
+        localUrl: z.string().optional(),
+        apiKeys: z.record(z.string()).optional()
+      });
+      const { prompt, model, provider, localUrl, apiKeys } = imageSchema.parse(req.body);
+      const result = await aiService.generateImage(prompt, model, apiKeys?.gemini, provider, { localUrl, apiKeys });
+      res.json(result);
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      logger.error(`[AIController] Image Generation Error: ${err.message}`);
+      res.status(500).json({ error: err.message || 'Image generation failed' });
+    }
+  }
+
+  static async search(req: Request, res: Response) {
+    try {
+      const parseResult = searchRequestSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({
+          error: 'Invalid request body',
+          details: parseResult.error.errors
+        });
+      }
+      const { query, page, expandedQuery } = parseResult.data;
+      const { intelligentSearchService } = await import('../services/intelligentSearchService');
+      const result = await intelligentSearchService.search(query, page, expandedQuery);
+      res.json(result);
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      res.status(500).json({ error: err.message });
+    }
+  }
+
+  static async compare(req: Request, res: Response) {
+    try {
+      const parseResult = compareRequestSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ 
+          error: 'Invalid request body', 
+          details: parseResult.error.errors 
+        });
+      }
+      const { messages, model1, provider1, model2, provider2 } = parseResult.data;
+      const result = await aiService.compareModels(messages, {
+        model1, provider1, model2, provider2,
+      });
+      res.json(result);
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      res.status(500).json({ error: err.message });
+    }
+  }
+
+  static async waterfall(req: Request, res: Response) {
+    const sse = createSSEWriter(req, res);
+
+    try {
+      const parseResult = waterfallRequestSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        sse.send({ phase: 'error', message: 'Invalid request body', details: parseResult.error.errors });
+        sse.end();
+        return;
+      }
+
+      const { prompt, globalProvider, notepadContent, openFiles, forceProceed, modelSelection, apiKeys } = parseResult.data;
+
+      const result = await aiService.runAgenticWaterfall(
+        prompt,
+        globalProvider,
+        undefined,
+        (phase, data) => sse.send({ phase, ...data }),
+        notepadContent,
+        openFiles,
+        sse.signal,
+        forceProceed,
+        undefined,
+        modelSelection,
+        apiKeys
+      );
+
+      sse.send({ phase: 'final', ...result });
+      sse.end();
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      sse.send({ phase: 'error', message: err.message });
+      sse.end();
+    }
+  }
+
+  static async waterfallStep(req: Request, res: Response) {
+    try {
+      const parseResult = waterfallStepRequestSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        return res.status(400).json({ 
+          error: 'Invalid request body', 
+          details: parseResult.error.errors 
+        });
+      }
+      const { step, input, context, globalProvider } = parseResult.data;
+      const result = await aiService.runWaterfallStep(step as WaterfallStep, input, (context ?? undefined) as import('../types/waterfall').WaterfallContext | undefined, globalProvider);
+      res.json(result);
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      res.status(500).json({ error: err.message });
+    }
+  }
+
+  static async indexProject(_req: Request, res: Response) {
+    try {
+      // Use the task service to dispatch the indexing job asynchronously
+      const jobId = await taskService.dispatchIndexingJob(process.cwd());
+      res.json({
+        status: 'queued',
+        jobId,
+        message: 'Project indexing has been queued for processing'
+      });
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      res.status(500).json({ error: err.message });
+    }
+  }
+
+  static async listModels(_req: Request, res: Response) {
+    try {
+      const result = await aiService.listAvailableModels();
+      res.json(result);
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      res.status(500).json({ error: err.message });
+    }
+  }
+
+  static async checkLocalImageStatus(_req: Request, res: Response) {
+    try {
+      const result = await aiService.checkLocalImageStatus();
+      res.json(result);
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      res.status(500).json({ error: err.message });
+    }
+  }
+
+  static async checkHealth(_req: Request, res: Response) {
+    try {
+      const result = await aiService.checkHealth();
+      res.json(result);
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      res.status(500).json({ error: err.message });
+    }
+  }
+
+  /**
+   * SSE endpoint for agent chat with real-time tool visibility.
+   * Streams AgentEvent objects as SSE `data:` lines.
+   */
+  static async agentChat(req: Request, res: Response) {
+    const sse = createSSEWriter(req, res);
+
+    try {
+      const parseResult = chatRequestSchema.safeParse(req.body);
+      if (!parseResult.success) {
+        sse.send({ type: 'error', message: 'Invalid request body' });
+        sse.end();
+        return;
+      }
+
+      const data = { ...parseResult.data, signal: sse.signal };
+
+      await aiService.processAgentChat(data, (event) => sse.send(event));
+
+      sse.send({ type: 'done' });
+      sse.end();
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      sse.send({ type: 'error', message: err.message });
+      sse.end();
+    }
+  }
+
+  static async synthesizeMemory(_req: Request, res: Response) {
+    try {
+      const summary = await metaMemoryService.synthesizeStateOfTheUnion();
+      res.json({ status: 'success', summary });
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      res.status(500).json({ error: err.message });
+    }
+  }
+
+  static async updateTraceOutcome(req: Request, res: Response) {
+    const ip = req.ip || req.socket?.remoteAddress || '';
+    const isLocal = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+    if (!isLocal) {
+      res.status(403).json({ error: 'This endpoint is only accessible from localhost.' });
+      return;
+    }
+
+    const id = req.params['id'];
+    if (!id) {
+      res.status(400).json({ error: 'Missing trace id parameter.' });
+      return;
+    }
+    const validOutcomes = ['correction', 'crystallized', 'rerequested', 'accepted'] as const;
+    const schema = z.object({ outcome: z.enum(validOutcomes) });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ error: `outcome must be one of: ${validOutcomes.join(', ')}` });
+      return;
+    }
+
+    try {
+      await traceLogger.updateOutcome(id, parsed.data.outcome);
+      res.json({ success: true });
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      res.status(500).json({ error: err.message });
+    }
+  }
+
+  static async getTraces(req: Request, res: Response) {
+    const TRACE_FILE_PATH = path.join(process.cwd(), '..', 'backend', '.solvent_retrieval_traces.jsonl');
+    const ALT_TRACE_FILE_PATH = path.join(process.cwd(), '.solvent_retrieval_traces.jsonl');
+
+    const ip = req.ip || req.socket?.remoteAddress || '';
+    const isLocal = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+    if (!isLocal) {
+      res.status(403).json({ error: 'This endpoint is only accessible from localhost.' });
+      return;
+    }
+
+    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+    const queryFilter = (req.query.query as string || '').toLowerCase();
+    const modeFilter = (req.query.mode as string || '');
+    const sinceFilter = req.query.since ? new Date(req.query.since as string).getTime() : 0;
+    const outcomeFilter = req.query.outcome as string || '';
+    const sessionFilter = req.query.sessionId as string || '';
+
+    let filePath = TRACE_FILE_PATH;
+    try {
+      await access(filePath);
+    } catch {
+      try {
+        await access(ALT_TRACE_FILE_PATH);
+        filePath = ALT_TRACE_FILE_PATH;
+      } catch {
+        res.json([]);
+        return;
+      }
+    }
+
+    try {
+      const allTraces = await traceLogger.readTraces(filePath);
+      // Newest first
+      const reversed = [...allTraces].reverse();
+
+      const results = reversed.filter(trace => {
+        if (queryFilter && !trace.query?.toLowerCase().includes(queryFilter)) return false;
+        if (modeFilter && trace.mode !== modeFilter) return false;
+        if (sinceFilter && new Date(trace.ts).getTime() < sinceFilter) return false;
+        if (outcomeFilter && trace.outcome !== outcomeFilter) return false;
+        if (sessionFilter && trace.sessionId !== sessionFilter) return false;
+        return true;
+      }).slice(0, limit);
+
+      res.json(results);
+    } catch {
+      res.status(500).json({ error: 'Failed to read trace file.' });
+    }
+  }
+}

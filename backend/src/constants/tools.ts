@@ -1,0 +1,458 @@
+/**
+ * Centralized tool definitions for AI providers.
+ * This ensures consistency across different services (Gemini, Groq, OpenRouter, etc.)
+ * and reduces code duplication.
+ */
+
+export const TOOL_DEFINITIONS = [
+  {
+    name: "read_file",
+    description: "Read the contents of a file in the project.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        path: { type: "STRING", description: "Relative path to file from project root" }
+      },
+      required: ["path"]
+    }
+  },
+  {
+    name: "write_file",
+    description: "Write or update a file in the project.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        path: { type: "STRING", description: "Relative path to file from project root" },
+        content: { type: "STRING", description: "The content to write to the file" }
+      },
+      required: ["path", "content"]
+    }
+  },
+  {
+    name: "list_files",
+    description: "List files and directories in a specific path.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        path: { type: "STRING", description: "Relative path to directory (defaults to .)" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "run_shell",
+    description: "Execute a shell command in the project root safely.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        command: { type: "STRING", description: "The bash command to run" }
+      },
+      required: ["command"]
+    }
+  },
+  {
+    name: "web_search",
+    description: "Search the web for real-time information using Serper.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        query: { type: "STRING", description: "The search query" }
+      },
+      required: ["query"]
+    }
+  },
+  {
+    name: "fetch_web_content",
+    description: "Fetch the content of a specific URL.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        url: { type: "STRING", description: "The URL to fetch" }
+      },
+      required: ["url"]
+    }
+  },
+  {
+    name: "capture_ui",
+    description: "Capture the current UI state of the IDE as a screenshot and base64 string.",
+    parameters: {
+      type: "OBJECT",
+      properties: {},
+      required: []
+    }
+  },
+  {
+    name: "get_ui_text",
+    description: "Extract the structural text and summary of the current workspace.",
+    parameters: {
+      type: "OBJECT",
+      properties: {},
+      required: []
+    }
+  },
+  {
+    name: "resize_image",
+    description: "Resize an image file.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        path: { type: "STRING", description: "Path to the image" },
+        width: { type: "NUMBER", description: "New width" },
+        height: { type: "NUMBER", description: "New height" }
+      },
+      required: ["path"]
+    }
+  },
+  {
+    name: "apply_image_filter",
+    description: "Apply a visual filter to an image.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        path: { type: "STRING", description: "Path to the image" },
+        filter: { 
+          type: "STRING", 
+          description: "Filter to apply",
+          enum: ["grayscale", "sepia", "blur", "sharpen"]
+        }
+      },
+      required: ["path", "filter"]
+    }
+  },
+  {
+    name: "crystallize_memory",
+    description: "Permanently store a key insight, rule, or solution into the project's long-term vector memory and visual knowledge graph.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        content: { type: "STRING", description: "The core insight or rule to remember." },
+        type: { 
+          type: "STRING", 
+          description: "Category of memory",
+          enum: ["permanent_rule", "technical_fact", "architectural_decision", "solution_pattern"]
+        },
+        tags: { 
+          type: "ARRAY", 
+          description: "List of related keywords/concepts",
+          items: { type: "STRING" }
+        }
+      },
+      required: ["content", "type"]
+    }
+  },
+  {
+    name: "invalidate_memory",
+    description: "Mark a specific memory as deprecated or incorrect when a contradiction is found.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        memoryId: { type: "STRING", description: "The ID of the memory to invalidate." },
+        reason: { type: "STRING", description: "Why this memory is being invalidated." },
+        replacementId: { type: "STRING", description: "Optional ID of the new memory that replaces it." }
+      },
+      required: ["memoryId", "reason"]
+    }
+  },
+  {
+    name: "read_core_memory",
+    description: "Read all entries in your persistent core memory. Core memory is always visible to you in the system prompt, but this tool lets you get the raw data.",
+    parameters: {
+      type: "OBJECT",
+      properties: {}
+    }
+  },
+  {
+    name: "write_core_memory",
+    description: "Write a key-value pair to your persistent core memory. Core memory is always included in your context. Use it for facts you need across every conversation: user identity, active project goals, key decisions. Max 10 slots.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        key: { type: "STRING", description: "The memory key (e.g., user_name, active_goal, project_stack)" },
+        value: { type: "STRING", description: "The value to store (keep concise — this consumes context tokens every request)" }
+      },
+      required: ["key", "value"]
+    }
+  },
+  {
+    name: "delete_core_memory",
+    description: "Remove a key from core memory to free a slot.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        key: { type: "STRING", description: "The key to remove" }
+      },
+      required: ["key"]
+    }
+  },
+  {
+    name: "fetch_preview_source",
+    description: "Fetch the current HTML source of the running app preview to inspect its rendered structure and content. Use the preview URL provided in the system prompt.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        url: { type: "STRING", description: "The full preview URL (e.g. http://localhost:3000) — use the URL from the system prompt" }
+      },
+      required: ["url"]
+    }
+  },
+  // --- Frontend-deferred tools (executed in the browser, not on the server) ---
+  {
+    name: "ide_open_file",
+    description: "Open a file in the IDE editor tab. Use this to show the user a specific file.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        path: { type: "STRING", description: "Relative path to the file to open in the editor" }
+      },
+      required: ["path"]
+    }
+  },
+  {
+    name: "ide_show_diff",
+    description: "Present a side-by-side diff in the IDE for user approval before applying changes.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        path: { type: "STRING", description: "Relative path to the file being modified" },
+        content: { type: "STRING", description: "The proposed new content for the file" },
+        description: { type: "STRING", description: "Brief description of the changes" }
+      },
+      required: ["path", "content"]
+    }
+  },
+  {
+    name: "ide_run_in_sandbox",
+    description: "Run a command in the browser's WebContainer sandbox (Node.js environment). Use this for safe execution in an isolated environment.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        command: { type: "STRING", description: "The command to run in the sandbox (e.g. 'node index.js', 'npm test')" }
+      },
+      required: ["command"]
+    }
+  },
+  // --- Preview tools ---
+  {
+    name: "get_console_logs",
+    description: "Get recent console logs from the preview. Call this to dig into specific errors beyond the push summary.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        filter: { type: "STRING", description: "Filter by level: 'error', 'warn', or 'log'", enum: ["error", "warn", "log"] },
+        limit: { type: "NUMBER", description: "Max entries to return (default 20)" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "get_selected_element",
+    description: "Get the element the user clicked in the preview. Returns the element info and clears the selection.",
+    parameters: {
+      type: "OBJECT",
+      properties: {},
+      required: []
+    }
+  },
+  {
+    name: "get_file_outline",
+    description: "Return the structure of a file (top-level functions, classes, exports with line numbers) without reading full content. Use before read_file on large files to locate what you need.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        path: { type: "STRING", description: "Relative path to the file" }
+      },
+      required: ["path"]
+    }
+  },
+  {
+    name: "grep_files",
+    description: "Search file contents for a pattern across the project. Returns up to 30 matches with file:line context. Use to find where a function is defined, a component is imported, etc.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        pattern: { type: "STRING", description: "The text or regex pattern to search for" },
+        path: { type: "STRING", description: "Directory to search in (default: project root)" },
+        include: { type: "STRING", description: "Glob for file types, e.g. '*.tsx' (default: *.{ts,tsx,js,jsx,css,json,md})" }
+      },
+      required: ["pattern"]
+    }
+  },
+  {
+    name: "edit_file",
+    description: "Make a targeted edit to an existing file by finding an exact string and replacing it. Safer than write_file for modifying existing code. Fails if old_content is not found or appears more than once.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        path: { type: "STRING", description: "Relative path to the file" },
+        old_content: { type: "STRING", description: "The exact text to find (must be unique in the file)" },
+        new_content: { type: "STRING", description: "The replacement text" }
+      },
+      required: ["path", "old_content", "new_content"]
+    }
+  },
+  {
+    name: "create_file",
+    description: "Create a brand-new file. Errors if the file already exists — use write_file or edit_file for existing files.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        path: { type: "STRING", description: "Relative path for the new file" },
+        content: { type: "STRING", description: "Initial file content" }
+      },
+      required: ["path", "content"]
+    }
+  },
+  {
+    name: "delete_file",
+    description: "Delete a file from the project.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        path: { type: "STRING", description: "Relative path to the file to delete" }
+      },
+      required: ["path"]
+    }
+  },
+  {
+    name: "move_file",
+    description: "Move or rename a file.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        from: { type: "STRING", description: "Current relative path" },
+        to: { type: "STRING", description: "New relative path" }
+      },
+      required: ["from", "to"]
+    }
+  },
+  {
+    name: "replace_in_files",
+    description: "Replace all occurrences of a string across multiple project files. Use for bulk renames (e.g. renaming a component everywhere it is imported).",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        pattern: { type: "STRING", description: "Exact string to find and replace" },
+        replacement: { type: "STRING", description: "Replacement text" },
+        glob: { type: "STRING", description: "File pattern to limit scope, e.g. '*.tsx' (default: *.{ts,tsx,js,jsx,css,json})" }
+      },
+      required: ["pattern", "replacement"]
+    }
+  },
+  {
+    name: "run_tests",
+    description: "Run TypeScript type checking or tests. Defaults to tsc --noEmit. Pass a command like 'npm test' or 'npm run lint' for other checks. Output capped at 4KB.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        command: { type: "STRING", description: "Command to run (default: npx tsc --noEmit --pretty false)" },
+        cwd: { type: "STRING", description: "Working directory relative to project root (e.g. 'projects/1')" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "get_errors",
+    description: "Get current TypeScript errors as structured JSON. Each error has file, line, col, message. Use after editing files to verify changes compile.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        cwd: { type: "STRING", description: "Working directory relative to project root (e.g. 'projects/1')" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "install_package",
+    description: "Install one or more npm packages into the project.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        packages: { type: "ARRAY", items: { type: "STRING" }, description: "Package names to install" },
+        cwd: { type: "STRING", description: "Project directory relative to project root (e.g. 'projects/1')" }
+      },
+      required: ["packages"]
+    }
+  },
+  {
+    name: "git_status",
+    description: "Show the current git status (staged and unstaged changes).",
+    parameters: { type: "OBJECT", properties: {}, required: [] }
+  },
+  {
+    name: "git_diff",
+    description: "Show the git diff for all changes or a specific file. Use to review what changed in the current session.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        file: { type: "STRING", description: "Optional: path to a specific file to diff" }
+      },
+      required: []
+    }
+  },
+  {
+    name: "git_commit",
+    description: "Stage all changes and commit them with a message.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        message: { type: "STRING", description: "The commit message" }
+      },
+      required: ["message"]
+    }
+  },
+  {
+    name: "get_project_info",
+    description: "Read the package.json of a project directory to get its name, framework, scripts, and dependencies.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        path: { type: "STRING", description: "Project directory relative to project root (e.g. 'projects/1')" }
+      },
+      required: []
+    }
+  }
+];
+
+/**
+ * Transforms tool definitions for Google Gemini format.
+ */
+export function getGeminiTools() {
+  return [
+    {
+      functionDeclarations: TOOL_DEFINITIONS.map(tool => ({
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters
+      }))
+    }
+  ];
+}
+
+/**
+ * Transforms tool definitions for OpenAI-compatible providers (Groq, OpenRouter, Deepseek).
+ */
+export function getOpenAITools() {
+  return TOOL_DEFINITIONS.map(tool => ({
+    type: "function",
+    function: {
+      name: tool.name,
+      description: tool.description,
+      parameters: {
+        type: "object",
+        properties: Object.keys(tool.parameters.properties).reduce((acc: Record<string, unknown>, key) => {
+          const props = tool.parameters.properties as Record<string, { type: string; description: string; enum?: unknown[]; items?: { type: string } }>;
+          const prop = props[key];
+          if (!prop) return acc;
+          acc[key] = {
+            type: prop.type.toLowerCase(),
+            description: prop.description,
+            ...(prop.enum ? { enum: prop.enum } : {}),
+            ...(prop.items ? { items: { type: prop.items.type.toLowerCase() } } : {})
+          };
+          return acc;
+        }, {}),
+        required: tool.parameters.required
+      }
+    }
+  }));
+}
