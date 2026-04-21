@@ -19,15 +19,15 @@ export const MiniTerminal: React.FC<{ lines: string[] }> = ({ lines }) => {
   return (
     <div
       ref={ref}
-      className="flex-1 bg-black/40 rounded-lg border border-white/5 p-2 overflow-y-auto no-scrollbar font-mono text-[11px] leading-[1.6] min-h-0"
+      className="flex-1 bg-black/40 rounded-xl border border-white/[0.04] p-2.5 overflow-y-auto fluid-scrollbar font-mono text-[10px] leading-[1.6] min-h-0"
     >
       {tail.length === 0 ? (
-        <div className="h-full flex items-center justify-center opacity-20">
-          <span className="text-[11px] font-black uppercase">Terminal empty</span>
+        <div className="h-full flex items-center justify-center opacity-15">
+          <span className="text-[10px] font-medium uppercase tracking-wider">Terminal empty</span>
         </div>
       ) : (
         tail.map((line, i) => {
-          const colorCls = TERMINAL_COLOR_MAP.find(([re]) => re.test(line))?.[1] || 'text-slate-300';
+          const colorCls = TERMINAL_COLOR_MAP.find(([re]) => re.test(line))?.[1] || 'text-slate-400';
           return (
             <div key={i} className={cn('whitespace-pre-wrap break-all', colorCls)}>
               {line}

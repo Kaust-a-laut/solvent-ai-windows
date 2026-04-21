@@ -10,8 +10,10 @@ import { FIREWORKS_ALL_MODELS, FIREWORKS_CHAT_MODELS } from './fireworksModels';
 // ── Ollama Cloud models ──────────────────────────────────────────────────────
 
 export const OLLAMA_CLOUD_CHAT_MODELS = [
-  { label: 'GLM-4.7',              value: 'glm-4.7:cloud' },
+  { label: 'GLM-5.1',              value: 'glm-5.1:cloud' },
   { label: 'GLM-5',                value: 'glm-5:cloud' },
+  { label: 'GLM-4.7',              value: 'glm-4.7:cloud' },
+  { label: 'Kimi K2.6',            value: 'kimi-k2.6:cloud' },
   { label: 'Kimi K2.5',            value: 'kimi-k2.5:cloud' },
   { label: 'Kimi K2 Thinking',     value: 'kimi-k2-thinking:cloud' },
   { label: 'DeepSeek V3.1 (671B)', value: 'deepseek-v3.1:671b-cloud' },

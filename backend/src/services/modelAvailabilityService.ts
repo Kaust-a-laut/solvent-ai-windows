@@ -40,7 +40,7 @@ const PROVIDER_ENDPOINTS: Record<string, { url: string; keyEnv: string; parseMod
     parseModels: (data) => (data.data || []).map((m) => m.id),
   },
   dashscope: {
-    url: 'https://dashscope.aliyuncs.com/compatible-mode/v1/models',
+    url: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models',
     keyEnv: 'DASHSCOPE_API_KEY',
     parseModels: (data) => (data.data || []).map((m) => m.id),
   },

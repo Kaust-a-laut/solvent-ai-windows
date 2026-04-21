@@ -14,7 +14,7 @@ export class DashScopeProviderPlugin extends BaseOpenAIService implements IProvi
   id = 'dashscope';
   description = 'Alibaba Cloud DashScope — Qwen3-Coder, Qwen3.5, Qwen-Max and more';
   version = '1.0.0';
-  defaultModel = 'qwen3-coder-plus';
+  defaultModel = 'qwen3.6-plus';
   capabilities = {
     supportsVision: false,
     supportsStreaming: false,

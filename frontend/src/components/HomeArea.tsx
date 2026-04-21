@@ -13,7 +13,7 @@ export const HomeArea = () => {
 
   return (
     <div className="flex-1 min-h-0 relative bg-transparent z-10">
-      <div className="absolute inset-0 overflow-y-scroll scrollbar-thin fluid-scrollbar p-6 md:p-10 lg:p-12 pt-2 md:pt-4 lg:pt-6">
+      <div className="absolute inset-0 overflow-y-scroll scrollbar-thin fluid-scrollbar p-6 md:p-10 lg:p-12 pt-2 md:pt-4 lg:pt-6 will-change-scroll [transform:translateZ(0)]">
       <div className="max-w-[1400px] mx-auto space-y-4 md:space-y-6 relative">
         
         {/* Massive Background Beaker Logo - Using new Logo component */}
@@ -37,9 +37,9 @@ export const HomeArea = () => {
                 className="w-[200px] h-[200px] md:w-full md:h-auto md:aspect-square relative opacity-[0.18] md:opacity-[0.28]"
               >
                 {/* Enhanced ambient glow layers */}
-                <div className="absolute inset-x-16 inset-y-8 bg-jb-purple/25 blur-[80px] rounded-full animate-pulse" />
-                <div className="absolute inset-x-24 inset-y-16 bg-jb-orange/15 blur-[60px] rounded-full animate-pulse [animation-delay:1s]" />
-                <div className="absolute inset-x-20 inset-y-12 bg-jb-accent/10 blur-[70px] rounded-full animate-pulse [animation-delay:0.5s]" />
+                <div className="absolute inset-x-16 inset-y-8 bg-jb-purple/25 blur-[80px] rounded-full [transform:translateZ(0)]" />
+                <div className="absolute inset-x-24 inset-y-16 bg-jb-orange/15 blur-[60px] rounded-full [transform:translateZ(0)]" />
+                <div className="absolute inset-x-20 inset-y-12 bg-jb-accent/10 blur-[70px] rounded-full [transform:translateZ(0)]" />
 
                 <Logo size="xl" variant="hero" animated={true} />
               </motion.div>
@@ -117,7 +117,7 @@ export const HomeArea = () => {
         </div>
 
         {/* Mode Showcase Strip */}
-        <div className="border-t border-white/[0.06] pt-16 md:pt-24 space-y-24 md:space-y-32 pb-16">
+        <div className="border-t border-white/[0.06] pt-16 md:pt-24 space-y-24 md:space-y-32 pb-16 [content-visibility:auto] [contain-intrinsic-size:auto_3000px]">
           <div className="text-center space-y-2">
             <p className="text-[11px] font-black uppercase tracking-[0.35em] text-white/20">Explore the suite</p>
             <h2 className="text-2xl md:text-3xl font-black text-white/60 tracking-tight">Every tool. One surface.</h2>
@@ -131,8 +131,9 @@ export const HomeArea = () => {
                 key={item.id}
                 initial={{ opacity: 0, y: 40 }}
                 whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true, margin: '-80px' }}
-                transition={{ duration: 0.6, ease: 'easeOut' }}
+                viewport={{ once: true, margin: '-80px', amount: 0.1 }}
+                transition={{ duration: 0.5, ease: [0.25, 0.1, 0.25, 1] }}
+                style={{ willChange: 'opacity, transform' }}
                 className={`flex flex-col lg:flex-row gap-10 lg:gap-16 xl:gap-24 items-center ${isReversed ? 'lg:flex-row-reverse' : ''}`}
               >
                 {/* Visual panel */}

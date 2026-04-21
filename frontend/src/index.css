@@ -331,7 +331,12 @@
     );
   }
 
-  /* Fluid Scrollbar - Gradient scrollbar thumb */
+  /* Fluid Scrollbar - Smooth scrolling + GPU compositing */
+  .fluid-scrollbar {
+    scroll-behavior: smooth;
+    -webkit-overflow-scrolling: touch;
+  }
+
   .fluid-scrollbar::-webkit-scrollbar {
     width: 4px;
   }
@@ -357,6 +362,32 @@
       rgba(157, 91, 210, 0.4),
       rgba(251, 146, 60, 0.35)
     );
+  }
+
+  /* Command Center card system */
+  .cc-card {
+    @apply rounded-xl bg-white/[0.015] border border-white/[0.04] transition-all duration-200;
+  }
+  .cc-card:hover {
+    @apply bg-white/[0.03] border-white/[0.08];
+  }
+  .cc-card-accent-emerald {
+    @apply border-l-2 border-l-emerald-500/30;
+  }
+  .cc-card-accent-purple {
+    border-left: 2px solid rgba(157, 91, 210, 0.3);
+  }
+  .cc-card-accent-accent {
+    border-left: 2px solid rgba(60, 113, 247, 0.3);
+  }
+  .cc-card-accent-amber {
+    @apply border-l-2 border-l-amber-500/30;
+  }
+  .cc-card-accent-rose {
+    @apply border-l-2 border-l-rose-500/30;
+  }
+  .cc-section-heading {
+    @apply text-[11px] font-semibold uppercase tracking-[0.15em] text-white/40;
   }
 
   /* Frosted Glass Depth Layers */

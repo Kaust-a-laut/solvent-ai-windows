@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import {
-  X, LayoutGrid, ExternalLink,
+  X, ExternalLink,
   Settings, Brain, Sparkles,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
@@ -11,6 +11,7 @@ import { API_BASE_URL } from '../lib/config';
 import { socket } from '../lib/socket';
 
 import { LocalOverseerDecision, LocalActiveMission } from './pip/types';
+import { PipTabBar, PipView } from './pip/PipTabBar';
 import { PipDashView } from './pip/PipDashView';
 import { PipNotesView } from './pip/PipNotesView';
 import { PipOverseerView } from './pip/PipOverseerView';
@@ -19,7 +20,15 @@ import { PipWaterfallView } from './pip/PipWaterfallView';
 import { PipCodeView } from './pip/PipCodeView';
 import { PipIntelView } from './pip/PipIntelView';
 
-type PipView = 'dash' | 'notes' | 'overseer' | 'missions' | 'waterfall' | 'code' | 'intel';
+const VIEW_LABELS: Record<PipView, string> = {
+  dash: 'Home',
+  overseer: 'Overseer',
+  missions: 'Missions',
+  waterfall: 'Flow',
+  code: 'Code',
+  intel: 'Intel',
+  notes: 'Notes',
+};
 
 export const NotepadPiP = ({ onClose, onDetach }: { onClose?: () => void; onDetach?: () => void } = {}) => {
   const {
@@ -37,22 +46,18 @@ export const NotepadPiP = ({ onClose, onDetach }: { onClose?: () => void; onDeta
   } = useAppStore();
 
   const [view, setView] = useState<PipView>('dash');
-  const [isCompact, setIsCompact] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
 
-  // Overseer state — local since PiP is a separate Electron window
   const [overseerDecisions, setOverseerDecisions] = useState<LocalOverseerDecision[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
   const [isThinking, setIsThinking] = useState(false);
 
-  // Missions state
   const [activeMissions, setActiveMissions] = useState<LocalActiveMission[]>([]);
   const [missionGoal, setMissionGoal] = useState('');
   const [missionTemplate, setMissionTemplate] = useState('consultation');
   const [launchingMission, setLaunchingMission] = useState(false);
   const [expandedMission, setExpandedMission] = useState<string | null>(null);
 
-  // Socket listeners — wired directly since PiP has its own socket
   useEffect(() => {
     const handleOverseerDecision = (d: Record<string, unknown>) => {
       const decision: LocalOverseerDecision = {
@@ -103,7 +108,6 @@ export const NotepadPiP = ({ onClose, onDetach }: { onClose?: () => void; onDeta
     };
   }, [view, setSupervisorInsight]);
 
-  // Reset unread when switching to overseer
   useEffect(() => {
     if (view === 'overseer') setUnreadCount(0);
   }, [view]);
@@ -157,123 +161,126 @@ export const NotepadPiP = ({ onClose, onDetach }: { onClose?: () => void; onDeta
     finally { setLaunchingMission(false); }
   }, [missionGoal, missionTemplate]);
 
-  const openLocalView = (v: PipView) => setView(v);
   const launchInMainApp = (mode: string) => setCurrentMode(mode);
-
   const activeMissionCount = activeMissions.filter(m => m.status === 'queued' || m.status === 'active').length;
 
-  void isCompact; // reserved for future compact mode UI
-
   return (
-    <div className={cn(
-      "h-full w-full flex flex-col bg-[#050508] text-slate-300 border border-white/10 overflow-hidden font-sans transition-all duration-300",
-      isCompact ? "p-1" : "p-0"
-    )}>
-      {/* Header */}
+    <div className="h-full w-full flex flex-col bg-[#050508] text-slate-300 border border-white/[0.06] overflow-hidden font-sans">
+      {/* Zone A: Header */}
       <div
         style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
-        className="drag-handle flex items-center justify-between px-3 py-2 bg-[#0a0a0f] border-b border-white/5 cursor-move"
+        className="drag-handle flex items-center justify-between px-3 py-2 bg-[#0a0a0f] border-b border-white/[0.06] cursor-move shrink-0"
       >
-        <div className="flex items-center gap-2">
-          <div className="w-2 h-2 rounded-full bg-jb-purple animate-pulse shadow-[0_0_10px_rgba(139,92,246,0.5)]" />
-          <span className="text-[11px] font-black uppercase tracking-[0.3em] text-white/70">Solvent</span>
-          {activeMissionCount > 0 && (
-            <span className="px-1.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-400 text-[11px] font-black">
-              {activeMissionCount} active
-            </span>
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="w-4 h-4 rounded-sm bg-gradient-to-br from-jb-accent to-jb-purple shrink-0" />
+          <span className="text-[10px] font-semibold uppercase tracking-[0.25em] text-white/50">Solvent</span>
+          {view !== 'dash' && (
+            <>
+              <span className="text-[10px] text-white/10">/</span>
+              <span className="text-[10px] font-medium text-white/30">{VIEW_LABELS[view]}</span>
+            </>
           )}
         </div>
 
-        <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-          {view !== 'dash' && (
-            <button
-              onClick={() => openLocalView('dash')}
-              className="p-1.5 rounded-md text-slate-400 hover:text-white transition-all"
-              title="Dashboard"
-            >
-              <LayoutGrid size={12} />
-            </button>
-          )}
+        <div className="flex items-center gap-0.5" style={{ WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
           <button
             onClick={() => setShowSettings(!showSettings)}
-            className={cn("p-1.5 rounded-md transition-all", showSettings ? "text-white bg-white/10" : "text-slate-400 hover:text-white")}
+            className={cn(
+              "p-1.5 rounded-md transition-all hover:bg-white/[0.06]",
+              showSettings ? "text-white bg-white/[0.08]" : "text-slate-500 hover:text-white"
+            )}
             title="Settings"
           >
-            <Settings size={12} />
+            <Settings size={13} />
           </button>
           {onDetach && (
             <button
               onClick={onDetach}
-              className="p-1.5 rounded-md text-slate-400 hover:text-jb-orange transition-all"
+              className="p-1.5 rounded-md text-slate-500 hover:text-jb-orange hover:bg-white/[0.06] transition-all"
               title="Detach to floating window"
             >
-              <ExternalLink size={12} />
+              <ExternalLink size={13} />
             </button>
           )}
           <button
             onClick={() => onClose ? onClose() : window.close()}
-            className="p-1.5 text-slate-400 hover:text-red-400 transition-all"
+            className="p-1.5 rounded-md text-slate-500 hover:text-red-400 hover:bg-white/[0.06] transition-all"
           >
-            <X size={12} />
+            <X size={13} />
           </button>
         </div>
       </div>
 
-      {/* Main Content */}
-      <div className="flex-1 overflow-hidden flex flex-col p-0 gap-0 relative">
+      {/* Zone B: Content */}
+      <div className="flex-1 overflow-hidden flex flex-col relative min-h-0">
         {/* Settings Overlay */}
         <AnimatePresence>
           {showSettings && (
-            <motion.div
-              initial={{ opacity: 0, y: -10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -10 }}
-              className="absolute top-3 left-3 right-3 z-[100] glass-panel rounded-xl border border-white/10 shadow-2xl p-3 flex flex-col gap-2 bg-[#0a0a0f]/95"
-            >
-              <div className="flex items-center justify-between mb-1">
-                <span className="text-[11px] font-black uppercase text-white tracking-widest">Settings</span>
-                <button onClick={() => setShowSettings(false)}><X size={10} /></button>
-              </div>
-              <div className="space-y-1">
-                <button
-                  onClick={() => setThinkingModeEnabled(!thinkingModeEnabled)}
-                  className={cn(
-                    "w-full flex items-center justify-between p-2 rounded-lg text-[11px] font-black uppercase transition-all",
-                    thinkingModeEnabled ? "bg-jb-purple/20 text-jb-purple" : "bg-white/5 text-slate-300 hover:text-white"
-                  )}
-                >
-                  <div className="flex items-center gap-2"><Brain size={12} /><span>Deep Thinking</span></div>
-                  <div className={cn("w-2 h-2 rounded-full", thinkingModeEnabled ? "bg-jb-purple shadow-[0_0_8px_rgba(157,91,210,1)]" : "bg-slate-800")} />
-                </button>
-                <button
-                  onClick={() => setAuraMode(auraMode === 'off' ? 'organic' : 'off')}
-                  className={cn(
-                    "w-full flex items-center justify-between p-2 rounded-lg text-[11px] font-black uppercase transition-all",
-                    auraMode !== 'off' ? "bg-jb-orange/20 text-jb-orange" : "bg-white/5 text-slate-300 hover:text-white"
-                  )}
-                >
-                  <div className="flex items-center gap-2"><Sparkles size={12} /><span>Visual Effects</span></div>
-                  <div className={cn("w-2 h-2 rounded-full", auraMode !== 'off' ? "bg-jb-orange shadow-[0_0_8px_rgba(251,146,60,1)]" : "bg-slate-800")} />
-                </button>
-                <div className="pt-2 mt-2 border-t border-white/5 flex flex-col gap-1">
-                  <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest ml-1">AI Provider</span>
-                  <div className="flex gap-1">
-                    {(['cloud', 'local', 'auto'] as const).map(p => (
-                      <button
-                        key={p}
-                        onClick={() => setGlobalProvider(p)}
-                        className={cn(
-                          "flex-1 py-1.5 rounded-md text-[11px] font-black uppercase transition-all border",
-                          globalProvider === p ? "bg-white text-black border-white" : "bg-black/40 text-slate-300 border-white/5 hover:border-white/20"
-                        )}
-                      >
-                        {p}
-                      </button>
-                    ))}
+            <>
+              <motion.div
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.15 }}
+                className="absolute inset-0 bg-black/40 backdrop-blur-sm z-[99]"
+                onClick={() => setShowSettings(false)}
+              />
+              <motion.div
+                initial={{ opacity: 0, y: -8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                transition={{ duration: 0.15 }}
+                className="absolute top-3 left-3 right-3 z-[100] rounded-xl border border-white/[0.08] shadow-[0_8px_32px_rgba(0,0,0,0.5)] p-3 flex flex-col gap-2 bg-[#0a0a0f]/95 backdrop-blur-2xl"
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <span className="cc-section-heading">Settings</span>
+                  <button onClick={() => setShowSettings(false)} className="text-slate-500 hover:text-white transition-colors">
+                    <X size={12} />
+                  </button>
+                </div>
+                <div className="space-y-1.5">
+                  <button
+                    onClick={() => setThinkingModeEnabled(!thinkingModeEnabled)}
+                    className={cn(
+                      "w-full flex items-center justify-between px-3 py-2 rounded-lg text-[11px] font-semibold uppercase tracking-wider transition-all",
+                      thinkingModeEnabled ? "bg-jb-purple/15 text-jb-purple" : "bg-white/[0.03] text-slate-400 hover:text-white"
+                    )}
+                  >
+                    <div className="flex items-center gap-2"><Brain size={13} /><span>Deep Thinking</span></div>
+                    <div className={cn("w-2 h-2 rounded-full transition-all", thinkingModeEnabled ? "bg-jb-purple shadow-[0_0_8px_rgba(157,91,210,0.8)]" : "bg-slate-700")} />
+                  </button>
+                  <button
+                    onClick={() => setAuraMode(auraMode === 'off' ? 'organic' : 'off')}
+                    className={cn(
+                      "w-full flex items-center justify-between px-3 py-2 rounded-lg text-[11px] font-semibold uppercase tracking-wider transition-all",
+                      auraMode !== 'off' ? "bg-jb-orange/15 text-jb-orange" : "bg-white/[0.03] text-slate-400 hover:text-white"
+                    )}
+                  >
+                    <div className="flex items-center gap-2"><Sparkles size={13} /><span>Visual Effects</span></div>
+                    <div className={cn("w-2 h-2 rounded-full transition-all", auraMode !== 'off' ? "bg-jb-orange shadow-[0_0_8px_rgba(251,146,60,0.8)]" : "bg-slate-700")} />
+                  </button>
+                  <div className="pt-2 mt-1 border-t border-white/[0.04] flex flex-col gap-1.5">
+                    <span className="cc-section-heading ml-0.5">AI Provider</span>
+                    <div className="flex gap-1">
+                      {(['cloud', 'local', 'auto'] as const).map(p => (
+                        <button
+                          key={p}
+                          onClick={() => setGlobalProvider(p)}
+                          className={cn(
+                            "flex-1 py-2 rounded-lg text-[10px] font-semibold uppercase tracking-wider transition-all border",
+                            globalProvider === p
+                              ? "bg-white text-black border-white"
+                              : "bg-white/[0.02] text-slate-400 border-white/[0.04] hover:border-white/[0.12]"
+                          )}
+                        >
+                          {p}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
-              </div>
-            </motion.div>
+              </motion.div>
+            </>
           )}
         </AnimatePresence>
 
@@ -286,8 +293,11 @@ export const NotepadPiP = ({ onClose, onDetach }: { onClose?: () => void; onDeta
               supervisorInsight={supervisorInsight}
               overseerDecisions={overseerDecisions}
               isThinking={isThinking}
-              onOpenView={openLocalView}
+              onOpenView={setView}
               onTriggerOverseer={triggerOverseer}
+              globalProvider={globalProvider}
+              thinkingModeEnabled={thinkingModeEnabled}
+              activeMissionCount={activeMissionCount}
             />
           )}
 
@@ -347,6 +357,14 @@ export const NotepadPiP = ({ onClose, onDetach }: { onClose?: () => void; onDeta
           {view === 'intel' && <PipIntelView />}
         </AnimatePresence>
       </div>
+
+      {/* Zone C: Tab Bar */}
+      <PipTabBar
+        activeView={view}
+        onChangeView={setView}
+        unreadOverseer={unreadCount}
+        activeMissions={activeMissionCount}
+      />
     </div>
   );
 };

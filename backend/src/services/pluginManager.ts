@@ -1,5 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import { IProviderPlugin, IToolPlugin, ProviderCapabilities } from '../types/plugins';
 import { logger } from '../utils/logger';
 
@@ -78,7 +79,7 @@ export class PluginManager {
         jsFiles.map(async (file) => {
           const filePath = path.join(providerDir, file);
           try {
-            const module = await import(filePath);
+            const module = await import(pathToFileURL(filePath).href);
             const PluginClass = module.default || module;
 
             if (typeof PluginClass === 'function') {
@@ -118,7 +119,7 @@ export class PluginManager {
         jsFiles.map(async (file) => {
           const filePath = path.join(toolDir, file);
           try {
-            const module = await import(filePath);
+            const module = await import(pathToFileURL(filePath).href);
             const PluginClass = module.default || module;
 
             if (typeof PluginClass === 'function') {

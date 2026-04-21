@@ -415,20 +415,14 @@ export const CodingArea = () => {
       // Sync all backend project files so the user never has to re-import after a refresh
       await syncProjectToWebContainer(webContainer);
 
-      // Find package.json — check open tabs first, then fall back to reading from backend.
-      // After a refresh openFiles is empty so the backend fetch ensures we still detect it.
-      const tryReadPkg = async (path: string): Promise<string | null> => {
-        const tabContent = openFiles.find((f) => f.path === path || f.path.endsWith(`/${path}`))?.content;
-        if (tabContent) return tabContent;
-        if (!currentProject) return null;
-        const fullPath = currentProject.type === 'scratchpad' ? `${currentProject.name}/${path}` : path;
+      // Read package.json directly from the WebContainer filesystem (the source of truth for npm).
+      const tryReadWcPkg = async (wcPath: string): Promise<string | null> => {
         try {
-          const d = await fetchWithRetry(`${BASE_URL}/api/files/read?path=${encodeURIComponent(fullPath)}`) as { content: string };
-          return d.content;
+          return await webContainer.fs.readFile(wcPath, 'utf-8');
         } catch { return null; }
       };
 
-      let pkgContent = await tryReadPkg('package.json');
+      let pkgContent = await tryReadWcPkg('package.json');
       let cwd = '.';
 
       // Monorepo detection: if root package.json lacks dev/start, look for frontend/package.json
@@ -436,7 +430,7 @@ export const CodingArea = () => {
         try {
           const pkg = JSON.parse(pkgContent) as { scripts?: Record<string, string> };
           if (!pkg.scripts?.dev && !pkg.scripts?.start) {
-            const frontendPkg = await tryReadPkg('frontend/package.json');
+            const frontendPkg = await tryReadWcPkg('frontend/package.json');
             if (frontendPkg) {
               addLog('[SYSTEM]: Root has no dev/start script — detected frontend/ subdirectory.');
               pkgContent = frontendPkg;

@@ -44,6 +44,23 @@ export function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 }
 
+export function formatRelativeTime(ts: string | number): string {
+  const now = Date.now();
+  const then = typeof ts === 'string' ? new Date(ts).getTime() : ts;
+  const diff = Math.floor((now - then) / 1000);
+  if (diff < 60) return 'now';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+  return `${Math.floor(diff / 86400)}d`;
+}
+
+export const VIEW_TRANSITION = {
+  initial: { opacity: 0, y: 8 },
+  animate: { opacity: 1, y: 0 },
+  exit: { opacity: 0, y: -4 },
+  transition: { duration: 0.15, ease: [0.25, 0.1, 0.25, 1] as [number, number, number, number] },
+};
+
 export function phaseLabel(progress: number, status: string): string {
   if (status === 'queued') return 'Queued...';
   if (status === 'complete') return 'Complete';

@@ -181,7 +181,7 @@ export class SupervisorService {
       const response = await groq.complete([
         { role: 'system', content: 'You are the Solvent Knowledge Graph Manager. Your job is to keep the project knowledge graph accurate, surface crystallizable architectural insights, and identify when new stable rules emerge from user notes. Respond in strict JSON only — no prose outside the JSON object.' },
         { role: 'user', content: prompt }
-      ], { model: 'llama-3.3-70b-versatile', temperature: 0.1 });
+      ], { model: 'llama-4-scout-17b-16e-instruct', temperature: 0.1 });
 
       const analysis = this.parseResponse(response);
       
@@ -364,7 +364,7 @@ RESPONSE FORMAT (strict JSON):
 
       const response = await gemini.complete([
         { role: 'user', content: prompt }
-      ], { model: 'gemini-2.0-flash', temperature: 0.1 });
+      ], { model: 'gemini-2.5-flash', temperature: 0.1 });
 
       const result = this.parseResponse(response);
 
@@ -655,7 +655,7 @@ RESPONSE FORMAT (strict JSON):
       const nudge = await groq.complete([
         { role: 'system', content: 'You are a helpful, non-intrusive assistant.' },
         { role: 'user', content: prompt }
-      ], { model: 'llama-3.3-70b-versatile', temperature: 0 });
+      ], { model: 'llama-4-scout-17b-16e-instruct', temperature: 0 });
 
       if (nudge && !nudge.includes('NO_ACTION')) {
         if (this.io) {

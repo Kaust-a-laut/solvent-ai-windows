@@ -67,7 +67,10 @@ export const AgentStatusBar: React.FC<Props> = ({
                       {group.map(m => {
                         const Icon = m.icon;
                         const isActive = model === m.model;
-                        const hasVision = m.sublabel.toLowerCase().includes('vision');
+                        const sub = m.sublabel.toLowerCase();
+                        const hasVision = sub.includes('vision');
+                        const hasCode = sub.includes('code');
+                        const isGeneral = !hasVision && !hasCode;
                         return (
                           <button
                             key={m.model}
@@ -78,7 +81,7 @@ export const AgentStatusBar: React.FC<Props> = ({
                             }}
                             className={cn(
                               'w-full flex items-center gap-2.5 px-3 py-1.5 text-left transition-all',
-                              m.bgColor,
+                              m.bgColor.replace('/10', '/[0.06]'),
                               'hover:brightness-150',
                               isActive && 'ring-1 ring-inset ring-white/15',
                             )}
@@ -92,6 +95,16 @@ export const AgentStatusBar: React.FC<Props> = ({
                                 {hasVision && (
                                   <span className="shrink-0 text-[8px] font-bold px-1 py-px rounded bg-blue-500/15 text-blue-400 leading-tight">
                                     VISION
+                                  </span>
+                                )}
+                                {hasCode && (
+                                  <span className="shrink-0 text-[8px] font-bold px-1 py-px rounded bg-orange-500/15 text-orange-400 leading-tight">
+                                    CODE
+                                  </span>
+                                )}
+                                {isGeneral && (
+                                  <span className="shrink-0 text-[8px] font-bold px-1 py-px rounded bg-rose-500/15 text-rose-400 leading-tight">
+                                    GENERAL
                                   </span>
                                 )}
                                 {tier === 'full-agentic' && (
