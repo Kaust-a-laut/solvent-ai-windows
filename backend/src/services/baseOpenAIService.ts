@@ -9,7 +9,9 @@ import { normalizeMessages } from '../utils/messageUtils';
 import type { AgentEvent } from '../types/agentEvents';
 import { spawn as nodeSpawn } from 'child_process';
 import nodePath from 'path';
-import { PROJECT_ROOT } from '../utils/fileSystem';
+import { PROJECT_ROOT, getEffectiveProjectRoot } from '../utils/fileSystem';
+import { agentScratchpadService } from './agentScratchpad';
+import { delegationService, parseDelegationTags } from './delegationService';
 
 /**
  * Simple XML tool call parser using string operations to avoid regex issues.
@@ -84,10 +86,27 @@ export function prependTruthfulnessNote(finalText: string, hadProblems: boolean)
   return TRUTHFULNESS_NOTE + finalText;
 }
 
-function summarizeRequest(messages: Array<{ role: string; content: string }>): { msgs: number; kb: number } {
+function summarizeRequest(messages: Array<{ role: string; content: string; name?: string }>): { msgs: number; kb: number } {
   let bytes = 0;
   for (const m of messages) bytes += (m.content?.length ?? 0) + (m.role?.length ?? 0);
   return { msgs: messages.length, kb: Math.round(bytes / 1024) };
+}
+
+// When a request payload grows large, emit a per-message size breakdown so we
+// can see *which* message is the bomb. Cheap — only runs past the threshold.
+function logLargestMessages(
+  providerName: string,
+  messages: Array<{ role: string; content: string; name?: string }>,
+  totalKb: number
+): void {
+  if (totalKb < 1024) return; // only log for >1 MB payloads
+  const ranked = messages
+    .map((m, i) => ({ i, role: m.role, name: m.name, size: m.content?.length ?? 0, head: (m.content ?? '').slice(0, 120).replace(/\s+/g, ' ') }))
+    .sort((a, b) => b.size - a.size)
+    .slice(0, 3);
+  for (const r of ranked) {
+    logger.warn(`[${providerName}] oversized-payload msg[${r.i}] role=${r.role} name=${r.name ?? '-'} size=${Math.round(r.size / 1024)}KB head="${r.head}"`);
+  }
 }
 
 function filterToolsByTier(
@@ -95,14 +114,34 @@ function filterToolsByTier(
   tier?: 'full-agentic' | 'code-only',
   _traits?: { toolUse: string; multimodal: boolean; contextWindow: number }
 ): unknown[] {
+  // Preview-runtime tools (get_console_logs, get_selected_element) require the
+  // frontend to supply previewState in the request. The code-only tier doesn't
+  // flow through that path, so hide them there to avoid empty-context calls.
   if (tier !== 'full-agentic') {
-    const excludeNames = ['get_console_logs', 'get_selected_element'];
+    const excludeNames = new Set(['get_console_logs', 'get_selected_element']);
     return (tools as Array<{ function: { name: string } }>).filter(
-      t => !excludeNames.includes(t.function.name)
+      t => !excludeNames.has(t.function.name)
     );
   }
-
   return tools;
+}
+
+// Per-tool-result size cap applied before pushing into chat history. Without
+// this, a single oversized tool result (e.g. a base64 screenshot, a huge
+// grep dump, a large stderr buffer) can bloat subsequent API requests past
+// the provider's limit, causing HTTP 400s.
+const MAX_TOOL_RESULT_HISTORY_BYTES = 96 * 1024; // 96 KB
+
+function capToolResultForHistory(name: string, serialized: string): string {
+  if (serialized.length <= MAX_TOOL_RESULT_HISTORY_BYTES) return serialized;
+  const head = serialized.slice(0, MAX_TOOL_RESULT_HISTORY_BYTES);
+  const dropped = serialized.length - MAX_TOOL_RESULT_HISTORY_BYTES;
+  return JSON.stringify({
+    status: 'truncated_for_history',
+    tool: name,
+    preview: head,
+    note: `Result was ${serialized.length} bytes; truncated to ${MAX_TOOL_RESULT_HISTORY_BYTES} to fit the context window. ${dropped} bytes dropped. Re-query with narrower args if needed.`,
+  });
 }
 
 type HistoryMessage = {
@@ -117,7 +156,7 @@ const NEVER_COMPACT_TOOLS = new Set([
   'write_file', 'edit_file', 'create_file', 'move_file', 'git_commit',
 ]);
 
-const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'create_file', 'replace_in_files']);
+const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'create_file', 'replace_in_files', 'apply_patch']);
 
 function summarizeToolResult(toolName: string, content: string): string {
   try {
@@ -187,6 +226,10 @@ export function compactHistory(
 }
 
 function detectProjectRootFromFiles(changedFiles: string[]): string {
+  // Per-request scope (set by the controller from the chat request) wins over
+  // the filename-prefix heuristic, which was only a fallback for untagged paths.
+  const effective = getEffectiveProjectRoot();
+  if (effective !== PROJECT_ROOT) return effective;
   if (changedFiles.length === 0) return PROJECT_ROOT;
   const first = changedFiles[0] ?? '';
   const m = first.match(/^(projects\/[^/]+)\//);
@@ -248,7 +291,7 @@ async function autoVerify(
         changedFiles.length > 0
           ? newErrors.filter((line) =>
               changedFiles.some((f) => {
-                const abs = nodePath.isAbsolute(f) ? f : nodePath.join(PROJECT_ROOT, f);
+                const abs = nodePath.isAbsolute(f) ? f : nodePath.join(getEffectiveProjectRoot(), f);
                 return line.includes(abs) || line.includes(f);
               })
             )
@@ -318,6 +361,23 @@ export function buildRecoveryHint(name: string, errorMessage: string, consecutiv
 }
 
 /**
+ * Normalize an error message to a stable signature for detecting retry loops.
+ * Strips volatile bits (absolute paths, timestamps, PIDs, transaction ids) so
+ * two ENOTEMPTY-on-different-temp-dirs failures still match as "same error".
+ */
+export function errorSignature(toolName: string, errorMessage: string): string {
+  const trimmed = (errorMessage || '')
+    .replace(/\b\d{13,}\b/g, 'TS')                        // epoch ms
+    .replace(/\b(TX:\s*)[a-z0-9]+/gi, '$1TX')             // transaction ids
+    .replace(/[A-Z]:\\[^\s'"]+/g, 'PATH')                 // windows absolute paths
+    .replace(/\/[^\s'"]*\/[^\s'"]+/g, 'PATH')             // unix absolute paths
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 240);
+  return `${toolName}|${trimmed}`;
+}
+
+/**
  * Abstract base class for OpenAI-compatible providers (Groq, DeepSeek, OpenRouter, etc.)
  * Provides standardized message mapping and recursive tool-calling logic.
  */
@@ -349,8 +409,30 @@ export abstract class BaseOpenAIService implements AIProvider {
 
     try {
       let hadProblems = false;
+      // Auto-verify state for non-streaming path (mirrors streaming path)
+      let errorBaselinePromise: Promise<Set<string>> | null = null;
+      const getErrorBaselineNonStream = (): Promise<Set<string>> => {
+        if (errorBaselinePromise === null) {
+          errorBaselinePromise = getTscErrors(getEffectiveProjectRoot()).then(errs => new Set(errs));
+        }
+        return errorBaselinePromise;
+      };
+      let verifyAttempts = 0;
 
       while (iteration < maxIterations) {
+        // Inject agent scratchpad (plan + reflections) into the last system message
+        const scratchpadBlock = agentScratchpadService.renderForPrompt('default');
+        if (scratchpadBlock) {
+          const lastSystemIdx = [...currentMessages].reverse().findIndex(m => m.role === 'system');
+          if (lastSystemIdx !== -1) {
+            const realIdx = currentMessages.length - 1 - lastSystemIdx;
+            const existing = currentMessages[realIdx]!;
+            if (!existing.content.includes('[CURRENT PLAN]')) {
+              existing.content += `\n\n[CURRENT PLAN]\n${scratchpadBlock}\n\n[INSTRUCTIONS] The plan above is your live task scratchpad. Use update_plan to mark steps as you work. Use reflect after 3+ tool actions to summarize progress.`;
+            }
+          }
+        }
+
         const messagesForRequest = compactHistory(currentMessages, 4, 32_768);
         if (messagesForRequest !== currentMessages) {
           logger.info(`[${this.name}] History compacted at iter=${iteration}`);
@@ -428,7 +510,7 @@ export abstract class BaseOpenAIService implements AIProvider {
               role: "tool",
               tool_call_id: toolCall.id,
               name: name,
-              content: JSON.stringify(result)
+              content: capToolResultForHistory(name, JSON.stringify(result))
             });
           } catch (toolError: unknown) {
             const toolErr = toolError as Error;
@@ -443,6 +525,29 @@ export abstract class BaseOpenAIService implements AIProvider {
           }
         }
 
+        // Auto-verify after write operations (non-streaming path)
+        const changedFiles = parsed
+          .filter((c) => WRITE_TOOLS.has(c.name) && !c.parseError)
+          .map((c) => (c.args.path as string) ?? '')
+          .filter(Boolean);
+
+        if (changedFiles.length > 0 && verifyAttempts < 2) {
+          verifyAttempts++;
+          const baseline = await getErrorBaselineNonStream();
+          const verifyErrors = await autoVerify(changedFiles, baseline);
+          if (verifyErrors) {
+            hadProblems = true;
+            const checkMsg =
+              `[VERIFY] After writing ${changedFiles.join(', ')}, TypeScript errors were detected:\n\n` +
+              `${verifyErrors}\n\n` +
+              `[SYSTEM: You MUST fix these errors before concluding the task.]`;
+            logger.warn(`[${this.name}] Non-stream auto-verify found errors at iter=${iteration}`);
+            currentMessages.push({ role: 'user', content: checkMsg });
+          } else {
+            verifyAttempts = 0;
+          }
+        }
+
         iteration++;
       }
 
@@ -452,6 +557,7 @@ export abstract class BaseOpenAIService implements AIProvider {
       const errorMsg = err.response?.data?.error?.message || err.message;
       const ctx = summarizeRequest(currentMessages);
       logger.error(`[${this.name}] Request Failed at iter=${iteration}/${maxIterations} msgs=${ctx.msgs} payload=${ctx.kb}KB: ${errorMsg}`);
+      logLargestMessages(this.name, currentMessages, ctx.kb);
       throw new Error(`${this.name} API failed at iter=${iteration} (${ctx.kb}KB, ${ctx.msgs} msgs): ${errorMsg}`);
     }
   }
@@ -480,19 +586,40 @@ export abstract class BaseOpenAIService implements AIProvider {
     try {
       let consecutiveFailures = 0;
       const maxConsecutiveFailures = 3;
+      // Retry-loop guard: if the same tool fails with the same normalized error
+      // N times in a row, break the iteration loop instead of burning budget
+      // and rate-limit headroom on a deterministic failure.
+      let lastFailureSignature: string | null = null;
+      let sameErrorRepeats = 0;
+      const maxSameErrorRepeats = 3;
       let hadProblems = false;
       // Baseline of pre-existing tsc errors, captured lazily on the first
       // write-tool call. Chat-only turns never pay the ~15s tsc spawn cost.
       let errorBaselinePromise: Promise<Set<string>> | null = null;
       const getErrorBaseline = (): Promise<Set<string>> => {
         if (errorBaselinePromise === null) {
-          errorBaselinePromise = getTscErrors(PROJECT_ROOT).then(errs => new Set(errs));
+          errorBaselinePromise = getTscErrors(getEffectiveProjectRoot()).then(errs => new Set(errs));
         }
         return errorBaselinePromise;
       };
       let verifyAttempts = 0;
 
       while (iteration < maxIterations) {
+        // Inject agent scratchpad (plan + reflections) into the last system message
+        const scratchpadBlock = agentScratchpadService.renderForPrompt('default');
+        if (scratchpadBlock) {
+          // Find the last system message and append the scratchpad
+          const lastSystemIdx = [...currentMessages].reverse().findIndex(m => m.role === 'system');
+          if (lastSystemIdx !== -1) {
+            const realIdx = currentMessages.length - 1 - lastSystemIdx;
+            const existing = currentMessages[realIdx]!;
+            // Avoid duplicating the scratchpad block on repeated iterations
+            if (!existing.content.includes('[CURRENT PLAN]')) {
+              existing.content += `\n\n[CURRENT PLAN]\n${scratchpadBlock}\n\n[INSTRUCTIONS] The plan above is your live task scratchpad. Use update_plan to mark steps as you work. Use reflect after 3+ tool actions to summarize progress.`;
+            }
+          }
+        }
+
         // Compact old tool results if payload is too large
         const messagesForRequest = compactHistory(currentMessages, 4, 32_768);
         if (messagesForRequest !== currentMessages) {
@@ -564,6 +691,7 @@ export abstract class BaseOpenAIService implements AIProvider {
               try {
                 const parsed = JSON.parse(data) as {
                   error?: { message?: string };
+                  usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
                   choices?: Array<{
                     delta?: {
                       content?: string;
@@ -586,7 +714,19 @@ export abstract class BaseOpenAIService implements AIProvider {
                 }
 
                 const delta = parsed.choices?.[0]?.delta;
-                if (!delta) continue;
+                if (!delta) {
+                  // Some providers emit usage in a final chunk with no choices
+                  const usage = parsed.usage as { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } } | undefined;
+                  if (usage?.prompt_tokens !== undefined) {
+                    onEvent({
+                      type: 'usage',
+                      promptTokens: usage.prompt_tokens,
+                      completionTokens: usage.completion_tokens ?? 0,
+                      cachedTokens: usage.prompt_tokens_details?.cached_tokens,
+                    });
+                  }
+                  continue;
+                }
 
                 if (delta.content) {
                   rawContent += delta.content;
@@ -653,7 +793,18 @@ export abstract class BaseOpenAIService implements AIProvider {
             });
 
             for (const call of xmlCalls) {
-              onEvent({ type: 'tool_start', tool: call.name, args: call.args, iteration, callId: call.id });
+              // Capture file content BEFORE write tools execute (for undo support)
+              let xmlBeforeContent: string | undefined;
+              if (WRITE_TOOLS.has(call.name) && typeof call.args.path === 'string') {
+                try {
+                  const { validatePath } = await import('../utils/fileSystem');
+                  const { readFile } = await import('fs/promises');
+                  const fullPath = validatePath(call.args.path);
+                  xmlBeforeContent = await readFile(fullPath, 'utf-8');
+                } catch { /* new file */ }
+              }
+
+              onEvent({ type: 'tool_start', tool: call.name, args: call.args, iteration, callId: call.id, beforeContent: xmlBeforeContent });
               try {
                 const result = await toolService.executeTool(call.name, call.args);
                 if (isProblematicToolResult(result)) hadProblems = true;
@@ -662,15 +813,25 @@ export abstract class BaseOpenAIService implements AIProvider {
                   role: 'tool',
                   tool_call_id: call.id,
                   name: call.name,
-                  content: JSON.stringify(result)
+                  content: capToolResultForHistory(call.name, JSON.stringify(result))
                 });
                 consecutiveFailures = 0;
+                lastFailureSignature = null;
+                sameErrorRepeats = 0;
               } catch (toolError: unknown) {
                 const toolErr = toolError as Error;
                 consecutiveFailures++;
                 hadProblems = true;
                 logger.error('[' + this.name + '] XML tool failed (' + call.name + '): ' + toolErr.message);
                 onEvent({ type: 'tool_error', tool: call.name, error: toolErr.message, iteration, callId: call.id });
+
+                const sig = errorSignature(call.name, toolErr.message);
+                if (sig === lastFailureSignature) {
+                  sameErrorRepeats++;
+                } else {
+                  sameErrorRepeats = 1;
+                  lastFailureSignature = sig;
+                }
 
                 const errorContent = buildRecoveryHint(call.name, toolErr.message, consecutiveFailures, maxConsecutiveFailures);
                 currentMessages.push({
@@ -679,6 +840,13 @@ export abstract class BaseOpenAIService implements AIProvider {
                   name: call.name,
                   content: JSON.stringify({ error: errorContent })
                 });
+
+                if (sameErrorRepeats >= maxSameErrorRepeats) {
+                  const abortMsg = `Stopped: tool \`${call.name}\` failed ${sameErrorRepeats} times in a row with the same error:\n\n${toolErr.message}\n\nTypical causes: stale dependencies (delete node_modules and reinstall), a file or port lock held by another process, or a deterministic bug. Please investigate before retrying.`;
+                  logger.warn(`[${this.name}] Aborting (XML path): ${sig} repeated ${sameErrorRepeats}x at iter=${iteration}`);
+                  onEvent({ type: 'text_complete', content: abortMsg });
+                  return abortMsg;
+                }
               }
             }
 
@@ -687,6 +855,32 @@ export abstract class BaseOpenAIService implements AIProvider {
             } else if (consecutiveFailures >= maxConsecutiveFailures) {
               iteration++;
             }
+            continue;
+          }
+
+          // Check for delegation tags in the model's text output
+          const textContent = typeof content === 'string' ? content : JSON.stringify(content);
+          const delegationTasks = parseDelegationTags(textContent);
+          if (delegationTasks.length > 0) {
+            logger.info(`[${this.name}] Delegation detected: ${delegationTasks.length} task(s)`);
+            for (const dtask of delegationTasks) {
+              const delegateCallId = randomUUID().slice(0, 8);
+              onEvent({ type: 'tool_start', tool: '__delegated__', args: { task: dtask.task, files: dtask.files }, iteration, callId: delegateCallId });
+              try {
+                const delegateResult = await delegationService.runDelegatedTask(dtask);
+                onEvent({ type: 'tool_result', tool: '__delegated__', args: {}, result: delegateResult, iteration, callId: delegateCallId });
+                // Inject result into conversation for parent model to consume
+                currentMessages.push({
+                  role: 'assistant',
+                  content: `[Delegated task completed]\nTask: ${dtask.task}\nResult: ${delegateResult.summary}`,
+                });
+              } catch (dErr) {
+                const dMsg = dErr instanceof Error ? dErr.message : String(dErr);
+                onEvent({ type: 'tool_error', tool: '__delegated__', error: dMsg, iteration, callId: delegateCallId });
+              }
+            }
+            // Continue the loop so the parent model can see delegation results
+            iteration++;
             continue;
           }
 
@@ -721,10 +915,37 @@ export abstract class BaseOpenAIService implements AIProvider {
               name,
               content: JSON.stringify({ error: msg })
             });
+
+            const sig = errorSignature(name, parseError);
+            if (sig === lastFailureSignature) {
+              sameErrorRepeats++;
+            } else {
+              sameErrorRepeats = 1;
+              lastFailureSignature = sig;
+            }
+            if (sameErrorRepeats >= maxSameErrorRepeats) {
+              const abortMsg = `Stopped: tool \`${name}\` kept returning malformed arguments (${sameErrorRepeats} times in a row). The model's tool-call JSON is likely being truncated. Try a simpler request or break it into smaller steps.`;
+              logger.warn(`[${this.name}] Aborting (parseError path): ${sig} repeated ${sameErrorRepeats}x at iter=${iteration}`);
+              onEvent({ type: 'text_complete', content: abortMsg });
+              return abortMsg;
+            }
             continue;
           }
 
-          onEvent({ type: 'tool_start', tool: name, args, iteration, callId });
+          // Capture file content BEFORE write tools execute (for undo support)
+          let beforeContent: string | undefined;
+          if (WRITE_TOOLS.has(name) && typeof args.path === 'string') {
+            try {
+              const { validatePath } = await import('../utils/fileSystem');
+              const { readFile } = await import('fs/promises');
+              const fullPath = validatePath(args.path);
+              beforeContent = await readFile(fullPath, 'utf-8');
+            } catch {
+              // File doesn't exist yet (create_file) — no beforeContent
+            }
+          }
+
+          onEvent({ type: 'tool_start', tool: name, args, iteration, callId, beforeContent });
 
           try {
             const result = await toolService.executeTool(name, args);
@@ -734,9 +955,11 @@ export abstract class BaseOpenAIService implements AIProvider {
               role: "tool",
               tool_call_id: callId,
               name,
-              content: JSON.stringify(result)
+              content: capToolResultForHistory(name, JSON.stringify(result))
             });
             consecutiveFailures = 0; // Reset on success
+            lastFailureSignature = null;
+            sameErrorRepeats = 0;
           } catch (toolError: unknown) {
             const toolErr = toolError as Error;
 
@@ -744,6 +967,14 @@ export abstract class BaseOpenAIService implements AIProvider {
             hadProblems = true;
             logger.error(`[${this.name}] Tool execution failed (${name}): ${toolErr.message}`);
             onEvent({ type: 'tool_error', tool: name, error: toolErr.message, iteration, callId });
+
+            const sig = errorSignature(name, toolErr.message);
+            if (sig === lastFailureSignature) {
+              sameErrorRepeats++;
+            } else {
+              sameErrorRepeats = 1;
+              lastFailureSignature = sig;
+            }
 
             const errorContent = buildRecoveryHint(name, toolErr.message, consecutiveFailures, maxConsecutiveFailures);
 
@@ -753,6 +984,13 @@ export abstract class BaseOpenAIService implements AIProvider {
               name,
               content: JSON.stringify({ error: errorContent })
             });
+
+            if (sameErrorRepeats >= maxSameErrorRepeats) {
+              const abortMsg = `Stopped: tool \`${name}\` failed ${sameErrorRepeats} times in a row with the same error:\n\n${toolErr.message}\n\nTypical causes: stale dependencies (delete node_modules and reinstall), a file or port lock held by another process, or a deterministic bug. Please investigate before retrying.`;
+              logger.warn(`[${this.name}] Aborting (streaming path): ${sig} repeated ${sameErrorRepeats}x at iter=${iteration}`);
+              onEvent({ type: 'text_complete', content: abortMsg });
+              return abortMsg;
+            }
 
             // Don't increment iteration on failure — give the model a chance to recover
             if (consecutiveFailures >= maxConsecutiveFailures) {
@@ -778,7 +1016,7 @@ export abstract class BaseOpenAIService implements AIProvider {
             const checkMsg =
               `[build_check after writing ${changedFiles.join(', ')}]\n` +
               `TypeScript errors in changed files:\n\n${verifyErrors}\n\n` +
-              `Please fix these errors before concluding the task.`;
+              `[SYSTEM: You MUST fix these errors before concluding the task.]`;
             logger.warn(`[${this.name}] Auto-verify found errors at iter=${iteration}`);
             currentMessages.push({ role: 'user', content: checkMsg });
             onEvent({
@@ -815,6 +1053,7 @@ export abstract class BaseOpenAIService implements AIProvider {
       const errorMsg = err.response?.data?.error?.message || err.message;
       const ctx = summarizeRequest(currentMessages);
       logger.error(`[${this.name}] Request Failed at iter=${iteration}/${maxIterations} msgs=${ctx.msgs} payload=${ctx.kb}KB: ${errorMsg}`);
+      logLargestMessages(this.name, currentMessages, ctx.kb);
       throw new Error(`${this.name} API failed at iter=${iteration} (${ctx.kb}KB, ${ctx.msgs} msgs): ${errorMsg}`);
     }
   }

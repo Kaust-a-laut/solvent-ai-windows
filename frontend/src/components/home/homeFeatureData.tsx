@@ -34,6 +34,7 @@ export const HOME_FEATURES: FeatureItem[] = [
     badge: 'Core',
     hoverBorder: 'group-hover:border-jb-purple/30',
     badgeColor: 'bg-jb-purple/10 border border-jb-purple/20 text-jb-purple/80',
+    actionText: 'Open Waterfall',
   },
   {
     id: 'command_center',
@@ -45,7 +46,7 @@ export const HOME_FEATURES: FeatureItem[] = [
     border: 'border-jb-purple/10',
     span: 'lg:row-span-2',
     preview: <MissionControlPreview />,
-    actionText: 'Launch Mission Control',
+    actionText: 'Open Command Center',
     hoverBorder: 'group-hover:border-jb-purple/30',
   },
   {
@@ -58,6 +59,7 @@ export const HOME_FEATURES: FeatureItem[] = [
     border: 'border-jb-accent/10',
     span: 'lg:col-span-1',
     hoverBorder: 'group-hover:border-jb-accent/30',
+    actionText: 'Open Coding Suite',
   },
   {
     id: 'vision',
@@ -67,7 +69,7 @@ export const HOME_FEATURES: FeatureItem[] = [
     color: 'text-jb-orange',
     bg: 'bg-jb-orange/5',
     border: 'border-jb-orange/10',
-    actionText: 'Dive into the SolventSee Lab',
+    actionText: 'Open SolventSee',
     hoverBorder: 'group-hover:border-jb-orange/30',
   },
   {
@@ -79,6 +81,7 @@ export const HOME_FEATURES: FeatureItem[] = [
     bg: 'bg-jb-cyan/5',
     border: 'border-jb-cyan/10',
     hoverBorder: 'group-hover:border-jb-cyan/30',
+    actionText: 'Open Browser',
   },
   {
     id: 'model_playground',
@@ -89,6 +92,7 @@ export const HOME_FEATURES: FeatureItem[] = [
     bg: 'bg-jb-cyan/5',
     border: 'border-jb-cyan/10',
     hoverBorder: 'group-hover:border-jb-cyan/30',
+    actionText: 'Open Model Lab',
   },
   {
     id: 'memory',

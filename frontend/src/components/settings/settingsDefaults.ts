@@ -7,6 +7,7 @@ export const TAB_TITLES: Record<string, string> = {
   behavior:   'Behavior & Tuning',
   'api-keys': 'API Keys',
   memory:     'Project Memory',
+  debug:      'Observability & Traces',
 };
 
 export const TAB_SUBTITLES: Record<string, string> = {
@@ -14,6 +15,7 @@ export const TAB_SUBTITLES: Record<string, string> = {
   behavior:   'Tune inference parameters and assistant capabilities',
   'api-keys': 'Securely store provider credentials — stored locally only',
   memory:     'Index your workspace for context-aware responses',
+  debug:      'Inspect RAG pipelines, token budgets, and system logs',
 };
 
 // ── API key provider configs ──────────────────────────────────────────────────

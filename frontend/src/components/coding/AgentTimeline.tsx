@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { Sparkles } from 'lucide-react';
-import type { AgentMessage } from '../../store/codingSlice';
+import type { AgentMessage, ToolEvent } from '../../store/codingSlice';
 import { AgentUserEntry } from './AgentUserEntry';
 import { AgentTurnBlock } from './AgentTurnBlock';
 
@@ -9,6 +9,8 @@ interface Props {
   isGenerating: boolean;
   copiedMsgId: string | null;
   onCopy: (msg: AgentMessage) => void;
+  onEditAndRerun?: (messageId: string, newContent: string) => void;
+  onUndoIteration?: (iteration: { index: number; toolEvents: ToolEvent[] }) => void;
 }
 
 export const AgentTimeline: React.FC<Props> = ({
@@ -16,6 +18,8 @@ export const AgentTimeline: React.FC<Props> = ({
   isGenerating,
   copiedMsgId,
   onCopy,
+  onEditAndRerun,
+  onUndoIteration,
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -39,7 +43,7 @@ export const AgentTimeline: React.FC<Props> = ({
     <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-4 px-3 py-2">
       {agentMessages.map((msg) => {
         if (msg.role === 'user') {
-          return <AgentUserEntry key={msg.id} msg={msg} />;
+          return <AgentUserEntry key={msg.id} msg={msg} onEditAndRerun={onEditAndRerun} />;
         }
         return (
           <AgentTurnBlock
@@ -48,6 +52,7 @@ export const AgentTimeline: React.FC<Props> = ({
             isStreaming={isGenerating && msg.isStreaming === true}
             copiedMsgId={copiedMsgId}
             onCopy={onCopy}
+            onUndoIteration={onUndoIteration}
           />
         );
       })}

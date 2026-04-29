@@ -8,13 +8,14 @@ import { useAppStore } from '../store/useAppStore';
 import type { ConsoleEntry, ElementInfo } from '../store/codingSlice';
 import { persistProjectOpenState, restoreProjectOpenState } from '../store/codingSlice';
 import { useShallow } from 'zustand/react/shallow';
-import { fetchWithRetry, getSecret } from '../lib/api-client';
+import { fetchWithRetry, getSecret, getNativeBackendStatus } from '../lib/api-client';
 import { BASE_URL } from '../lib/config';
 import { FileTreePanel } from './coding/FileTreePanel';
 import { EditorTabBar } from './coding/EditorTabBar';
 import { CodingTerminal } from './coding/CodingTerminal';
 import { AgentChatPanel } from './coding/AgentChatPanel';
 import { DiffBanner } from './coding/DiffBanner';
+import { MemoryPanel } from './coding/MemoryPanel';
 import { ReviewScorecard } from './ReviewScorecard';
 import {
   getOrBootWebContainer,
@@ -34,8 +35,10 @@ export const CodingArea = () => {
   const {
     openFiles, setOpenFiles, activeFile, setActiveFile,
     pendingDiff, clearPendingDiff,
+    stagedDiffs, addStagedDiff, setStagedDiffStatus, applyAllStagedDiffs, clearStagedDiffs,
     fileTreeVisible, chatPanelVisible, terminalVisible,
     setFileTreeVisible, setChatPanelVisible, setTerminalVisible,
+    memoryVisible, setMemoryVisible,
     panelWidths,
     terminalLines, addTerminalLine, clearTerminalLines,
     activeTier,
@@ -49,12 +52,19 @@ export const CodingArea = () => {
       setActiveFile: state.setActiveFile,
       pendingDiff: state.pendingDiff,
       clearPendingDiff: state.clearPendingDiff,
+      stagedDiffs: state.stagedDiffs,
+      addStagedDiff: state.addStagedDiff,
+      setStagedDiffStatus: state.setStagedDiffStatus,
+      applyAllStagedDiffs: state.applyAllStagedDiffs,
+      clearStagedDiffs: state.clearStagedDiffs,
       fileTreeVisible: state.fileTreeVisible,
       chatPanelVisible: state.chatPanelVisible,
       terminalVisible: state.terminalVisible,
       setFileTreeVisible: state.setFileTreeVisible,
       setChatPanelVisible: state.setChatPanelVisible,
       setTerminalVisible: state.setTerminalVisible,
+      memoryVisible: state.memoryVisible,
+      setMemoryVisible: state.setMemoryVisible,
       panelWidths: state.panelWidths,
       terminalLines: state.terminalLines,
       addTerminalLine: state.addTerminalLine,
@@ -67,6 +77,7 @@ export const CodingArea = () => {
       setPreviewSnapshot: state.setPreviewSnapshot,
     }))
   );
+  const sandboxRunTrigger = useAppStore((s) => s.sandboxRunTrigger);
   const [editorVisible, setEditorVisible] = useState(true);
   const [bootStatus, setBootStatus] = useState<'idle' | 'booting' | 'ready' | 'error'>('idle');
   const [bootRequested, setBootRequested] = useState(false);
@@ -317,9 +328,10 @@ export const CodingArea = () => {
     addLog('[SYSTEM]: Syncing project files to sandbox...');
 
     type FNode = { name: string; type: 'file' | 'directory'; path: string; children?: FNode[] };
-    const listUrl = currentProject.type === 'scratchpad'
-      ? `${BASE_URL}/api/files/list?project=${encodeURIComponent(currentProject.name)}`
-      : `${BASE_URL}/api/files/list?path=.`;
+    // Always scope the sync to the current project's subdir inside `projects/`.
+    // Using `?path=.` would walk the entire projects tree, which for folder
+    // projects caused sibling projects to be synced into the sandbox.
+    const listUrl = `${BASE_URL}/api/files/list?project=${encodeURIComponent(currentProject.name)}`;
 
     const nodes = await fetchWithRetry(listUrl) as FNode[];
 
@@ -389,6 +401,20 @@ export const CodingArea = () => {
       // No index.html — non-HTML project, skip injection
     }
 
+    // Native Bridge: if a sidecar is running, retarget the copy's frontend at it.
+    // Writes frontend/.env.local AND .env.local so we cover both nested (frontend/)
+    // and flat (root) project layouts. Vite picks up .env.local automatically.
+    try {
+      const sidecar = await getNativeBackendStatus();
+      if (sidecar.running && sidecar.ready && sidecar.port) {
+        const envLine = `VITE_BACKEND_URL=http://localhost:${sidecar.port}\n`;
+        for (const envPath of ['frontend/.env.local', '.env.local']) {
+          try { await wc.fs.writeFile(envPath, envLine); } catch { /* dir missing — skip */ }
+        }
+        addLog(`[SYSTEM]: Retargeted sandbox frontend at native sidecar :${sidecar.port}`);
+      }
+    } catch { /* sidecar endpoint unreachable — continue without override */ }
+
     addLog(`[SYSTEM]: Synced ${synced} project files to sandbox.`);
   }, [currentProject, addLog]);
 
@@ -425,8 +451,29 @@ export const CodingArea = () => {
       let pkgContent = await tryReadWcPkg('package.json');
       let cwd = '.';
 
+      // Sidecar mode: if a native backend sidecar is running, the host is
+      // already serving the backend. Running the project's root `dev` script
+      // in WebContainer would trigger `concurrently "dev:backend" "dev:frontend"`,
+      // which then tries to install/run the backend inside WebContainer —
+      // guaranteed to fail for Solvent-class apps (native C++ deps, Redis).
+      // Pin the run to frontend/ so only the frontend boots in the sandbox.
+      let sidecarActive = false;
+      try {
+        const sidecar = await getNativeBackendStatus();
+        sidecarActive = Boolean(sidecar.running && sidecar.ready);
+      } catch { /* sidecar endpoint unreachable — treat as inactive */ }
+
+      if (sidecarActive) {
+        const frontendPkg = await tryReadWcPkg('frontend/package.json');
+        if (frontendPkg) {
+          addLog('[SYSTEM]: Sidecar backend detected — running frontend/ only in sandbox.');
+          pkgContent = frontendPkg;
+          cwd = 'frontend';
+        }
+      }
+
       // Monorepo detection: if root package.json lacks dev/start, look for frontend/package.json
-      if (pkgContent) {
+      if (pkgContent && cwd === '.') {
         try {
           const pkg = JSON.parse(pkgContent) as { scripts?: Record<string, string> };
           if (!pkg.scripts?.dev && !pkg.scripts?.start) {
@@ -474,6 +521,15 @@ export const CodingArea = () => {
       setIsRunning(false);
     }
   }, [webContainer, activeFile, openFiles, addLog, setTerminalVisible, bootStatus]);
+
+  // Agent-driven sandbox run: ide_run_in_sandbox tool increments sandboxRunTrigger,
+  // which invokes the same handleRun flow as the manual Run button.
+  const lastSandboxRunRef = useRef(sandboxRunTrigger);
+  useEffect(() => {
+    if (sandboxRunTrigger === lastSandboxRunRef.current) return;
+    lastSandboxRunRef.current = sandboxRunTrigger;
+    handleRun();
+  }, [sandboxRunTrigger, handleRun]);
 
   const handleApplyAll = useCallback(async () => {
     if (!pendingDiff) return;
@@ -575,11 +631,12 @@ export const CodingArea = () => {
               onTabClose={closeFile}
             />
 
-            {pendingDiff && (
+            {stagedDiffs.length > 0 && (
               <DiffBanner
-                description={pendingDiff.description}
-                onApplyAll={handleApplyAll}
-                onReject={clearPendingDiff}
+                diffs={stagedDiffs}
+                onApplyAll={applyAllStagedDiffs}
+                onRejectAll={clearStagedDiffs}
+                onToggleStatus={setStagedDiffStatus}
               />
             )}
 
@@ -631,6 +688,11 @@ export const CodingArea = () => {
             onClose={() => setShowPreview(false)}
             editorVisible={editorVisible}
             onToggleEditor={() => setEditorVisible((v) => !v)}
+            onAskAgentFix={(errorMessage) => {
+              useAppStore.getState().setQueuedAgentPrompt(
+                `Fix this console error in the preview:\n\n${errorMessage.slice(0, 500)}`
+              );
+            }}
           />
         )}
       </AnimatePresence>
@@ -644,6 +706,12 @@ export const CodingArea = () => {
           <AgentChatPanel />
         </div>
       )}
+
+      {/* ── Memory Panel ────────────────────────────────────────────── */}
+      <MemoryPanel
+        visible={memoryVisible}
+        onClose={() => setMemoryVisible(false)}
+      />
 
       {/* Review scorecard overlay */}
       <AnimatePresence>

@@ -122,7 +122,7 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
   selectedLocalModel: APP_CONFIG.models.local.primary,
   selectedCloudModel: APP_CONFIG.models.cloud.primary,
   selectedCloudProvider: APP_CONFIG.providers.primary,
-  selectedAgentModel: 'accounts/fireworks/models/kimi-k2p5',
+  selectedAgentModel: 'accounts/fireworks/models/kimi-k2p6',
   selectedAgentProvider: 'fireworks' as AgentProvider,
   selectedOpenRouterModel: 'qwen/qwen-2.5-coder-32b-instruct:free',
   modeConfigs: APP_CONFIG.modeConfigs,

@@ -1,15 +1,44 @@
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import { logger } from './logger';
+import { getRequestContext } from './requestContext';
 
-// Single source of truth for project root - resolves from this file's location
+// Global (repo) root — safety floor that no request may escape, regardless of
+// per-request project scoping.
 export const PROJECT_ROOT = path.resolve(__dirname, '../../../');
 
+/**
+ * Effective project root for the current request. When a chat request specifies
+ * a `projectRoot` (via requestContextStore), tool operations are scoped to it.
+ * Falls back to the global PROJECT_ROOT when no per-request scope is active.
+ *
+ * Always returns a path that is inside (or equal to) PROJECT_ROOT — the
+ * controller is responsible for validating the per-request value before
+ * populating the store.
+ */
+export const getEffectiveProjectRoot = (): string => {
+  const ctx = getRequestContext();
+  return ctx?.projectRoot ?? PROJECT_ROOT;
+};
+
+/**
+ * Validate a path is inside the effective project root (per-request scope if
+ * set, otherwise the global repo root). Both boundaries are enforced — a
+ * per-request path may not escape into a sibling project even if the global
+ * repo would have allowed it.
+ */
 export const validatePath = (targetPath: string) => {
-  const normalized = path.resolve(PROJECT_ROOT, targetPath);
-  // Use trailing separator to prevent prefix attacks (e.g. /root vs /root-evil)
-  const rootWithSep = PROJECT_ROOT.endsWith(path.sep) ? PROJECT_ROOT : PROJECT_ROOT + path.sep;
-  if (!normalized.startsWith(rootWithSep) && normalized !== PROJECT_ROOT) {
+  const effectiveRoot = getEffectiveProjectRoot();
+  const normalized = path.resolve(effectiveRoot, targetPath);
+  // Trailing separator prevents prefix attacks (e.g. /root vs /root-evil).
+  const withSep = (p: string) => (p.endsWith(path.sep) ? p : p + path.sep);
+  const effectiveRootSep = withSep(effectiveRoot);
+  if (!normalized.startsWith(effectiveRootSep) && normalized !== effectiveRoot) {
+    throw new Error(`SECURITY ALERT: Path escape detected: ${targetPath}`);
+  }
+  // Safety floor: never allow a per-request root to escape the global repo.
+  const globalRootSep = withSep(PROJECT_ROOT);
+  if (!normalized.startsWith(globalRootSep) && normalized !== PROJECT_ROOT) {
     throw new Error(`SECURITY ALERT: Path escape detected: ${targetPath}`);
   }
   return normalized;

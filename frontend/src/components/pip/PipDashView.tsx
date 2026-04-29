@@ -1,12 +1,13 @@
 import React from 'react';
 import {
-  Shield, Database, Loader2, FlaskConical,
+  Shield, Database, Loader2, FlaskConical, Activity,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { motion } from 'framer-motion';
 import { ActivityEvent } from '../../store/types';
 import { LocalOverseerDecision, formatRelativeTime, VIEW_TRANSITION } from './types';
 import { PipView } from './PipTabBar';
+import type { TraceHealth } from '../../lib/api-client';
 
 type WaterfallState = {
   prompt: string;
@@ -30,6 +31,7 @@ export interface PipDashViewProps {
   globalProvider: string;
   thinkingModeEnabled: boolean;
   activeMissionCount: number;
+  traceHealth: TraceHealth | null;
 }
 
 const ACTIVITY_COLORS: Record<string, string> = {
@@ -51,6 +53,7 @@ export const PipDashView: React.FC<PipDashViewProps> = ({
   globalProvider,
   thinkingModeEnabled,
   activeMissionCount,
+  traceHealth,
 }) => {
   const STAGE_ORDER = ['planner', 'executor', 'reviewer'] as const;
   const pipelineIdle = !waterfall.currentStep && waterfall.steps.planner.status === 'idle';
@@ -186,6 +189,50 @@ export const PipDashView: React.FC<PipDashViewProps> = ({
           </div>
         </div>
       )}
+
+      {/* Retrieval Health Card */}
+      {traceHealth && traceHealth.traceCount > 0 && (() => {
+        const budgetPct = traceHealth.avgBudgetUtilization * 100;
+        const corrPct = traceHealth.correctionRate * 100;
+        const budgetColor = budgetPct >= 95 ? 'bg-rose-500' : budgetPct >= 85 ? 'bg-amber-500' : 'bg-emerald-500';
+        const corrColor = corrPct > 15 ? 'text-rose-400 bg-rose-500/15' : corrPct > 0 ? 'text-amber-400 bg-amber-500/15' : 'text-emerald-400 bg-emerald-500/15';
+        return (
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={() => onOpenView('intel')}
+            onKeyDown={e => e.key === 'Enter' && onOpenView('intel')}
+            className="group cc-card cc-card-accent-cyan px-3 py-2 cursor-pointer shrink-0 overflow-hidden relative"
+          >
+            <div className="flex items-center gap-2.5">
+              <Activity size={13} className="text-cyan-400/70 shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[11px] font-bold text-white">Retrieval</span>
+                    <span className="text-[9px] text-slate-600 font-mono">{traceHealth.traceCount} traces</span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <span className={cn('text-[9px] font-semibold px-1.5 py-0.5 rounded-full', corrColor)}>
+                      {corrPct > 0 ? `${corrPct.toFixed(0)}% corr` : 'clean'}
+                    </span>
+                    <span className="text-[9px] text-slate-600 font-mono">{traceHealth.avgPipelineMs}ms</span>
+                  </div>
+                </div>
+                <div className="h-1 w-full bg-white/5 rounded-full overflow-hidden">
+                  <div className={cn('h-full rounded-full transition-all', budgetColor)} style={{ width: `${Math.min(budgetPct, 100)}%` }} />
+                </div>
+                <div className="flex justify-between mt-0.5">
+                  <span className="text-[8px] text-slate-600">Budget</span>
+                  <span className={cn('text-[8px] font-mono', budgetPct >= 95 ? 'text-rose-400' : budgetPct >= 85 ? 'text-amber-400' : 'text-slate-500')}>
+                    {budgetPct.toFixed(0)}%
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Activity Feed */}
       <div className="flex-1 bg-black/30 rounded-xl border border-white/[0.03] p-3 flex flex-col overflow-hidden min-h-0">

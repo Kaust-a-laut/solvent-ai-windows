@@ -3,6 +3,7 @@
 
 export const FIREWORKS_CHAT_MODELS = [
   // Frontier
+  { label: 'Kimi K2.6',              value: 'accounts/fireworks/models/kimi-k2p6' },
   { label: 'Kimi K2.5',              value: 'accounts/fireworks/models/kimi-k2p5' },
   { label: 'GLM-5',                  value: 'accounts/fireworks/models/glm-5' },
   { label: 'GLM-4.7',                value: 'accounts/fireworks/models/glm-4p7' },

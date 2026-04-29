@@ -91,6 +91,14 @@ export interface ChatRequestData {
   };
   signal?: AbortSignal;
   sessionId?: string;
+  projectRoot?: string;
   tier?: 'full-agentic' | 'code-only';
   traits?: { toolUse: 'strong' | 'basic'; multimodal: boolean; contextWindow: number };
+  minScoreAdjustment?: number;
+  previewState?: {
+    url?: string | null;
+    bodyHash?: string | null;
+    consoleBuffer?: Array<{ level: string; message: string; timestamp: number }>;
+    selectedElement?: { tag: string; id?: string; classes: string[]; text: string } | null;
+  };
 }

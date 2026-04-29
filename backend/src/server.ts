@@ -27,6 +27,7 @@ import agentRoutes from './routes/agentRoutes';
 import healthRoutes from './routes/healthRoutes';
 import harnessRoutes from './routes/harnessRoutes';
 import previewRoutes from './routes/previewRoutes';
+import nativeCopyRoutes from './routes/nativeCopyRoutes';
 
 import { createServer } from 'http';
 import { Server } from 'socket.io';
@@ -39,6 +40,7 @@ import { SocketRateLimiter } from './utils/socketRateLimiter';
 import { codebaseIndexer } from './services/codebaseIndexer';
 import { vectorService } from './services/vectorService';
 import { modelAvailabilityService } from './services/modelAvailabilityService';
+import { nativeCopyManager } from './services/nativeCopyManager';
 
 // Timing-safe secret comparison to prevent timing attacks
 function safeCompare(a: string, b: string): boolean {
@@ -239,21 +241,19 @@ const API_SECRET = config.BACKEND_INTERNAL_SECRET;
 
 logger.info(`[Server] API_SECRET initialized: ${API_SECRET === 'solvent_dev_insecure_default' ? '✓ Using default (dev mode)' : '✓ Using custom secret'}`);
 
-// Dev-only secret exchange endpoint — mirrors what Electron's getSessionSecret() preload does.
+// Secret exchange endpoint — mirrors what Electron's getSessionSecret() preload does.
 // Allows the browser frontend (running at localhost:5173) to retrieve the session secret
-// so that fetchWithRetry() works in npm run dev without any manual .env setup.
-// Guarded by NODE_ENV check + localhost IP check. Never exists in production.
-if (process.env.NODE_ENV === 'development') {
-  app.get('/dev-secret', (req, res) => {
-    const ip = req.ip || '';
-    const isLocalhost = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
-    if (!isLocalhost) {
-      logger.warn(`[Security] /dev-secret accessed from non-localhost IP: ${ip}`);
-      return res.status(403).json({ error: 'Forbidden' });
-    }
-    res.json({ secret: API_SECRET });
-  });
-}
+// so that fetchWithRetry() works in dev without any manual .env setup.
+// Guarded by localhost IP check — only responds to requests from 127.0.0.1 / ::1.
+app.get('/dev-secret', (req, res) => {
+  const ip = req.ip || '';
+  const isLocalhost = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+  if (!isLocalhost) {
+    logger.warn(`[Security] /dev-secret accessed from non-localhost IP: ${ip}`);
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  res.json({ secret: API_SECRET });
+});
 
 // Security Middleware
 app.use((req, res, next) => {
@@ -262,6 +262,7 @@ app.use((req, res, next) => {
   // - Read-only informational endpoints (health, models, settings GET)
   // - API key validation (user-provided keys, no server secrets exposed)
   const isPublicPath =
+    req.path === '/dev-secret' ||
     req.path.startsWith('/generated_images') ||
     req.path.startsWith('/files') ||
     req.path.startsWith('/api/files/raw') ||
@@ -292,6 +293,7 @@ app.use((req, res, next) => {
 app.use('/api/v1', aiRoutes);
 app.use('/api/v1/agent', agentRoutes);
 app.use('/api/v1/preview', previewRoutes);
+app.use('/api/v1/native-copy', nativeCopyRoutes);
 app.use('/api/v1', healthRoutes);
 app.use('/api/v1', memoryRoutes);
 app.use('/api/v1', harnessRoutes);
@@ -412,6 +414,13 @@ async function gracefulShutdown(signal: string): Promise<void> {
     logger.info('[Server] Embedding cache flushed');
   } catch (error) {
     logger.warn('[Server] Error flushing embedding cache', error);
+  }
+
+  try {
+    await nativeCopyManager.stopAll();
+    logger.info('[Server] Native-copy sidecar stopped');
+  } catch (error) {
+    logger.warn('[Server] Error stopping sidecar', error);
   }
 
   setTimeout(() => {

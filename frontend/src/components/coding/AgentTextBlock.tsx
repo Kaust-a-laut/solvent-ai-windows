@@ -10,8 +10,16 @@ interface Props {
   isStreaming: boolean;
 }
 
-const BlinkingCursor: React.FC = () => (
-  <span className="animate-blink text-jb-accent">▋</span>
+const StreamingDots: React.FC = () => (
+  <span className="inline-flex items-center gap-0.5 ml-0.5 align-middle">
+    {[0, 1, 2].map(i => (
+      <span
+        key={i}
+        className="inline-block w-1.5 h-1.5 rounded-full bg-jb-accent/70 animate-bounce"
+        style={{ animationDelay: `${i * 150}ms`, animationDuration: '0.8s' }}
+      />
+    ))}
+  </span>
 );
 
 const CodeBlock: React.FC<{ language: string; children: string }> = ({ language, children }) => {
@@ -56,20 +64,14 @@ const CodeBlock: React.FC<{ language: string; children: string }> = ({ language,
 };
 
 export const AgentTextBlock: React.FC<Props> = ({ text, isStreaming }) => {
-  if (!text && isStreaming) {
-    return (
-      <p className="text-[12px] leading-relaxed text-slate-300">
-        <BlinkingCursor />
-      </p>
-    );
-  }
-
   if (isStreaming) {
     return (
-      <p className="text-[12px] leading-relaxed text-slate-300 whitespace-pre-wrap">
-        {text}
-        <BlinkingCursor />
-      </p>
+      <div className="flex items-start gap-2">
+        <div className="flex-1 text-[12px] leading-relaxed text-slate-300 whitespace-pre-wrap min-h-[20px]">
+          {text || ''}
+          <StreamingDots />
+        </div>
+      </div>
     );
   }
 

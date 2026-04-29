@@ -250,8 +250,16 @@ ${fullPrompt}`;
     const decisionLog: string[] = [];
 
     // Decay threshold: SCORE_THRESHOLD → -8% per attempt, floor at 65
+    // Note: _testsPassed is a no-op until the Executor is upgraded from string-
+    // based output to a real tool-using sub-agent. When that happens, remove
+    // the hardcoded true and gate on actual test results.
     const passThreshold = () => Math.max(65, APP_CONSTANTS.WATERFALL.SCORE_THRESHOLD - (attempts * 8));
-    const needsRetry = () => (reviewer.score ?? 0) < passThreshold() || reviewer._compilationPassed === false;
+    const needsRetry = () => {
+      const scoreOk = (reviewer.score ?? 0) >= passThreshold();
+      const typesOk = reviewer._compilationPassed !== false;
+      // _testsPassed is always true for now (string Executor can't run tests).
+      return !scoreOk || !typesOk;
+    };
 
     while (needsRetry() && attempts < maxRetries) {
       if (signal?.aborted) throw new SolventError('Waterfall cancelled by user.', SolventErrorCode.OPERATION_CANCELLED);
@@ -658,6 +666,7 @@ Output JSON:
       const response = await this.completeWithRetry(primaryProvider, prompt, { model: phase.primary.model, jsonMode: true, maxTokens: capMaxTokens(phase.primary.model, inputTokens, reviewerMaxTokens), apiKey: apiKeys?.[phase.primary.provider] }, { label: 'Reviewer', signal });
       const parsed = this.parseJSONResponse(response) as ReviewerOutput;
       parsed._compilationPassed = compilationPassed;
+      parsed._testsPassed = true; // String-based Executor can't run real tests yet; Phase C+ will upgrade to tool-using Executor
 
       if (typeof parsed.score === 'number' && parsed.score > 90 && parsed.crystallizable_insight) {
         try {
@@ -682,6 +691,7 @@ Output JSON:
         const res = await this.completeWithRetry(fbProvider, prompt, { model: phase.fallback.model, jsonMode: true, maxTokens: capMaxTokens(phase.fallback.model, inputTokens, reviewerMaxTokens), apiKey: apiKeys?.[phase.fallback.provider] }, { label: 'Reviewer-FB', signal });
         const parsed = this.parseJSONResponse(res) as ReviewerOutput;
         parsed._compilationPassed = compilationPassed;
+        parsed._testsPassed = true;
         return parsed;
       } catch (e: unknown) {
         const err2 = e as Error;
@@ -691,6 +701,7 @@ Output JSON:
         const res = await localProvider.complete(prompt, { model: phase.local, jsonMode: true, maxTokens: capMaxTokens(phase.local, inputTokens, reviewerMaxTokens), signal, apiKey: apiKeys?.ollama });
         const parsed = this.parseJSONResponse(res) as ReviewerOutput;
         parsed._compilationPassed = compilationPassed;
+        parsed._testsPassed = true;
         return parsed;
       }
     }

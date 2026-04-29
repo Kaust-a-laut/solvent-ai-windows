@@ -2,11 +2,13 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useAppStore } from '../../store/useAppStore';
 import type { AgentMessage, ToolEvent } from '../../store/codingSlice';
 import { persistAgentMessages, restoreAgentMessages } from '../../store/codingSlice';
-import { API_BASE_URL } from '../../lib/config';
-import { fetchWithRetry } from '../../lib/api-client';
+import { API_BASE_URL, BASE_URL } from '../../lib/config';
+import { fetchWithRetry, getSecret } from '../../lib/api-client';
 import { toolResultToIDEActions } from '../../lib/toolToIDEAction';
 import { AgentStatusBar } from './AgentStatusBar';
 import { AgentTimeline } from './AgentTimeline';
+import { EmptyState } from '../ui/EmptyState';
+import { Code } from 'lucide-react';
 import { AgentInput } from './AgentInput';
 import { AGENT_MODEL_OPTIONS } from '../ModelSelector';
 import type { AgentProvider } from '../../store/settingsSlice';
@@ -49,11 +51,16 @@ function buildPreviewContextBlock(ctx: PreviewContext): string {
 export const AgentChatPanel: React.FC = () => {
   const {
     addAgentMessage, clearAgentMessages, updateAgentMessage,
+    truncateAfterMessage, updateUserMessageContent,
     activeFile, openFiles, selectedAgentModel, selectedAgentProvider,
     setOpenFiles, setActiveFile, addTerminalLine,
-    setPendingDiff,
+    setPendingDiff, requestSandboxRun,
     agentMessages, currentProject, setProjectMap,
     previewSnapshot, previewBodyHTML, previewConsoleBuffer, previewSelectedElement,
+    setAgentBusy, queuedAgentPrompt, setQueuedAgentPrompt,
+    accumulateTokenUsage, sessionPromptTokens, sessionCompletionTokens, sessionCachedTokens,
+    resetTokenUsage, setMemoryVisible,
+    setAgentPlan,
   } = useAppStore();
 
   const [isGenerating, setIsGenerating] = useState(false);
@@ -77,7 +84,10 @@ export const AgentChatPanel: React.FC = () => {
     const saved = restoreAgentMessages(projectKey);
     if (saved && saved.length > 0) {
       clearAgentMessages();
-      saved.forEach(m => addAgentMessage(m));
+      const cleaned = saved
+        .filter(m => !(m.role === 'assistant' && m.isStreaming))
+        .map(m => m.role === 'assistant' ? { ...m, isStreaming: false } : m);
+      cleaned.forEach(m => addAgentMessage(m));
     }
   }, [currentProject?.path]);
 
@@ -92,6 +102,16 @@ export const AgentChatPanel: React.FC = () => {
     return () => clearTimeout(timer);
   }, [agentMessages, currentProject?.path]);
 
+  // Sync local isGenerating to the store so PreviewPanel can show/hide the fix chip
+  useEffect(() => { setAgentBusy(isGenerating); }, [isGenerating, setAgentBusy]);
+
+  // Pick up queued agent prompts (e.g. from PreviewPanel's "Ask agent to fix" chip)
+  useEffect(() => {
+    if (!queuedAgentPrompt || isGenerating) return;
+    setQueuedAgentPrompt(null); // clear it immediately
+    handleSend(queuedAgentPrompt);
+  }, [queuedAgentPrompt, isGenerating, setQueuedAgentPrompt]);
+
   // Fetch project index
   useEffect(() => {
     if (!currentProject) { setProjectMap(null); return; }
@@ -100,7 +120,7 @@ export const AgentChatPanel: React.FC = () => {
         const param = currentProject.type === 'folder'
           ? `?project=${encodeURIComponent(currentProject.path)}`
           : `?project=${encodeURIComponent(currentProject.name)}`;
-        const data = await fetchWithRetry(`${API_BASE_URL}/api/files/index${param}`) as { map: string };
+        const data = await fetchWithRetry(`${BASE_URL}/api/files/index${param}`) as { map: string };
         setProjectMap(data.map ?? null);
       } catch { setProjectMap(null); }
     };
@@ -136,7 +156,7 @@ export const AgentChatPanel: React.FC = () => {
           let content = action.content;
           if (!content) {
             try {
-              const data = await fetchWithRetry(`${API_BASE_URL}/api/files/read?path=${encodeURIComponent(action.path)}`) as Record<string, string>;
+              const data = await fetchWithRetry(`${BASE_URL}/api/files/read?path=${encodeURIComponent(action.path)}`) as Record<string, string>;
               content = data.content ?? '';
             } catch {
               addTerminalLine(`[ERROR]: Could not open ${action.path}`);
@@ -165,9 +185,12 @@ export const AgentChatPanel: React.FC = () => {
             addTerminalLine(line.slice(0, 200));
           }
           break;
+        case 'run_sandbox':
+          requestSandboxRun();
+          break;
       }
     }
-  }, [setOpenFiles, setActiveFile, addTerminalLine, setPendingDiff]);
+  }, [setOpenFiles, setActiveFile, addTerminalLine, setPendingDiff, requestSandboxRun]);
 
   const flushPendingDelta = useCallback((assistantId: string) => {
     const pending = pendingDeltaRef.current;
@@ -192,7 +215,7 @@ export const AgentChatPanel: React.FC = () => {
   }, []);
 
   const handleSend = useCallback(async (text: string) => {
-    if (!text.trim() || isGenerating || !currentProject) return;
+    if (!text.trim() || isGenerating) return;
 
     const userMsg: AgentMessage = {
       id: `user-${Date.now()}`,
@@ -201,6 +224,17 @@ export const AgentChatPanel: React.FC = () => {
       fileContext: activeFile ?? undefined,
     };
     addAgentMessage(userMsg);
+
+    // Snapshot preview state once at send time — same data the inline context
+    // block uses, also forwarded as structured fields so preview-runtime tools
+    // (get_console_logs, get_selected_element) can read live values.
+    const { previewUrl, previewBodyHash } = useAppStore.getState();
+    const previewStatePayload = {
+      url: previewUrl ?? null,
+      bodyHash: previewBodyHash ?? null,
+      consoleBuffer: previewConsoleBuffer.slice(-200),
+      selectedElement: previewSelectedElement ?? null,
+    };
 
     setIsGenerating(true);
     setCurrentAction('Thinking...');
@@ -238,9 +272,14 @@ export const AgentChatPanel: React.FC = () => {
       : userMsg.content;
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/agent/chat`, {
+      const secret = await getSecret();
+      const url = `${API_BASE_URL}/agent/chat`;
+      const agentOption = AGENT_MODEL_OPTIONS.find(
+        m => m.model === selectedAgentModel && m.provider === selectedAgentProvider
+      );
+      const response = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'X-Solvent-Secret': secret },
         body: JSON.stringify({
           messages: [
             ...agentMessages.map(m => ({ role: m.role, content: m.content })),
@@ -248,8 +287,11 @@ export const AgentChatPanel: React.FC = () => {
           ],
           model: selectedAgentModel,
           provider: selectedAgentProvider,
-          project: currentProject.type === 'folder' ? currentProject.path : currentProject.name,
+          tier: agentOption?.tier || 'code-only',
+          ...(currentProject && { project: currentProject.type === 'folder' ? currentProject.path : currentProject.name }),
+          ...(currentProject && { projectRoot: currentProject.path }),
           openFiles: openFiles.slice(0, 10),
+          previewState: previewStatePayload,
         }),
         signal: abortRef.current.signal,
       });
@@ -332,6 +374,11 @@ export const AgentChatPanel: React.FC = () => {
                 if (evt.type === 'tool_result' || evt.type === 'tool_error') {
                   await dispatchIDEActions(toolEvent);
                 }
+                // Extract plan data from create_plan / update_plan results
+                const tre = evt as { tool?: string; result?: { plan?: any } };
+                if ((tre.tool === 'create_plan' || tre.tool === 'update_plan') && tre.result?.plan) {
+                  setAgentPlan({ steps: tre.result.plan });
+                }
                 break;
               }
               case 'text_complete': {
@@ -346,23 +393,55 @@ export const AgentChatPanel: React.FC = () => {
                 }));
                 break;
               }
+              case 'usage': {
+                const u = evt as Record<string, unknown>;
+                if (typeof u.promptTokens === 'number' && typeof u.completionTokens === 'number') {
+                  accumulateTokenUsage({ promptTokens: u.promptTokens, completionTokens: u.completionTokens, cachedTokens: u.cachedTokens as number | undefined });
+                }
+                break;
+              }
+              case 'plan_update': {
+                const u = evt as Record<string, unknown>;
+                if (u.plan && typeof u.plan === 'object') {
+                  setAgentPlan(u.plan as any);
+                }
+                break;
+              }
               case 'done':
                 flushPendingDelta(assistantId);
+                updateAgentMessage(assistantId, { isStreaming: false });
                 setIsGenerating(false);
                 setCurrentAction('');
                 break;
-              case 'error':
+              case 'error': {
                 flushPendingDelta(assistantId);
                 addTerminalLine(`[Agent Error]: ${evt.message as string}`);
+                const errMsg = useAppStore.getState().agentMessages.find(m => m.id === assistantId);
+                if (!errMsg?.content) {
+                  useAppStore.setState(state => ({
+                    agentMessages: state.agentMessages.filter(m => m.id !== assistantId),
+                  }));
+                } else {
+                  updateAgentMessage(assistantId, { isStreaming: false });
+                }
                 setIsGenerating(false);
                 setCurrentAction('');
                 break;
+              }
             }
-          } catch { /* ignore malformed events */ }
+          } catch { /* malformed SSE line — skip */ }
         }
       }
     } catch (err) {
       flushPendingDelta(assistantId);
+      const currentMsg = useAppStore.getState().agentMessages.find(m => m.id === assistantId);
+      if (!currentMsg?.content) {
+        useAppStore.setState(state => ({
+          agentMessages: state.agentMessages.filter(m => m.id !== assistantId),
+        }));
+      } else {
+        updateAgentMessage(assistantId, { isStreaming: false });
+      }
       if ((err as Error).name !== 'AbortError') {
         addTerminalLine(`[Agent Error]: ${(err as Error).message}`);
       }
@@ -384,15 +463,59 @@ export const AgentChatPanel: React.FC = () => {
         iteration={iteration}
         model={selectedAgentModel || AGENT_MODEL_OPTIONS[0]?.model || 'gemini-2.5-flash'}
         onStop={handleStop}
-        onClear={clearAgentMessages}
+        onClear={() => { clearAgentMessages(); resetTokenUsage(); }}
         onModelChange={handleModelChange}
+        tokenUsage={{ promptTokens: sessionPromptTokens, completionTokens: sessionCompletionTokens, cachedTokens: sessionCachedTokens }}
+        onToggleMemory={() => setMemoryVisible(true)}
       />
+      {agentMessages.length === 0 && !isGenerating && (
+        <div className="flex-1 flex items-center justify-center overflow-y-auto">
+          <EmptyState
+            icon={Code}
+            title="Agent ready"
+            description="Describe a task, paste some code, or ask a question to get started."
+          />
+        </div>
+      )}
+      {agentMessages.length > 0 && (
       <AgentTimeline
         agentMessages={agentMessages}
         isGenerating={isGenerating}
         copiedMsgId={copiedMsgId}
         onCopy={copyMessage}
+        onEditAndRerun={(messageId, newContent) => {
+          truncateAfterMessage(messageId);
+          updateUserMessageContent(messageId, newContent);
+          handleSend(newContent);
+        }}
+        onUndoIteration={async (iter) => {
+          const writeEvents = iter.toolEvents.filter(
+            (e) => e.type === 'tool_start' && WRITE_TOOL_NAMES.has(e.tool) && e.beforeContent !== undefined
+          );
+          const secret = await getSecret();
+          for (const evt of writeEvents) {
+            const filePath = evt.args?.path as string;
+            if (!filePath || !evt.beforeContent) continue;
+            try {
+              // Write the beforeContent back to the file
+              await fetch(`${BASE_URL}/api/files/write`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'X-Solvent-Secret': secret },
+                body: JSON.stringify({ path: filePath, content: evt.beforeContent, project: currentProject?.path }),
+              });
+              // Update openFiles in the store
+              const currentFiles = useAppStore.getState().openFiles;
+              setOpenFiles(currentFiles.map(f =>
+                f.path === filePath ? { ...f, content: evt.beforeContent! } : f
+              ));
+            } catch (err) {
+              addTerminalLine(`[undo] Failed to revert ${filePath}: ${err}`);
+            }
+          }
+          addTerminalLine(`[undo] Reverted ${writeEvents.length} file write(s) from iteration ${iter.index + 1}`);
+        }}
       />
+      )}
       <AgentInput
         isGenerating={isGenerating}
         onSend={handleSend}

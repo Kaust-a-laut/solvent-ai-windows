@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  X, Cpu, Sliders, Key, Database, Search, Download, Upload,
+  X, Cpu, Sliders, Key, Database, Search, Download, Upload, Activity,
   type LucideIcon,
 } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
@@ -16,8 +16,9 @@ import { ModelsTab } from './settings/ModelsTab';
 import { BehaviorTab } from './settings/BehaviorTab';
 import { ApiKeysTab } from './settings/ApiKeysTab';
 import { MemoryTab } from './settings/MemoryTab';
+import { DebugTab } from './settings/DebugTab';
 
-type TabId = 'models' | 'behavior' | 'api-keys' | 'memory';
+type TabId = 'models' | 'behavior' | 'api-keys' | 'memory' | 'debug';
 
 export const SettingsModal = () => {
   const {
@@ -170,6 +171,7 @@ export const SettingsModal = () => {
     { id: 'behavior',  label: 'Behavior',  icon: Sliders,  shortcut: '\u2318 2' },
     { id: 'api-keys',  label: 'API Keys',  icon: Key,      shortcut: '\u2318 3' },
     { id: 'memory',    label: 'Memory',    icon: Database, shortcut: '\u2318 4' },
+    { id: 'debug',     label: 'Observability', icon: Activity, shortcut: '\u2318 5' },
   ];
 
   return (
@@ -302,6 +304,7 @@ export const SettingsModal = () => {
                 {activeTab === 'behavior' && <BehaviorTab />}
                 {activeTab === 'api-keys' && <ApiKeysTab />}
                 {activeTab === 'memory' && <MemoryTab />}
+                {activeTab === 'debug' && <DebugTab />}
               </motion.div>
             </AnimatePresence>
           </div>

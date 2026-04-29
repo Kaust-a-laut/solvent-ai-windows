@@ -36,7 +36,7 @@ export const MODEL_OPTIONS: ModelOption[] = [
  */
 export const AGENT_MODEL_OPTIONS: ModelOption[] = [
   // ── Full Agentic — strong tool-calling, multimodal where noted ────────────────────────
-  { provider: 'ollama',     model: 'kimi-k2.6:cloud',                                           displayName: 'Kimi K2.6',          sublabel: 'Moonshot · Vision · Code',  color: 'text-rose-400',    bgColor: 'bg-rose-500/10',    icon: Flame,    tier: 'full-agentic' },
+  { provider: 'fireworks',  model: 'accounts/fireworks/models/kimi-k2p6',                       displayName: 'Kimi K2.6',          sublabel: 'Moonshot · Vision · Code',  color: 'text-rose-400',    bgColor: 'bg-rose-500/10',    icon: Flame,    tier: 'full-agentic' },
   { provider: 'fireworks',  model: 'accounts/fireworks/models/kimi-k2p5',                       displayName: 'Kimi K2.5',          sublabel: 'Moonshot · Vision · Code',  color: 'text-rose-400',    bgColor: 'bg-rose-500/10',    icon: Flame,    tier: 'full-agentic' },
   { provider: 'openrouter', model: 'google/gemini-2.5-flash',                                   displayName: 'Gemini 2.5 Flash',   sublabel: 'Google · Vision · Fast',    color: 'text-blue-400',    bgColor: 'bg-blue-500/10',    icon: Sparkles, tier: 'full-agentic' },
   { provider: 'openrouter', model: 'google/gemini-2.5-pro-exp-03-25',                           displayName: 'Gemini 2.5 Pro',     sublabel: 'Google · Vision · Flagship',color: 'text-blue-400',    bgColor: 'bg-blue-500/10',    icon: Sparkles, tier: 'full-agentic' },

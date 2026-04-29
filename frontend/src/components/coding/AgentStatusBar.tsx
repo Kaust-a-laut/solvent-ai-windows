@@ -1,5 +1,5 @@
 import React from 'react';
-import { Square, Trash2, ChevronDown } from 'lucide-react';
+import { Square, Trash2, ChevronDown, Brain } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { AGENT_MODEL_OPTIONS } from '../ModelSelector';
 
@@ -11,6 +11,10 @@ interface Props {
   onStop: () => void;
   onClear: () => void;
   onModelChange: (model: string, provider: string) => void;
+  /** Session token usage for display in the status bar. */
+  tokenUsage?: { promptTokens: number; completionTokens: number; cachedTokens: number };
+  /** Toggle memory panel */
+  onToggleMemory?: () => void;
 }
 
 export const AgentStatusBar: React.FC<Props> = ({
@@ -21,6 +25,8 @@ export const AgentStatusBar: React.FC<Props> = ({
   onStop,
   onClear,
   onModelChange,
+  tokenUsage,
+  onToggleMemory,
 }) => {
   const [showModelMenu, setShowModelMenu] = React.useState(false);
   const selectedModel =
@@ -136,6 +142,12 @@ export const AgentStatusBar: React.FC<Props> = ({
             Iter {iteration}
           </span>
         )}
+        {!isGenerating && tokenUsage && tokenUsage.promptTokens > 0 && (
+          <span className="text-[9px] text-white/20 font-mono" title={`${tokenUsage.promptTokens} prompt + ${tokenUsage.completionTokens} completion tokens`}>
+            {(tokenUsage.promptTokens + tokenUsage.completionTokens).toLocaleString()} tok
+            {tokenUsage.cachedTokens > 0 && ` (${tokenUsage.cachedTokens.toLocaleString()} cached)`}
+          </span>
+        )}
       </div>
 
       <div className="flex items-center gap-3">
@@ -143,6 +155,18 @@ export const AgentStatusBar: React.FC<Props> = ({
           <span className="text-[11px] text-white/40 truncate max-w-[200px]">
             {currentAction}
           </span>
+        )}
+
+        {onToggleMemory && (
+          <button
+            type="button"
+            onClick={onToggleMemory}
+            className="p-1 rounded hover:bg-violet-500/10 text-violet-400/50 hover:text-violet-400 transition-colors"
+            title="Agent Memory"
+            aria-label="Toggle memory panel"
+          >
+            <Brain size={13} />
+          </button>
         )}
 
         {isGenerating ? (

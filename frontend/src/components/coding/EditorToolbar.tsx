@@ -1,6 +1,8 @@
 import React from 'react';
 import { Save, Play, Loader2, Box, Terminal, Plus, FolderOpen, PanelLeftClose } from 'lucide-react';
 import { cn } from '../../lib/utils';
+import { NativeBackendChip } from './NativeBackendChip';
+import type { ProjectInfo } from '../../store/codingSlice';
 
 interface EditorToolbarProps {
   fileTreeVisible: boolean;
@@ -14,7 +16,7 @@ interface EditorToolbarProps {
   bootStatus: 'idle' | 'booting' | 'ready' | 'error';
   isRunning: boolean;
   activeFile: string | null;
-  currentProject: { name: string } | null;
+  currentProject: ProjectInfo | null;
   onBootWebContainer: () => void;
   onRetryBoot: () => void;
   onSave: () => void;
@@ -118,6 +120,11 @@ export const EditorToolbar: React.FC<EditorToolbarProps> = ({
         </button>
       )}
 
+      <NativeBackendChip currentProject={currentProject} />
+
+      {/* Separator between runtime-mode group (Sandbox/Native) and action group (Save/Run) */}
+      <div className="h-5 w-px bg-white/[0.06] mx-1" />
+
       <button
         type="button"
         onClick={onSave}
@@ -138,6 +145,10 @@ export const EditorToolbar: React.FC<EditorToolbarProps> = ({
         {/* Fix 3: icon is decorative; button has aria-label */}
         <Play size={15} fill="currentColor" fillOpacity={0.3} aria-hidden="true" />
       </button>
+
+      {/* Separator between action group (Save/Run) and view-toggle group (Chat/Terminal/Hide) */}
+      <div className="h-5 w-px bg-white/[0.06] mx-1" />
+
       <button
         type="button"
         onClick={() => setChatPanelVisible(!chatPanelVisible)}

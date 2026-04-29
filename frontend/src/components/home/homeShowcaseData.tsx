@@ -80,7 +80,7 @@ export const HOME_SHOWCASE: ShowcaseItem[] = [
     border: 'border-jb-purple/15',
     accentColor: '#9D5BD2',
     tag: 'Control',
-    actionText: 'Launch Mission Control',
+    actionText: 'Open Command Center',
     mode: 'command_center',
     visual: (
       <div className="absolute inset-0 p-6 z-20 flex flex-col justify-between">

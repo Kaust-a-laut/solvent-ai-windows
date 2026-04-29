@@ -27,6 +27,8 @@ import { normalizeMessages } from '../utils/messageUtils';
 import { fitConversation } from '../utils/conversationWindow';
 import { getContextBudget } from '../utils/tokenEstimator';
 import { ProviderSemaphore } from './providerSemaphore';
+import { circuitBreaker } from './circuitBreaker';
+import { providerSelector } from './providerSelector';
 
 const providerSemaphore = new ProviderSemaphore(parseInt(process.env.MAX_CONCURRENT_PROVIDER_CALLS || '5', 10));
 
@@ -93,9 +95,21 @@ export class AIService {
   // Maps sessionId → last trace id for that session (used for auto-accepted signal).
   // Ephemeral: cleared on backend restart. Phase C will persist this.
   private lastTraceBySession = new Map<string, string>();
+  private traceToSession = new Map<string, string>();
+  // Per-session minScore adjustment raised by correction signals (+0.03 per correction, capped at +0.15).
+  private sessionMinScoreAdj = new Map<string, number>();
 
   async performSearch(query: string, page?: number) {
     return searchService.webSearch(query, page);
+  }
+
+  recordCorrection(sessionId: string): void {
+    const current = this.sessionMinScoreAdj.get(sessionId) || 0;
+    this.sessionMinScoreAdj.set(sessionId, Math.min(current + 0.03, 0.15));
+  }
+
+  getSessionForTrace(traceId: string): string | undefined {
+    return this.traceToSession.get(traceId);
   }
 
   async runWaterfallStep(step: WaterfallStep, input: string, context: WaterfallContext | undefined, globalProvider?: string) {
@@ -124,7 +138,10 @@ export class AIService {
 
       logger.info(`Processing chat request with provider: ${provider}, model: ${model}`);
 
-      // 2. Enrich Context
+      // 2. Enrich Context (apply correction-driven minScore adjustment if present)
+      const corrAdj = this.sessionMinScoreAdj.get(data.sessionId || 'unknown') || 0;
+      if (corrAdj > 0) data.minScoreAdjustment = corrAdj;
+
       const enrichStart = Date.now();
       const { messages: enrichedMessages, provenance } = await this.enrichContext(data);
       const pipelineMs = Date.now() - enrichStart;
@@ -177,6 +194,7 @@ export class AIService {
       };
       traceLogger.appendTrace(trace).catch(() => {}); // fire-and-forget
       this.lastTraceBySession.set(sessionId, trace.id);
+      this.traceToSession.set(trace.id, sessionId);
 
       // 2.5. Fit conversation to token budget (sliding window with summarization)
       const contextBudget = getContextBudget(model, maxTokens || 2048);
@@ -443,11 +461,37 @@ After </thinking>, deliver the answer cleanly without restating the reasoning.`
         maxTokens,
         apiKey: apiKeys?.[provider]
       }));
+      await circuitBreaker.recordSuccess(provider);
       return { response, model };
     } catch (error: unknown) {
       const err = error instanceof Error ? error : new Error(String(error));
-      logger.warn(`${provider} failed, initiating fallback: ${err.message}`);
-      return this.handleFallbacks(messages, mode, fallbackModel, temp, maxTokens, err, apiKeys, provider);
+      await circuitBreaker.recordFailure(provider);
+      logger.warn(`${provider} failed, initiating dynamic fallback: ${err.message}`);
+      
+      try {
+        const nextProviderPlugin = await providerSelector.select({
+          priority: 'cost',
+          requirements: {
+            inputTokens: messages.reduce((acc, m) => acc + m.content.length, 0) / 4,
+            outputTokens: maxTokens || 1000
+          }
+        });
+        const nextProvider = nextProviderPlugin.id;
+        logger.info(`[AIService] Dynamic fallback selected: ${nextProvider}`);
+        
+        const fallbackModelToUse = fallbackModel || nextProviderPlugin.defaultModel || 'unknown';
+        const fallbackResponse = await providerSemaphore.run(() => nextProviderPlugin.complete(messages, {
+          model: fallbackModelToUse,
+          temperature: temp,
+          maxTokens,
+          apiKey: apiKeys?.[nextProvider]
+        }));
+        await circuitBreaker.recordSuccess(nextProvider);
+        return { response: fallbackResponse, model: fallbackModelToUse, info: `${nextProvider} dynamic fallback` };
+      } catch (fallbackError: unknown) {
+        logger.warn(`[AIService] Dynamic fallback failed, falling back to static chain.`);
+        return this.handleFallbacks(messages, mode, fallbackModel, temp, maxTokens, err, apiKeys, provider);
+      }
     }
   }
 

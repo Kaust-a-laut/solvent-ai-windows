@@ -6,6 +6,44 @@ import { Server } from 'socket.io';
 import { appEventBus } from '../utils/eventBus';
 import { toolService } from './toolService';
 
+/**
+ * Provider fallback chains for the Overseer.
+ * When the primary provider is rate-limited or unavailable, fall through
+ * the chain until a healthy provider is found.
+ */
+const OVERSEER_ANALYSIS_CANDIDATES = [
+  { provider: 'groq', model: 'llama-4-scout-17b-16e-instruct' },
+  { provider: 'fireworks', model: 'accounts/fireworks/models/llama-v3p1-70b-instruct' },
+  { provider: 'openrouter', model: 'meta-llama/llama-3.1-70b-instruct' },
+  { provider: 'deepseek', model: 'deepseek-chat' },
+];
+
+const OVERSEER_REASONING_CANDIDATES = [
+  { provider: 'gemini', model: 'gemini-2.5-flash' },
+  { provider: 'openrouter', model: 'google/gemini-2.5-flash' },
+  { provider: 'fireworks', model: 'accounts/fireworks/models/llama-v3p1-70b-instruct' },
+  { provider: 'groq', model: 'llama-4-scout-17b-16e-instruct' },
+];
+
+interface ProviderModelPair {
+  provider: { complete: (...args: unknown[]) => Promise<string>; isReady?: () => boolean };
+  model: string;
+}
+
+async function getOverseerProvider(candidates: typeof OVERSEER_ANALYSIS_CANDIDATES): Promise<ProviderModelPair> {
+  for (const { provider: providerName, model } of candidates) {
+    try {
+      const provider = await AIProviderFactory.getProvider(providerName);
+      if (provider.isReady()) {
+        return { provider: provider as ProviderModelPair['provider'], model };
+      }
+    } catch {
+      // Provider unavailable or misconfigured — try next
+    }
+  }
+  throw new Error('Overseer: No available provider in fallback chain. Configure at least one API key.');
+}
+
 // --- Interfaces replacing `any` types ---
 
 interface GraphNode {
@@ -81,6 +119,10 @@ const OVERSEER_ALLOWED_TOOLS = new Set([
   'read_file',
   'list_files',
   'web_search',
+  'get_file_outline',
+  'grep_files',
+  'get_project_info',
+  'fetch_web_content',
 ]);
 
 // Tools that can be auto-approved without user confirmation (safe read-only ops)
@@ -102,6 +144,11 @@ export class SupervisorService {
   // so the Overseer remembers what it already decided and doesn't contradict itself.
   private decisionLedger: string[] = [];
   private readonly MAX_LEDGER_ENTRIES = 10;
+
+  // Recent Overseer insights keyed by sessionId — injected into the main agent's
+  // system prompt as [OVERSEER NOTE] so the coding agent benefits from oversight.
+  private recentInsights: Map<string, string[]> = new Map();
+  private readonly MAX_INSIGHTS_PER_SESSION = 3;
 
   // Pending decisions queue for approval flow
   private pendingDecisions: Map<string, PendingDecision> = new Map();
@@ -146,8 +193,8 @@ export class SupervisorService {
     logger.info('[Supervisor] Analyzing mission delta via Groq LPU...');
 
     try {
-      const groq = await AIProviderFactory.getProvider('groq');
-      
+      const { provider: analysisProvider, model: analysisModel } = await getOverseerProvider(OVERSEER_ANALYSIS_CANDIDATES);
+
       // Pull relevant long-term context for supervision
       const relevantMemories = await vectorService.search(noteContent, 2);
       const memoryContext = relevantMemories
@@ -178,10 +225,10 @@ export class SupervisorService {
         "crystallize": { "content": "The rule/fact", "type": "architectural_decision|project_rule" } (OR null)
       }`;
 
-      const response = await groq.complete([
+      const response = await analysisProvider.complete([
         { role: 'system', content: 'You are the Solvent Knowledge Graph Manager. Your job is to keep the project knowledge graph accurate, surface crystallizable architectural insights, and identify when new stable rules emerge from user notes. Respond in strict JSON only — no prose outside the JSON object.' },
         { role: 'user', content: prompt }
-      ], { model: 'llama-4-scout-17b-16e-instruct', temperature: 0.1 });
+      ], { model: analysisModel, temperature: 0.1 });
 
       const analysis = this.parseResponse(response);
       
@@ -213,12 +260,17 @@ export class SupervisorService {
   }
 
   private parseResponse(res: string) {
+    // Try direct parse first (jsonMode responses are clean JSON)
+    try {
+      return JSON.parse(res.trim());
+    } catch { /* fall through */ }
+    // Fallback: extract JSON object via regex (for providers that wrap JSON in markdown)
     try {
       const jsonMatch = res.match(/\{[\s\S]*\}/);
-      return JSON.parse(jsonMatch ? jsonMatch[0] : res);
-    } catch (e) {
-      return null;
-    }
+      if (jsonMatch) return JSON.parse(jsonMatch[0]);
+    } catch { /* fall through */ }
+    logger.warn('[Overseer] Failed to parse response as JSON — silent failure prevented');
+    return null;
   }
 
   emitClarificationRequest(payload: { type: string, question: string, data: unknown }) {
@@ -322,7 +374,7 @@ export class SupervisorService {
     this.toolCallsInCycle = 0;
 
     try {
-      const gemini = await AIProviderFactory.getProvider('gemini');
+      const { provider: reasoningProvider, model: reasoningModel } = await getOverseerProvider(OVERSEER_REASONING_CANDIDATES);
 
       // 1. Build enriched live context from all signal sources
       const liveContext = await this.buildLiveContext(context.activity, context.data || {});
@@ -362,9 +414,9 @@ RESPONSE FORMAT (strict JSON):
   "mentalMapUpdate": "Brief note on how the knowledge graph should change, or null"
 }`;
 
-      const response = await gemini.complete([
+      const response = await reasoningProvider.complete([
         { role: 'user', content: prompt }
-      ], { model: 'gemini-2.5-flash', temperature: 0.1 });
+      ], { model: reasoningModel, temperature: 0.1, jsonMode: true });
 
       const result = this.parseResponse(response);
 
@@ -374,6 +426,11 @@ RESPONSE FORMAT (strict JSON):
           this.decisionLedger.push(`[${context.activity}] ${result.decision}`);
           if (this.decisionLedger.length > this.MAX_LEDGER_ENTRIES) {
             this.decisionLedger.shift(); // rolling window — drop oldest
+          }
+
+          // Also push as an insight the main agent can consume via [OVERSEER NOTE]
+          if (result.intervention?.needed && result.intervention.message) {
+            this.pushInsight(context.activity, result.intervention.message);
           }
         }
 
@@ -613,6 +670,40 @@ RESPONSE FORMAT (strict JSON):
   }
 
   /**
+   * Get recent Overseer insights for a session. Called by the main agent's
+   * chat handler to inject [OVERSEER NOTE] into the system prompt.
+   */
+  getRecentInsights(sessionId?: string): string[] {
+    if (sessionId) {
+      return this.recentInsights.get(sessionId) ?? [];
+    }
+    // If no sessionId, return all insights flattened
+    return Array.from(this.recentInsights.values()).flat();
+  }
+
+  /**
+   * Push an insight into the session's insight queue. Called by think() when
+   * the Overseer makes a decision that the main agent should know about.
+   */
+  pushInsight(sessionId: string, insight: string): void {
+    const insights = this.recentInsights.get(sessionId) ?? [];
+    insights.push(insight);
+    while (insights.length > this.MAX_INSIGHTS_PER_SESSION) insights.shift();
+    this.recentInsights.set(sessionId, insights);
+  }
+
+  /**
+   * Clear insights for a session (e.g. on new conversation).
+   */
+  clearInsights(sessionId?: string): void {
+    if (sessionId) {
+      this.recentInsights.delete(sessionId);
+    } else {
+      this.recentInsights.clear();
+    }
+  }
+
+  /**
    * Proactive Memory: Analyzes current context (focus/files) to surface relevant rules *before* mistakes happen.
    */
   async provideGuidance(contextFocus: string) {
@@ -638,24 +729,24 @@ RESPONSE FORMAT (strict JSON):
 
       if (!memoryContext) return;
 
-      const groq = await AIProviderFactory.getProvider('groq');
+      const { provider: guidanceProvider, model: guidanceModel } = await getOverseerProvider(OVERSEER_ANALYSIS_CANDIDATES);
       const prompt = `Act as a Proactive Engineering Guide.
-      
+
       USER CONTEXT: "${contextFocus}"
-      
+
       RELEVANT MEMORY:
       ${memoryContext}
-      
+
       TASK:
       Determine if any of the above memories are CRITICAL to mention right now to prevent a mistake or align the workflow.
       If yes, output a concise "Nudge". If the rules are obvious or irrelevant, output "NO_ACTION".
       
       Format: Just the nudge text or "NO_ACTION".`;
 
-      const nudge = await groq.complete([
+      const nudge = await guidanceProvider.complete([
         { role: 'system', content: 'You are a helpful, non-intrusive assistant.' },
         { role: 'user', content: prompt }
-      ], { model: 'llama-4-scout-17b-16e-instruct', temperature: 0 });
+      ], { model: guidanceModel, temperature: 0 });
 
       if (nudge && !nudge.includes('NO_ACTION')) {
         if (this.io) {

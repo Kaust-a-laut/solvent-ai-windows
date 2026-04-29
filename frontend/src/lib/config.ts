@@ -2,10 +2,16 @@ const isBrowser = typeof window !== 'undefined';
 const isElectron = isBrowser && /Electron/i.test(navigator.userAgent);
 
 // In Electron with file://, window.location.hostname is empty. Default to localhost.
-const host = (isBrowser && window.location.hostname && window.location.hostname !== '') 
-  ? window.location.hostname 
+const host = (isBrowser && window.location.hostname && window.location.hostname !== '')
+  ? window.location.hostname
   : 'localhost';
 
+// Keep BASE_URL relative in browser contexts so fetches hit /api/... on the
+// current origin and get proxied by Vite. In the Native Bridge dogfooding loop
+// the copy's .env.local sets VITE_BACKEND_URL, which Vite's server.proxy reads
+// at dev-server start — so the proxy target changes without the browser ever
+// making a cross-origin request. Overriding BASE_URL here would bypass that
+// proxy and trigger CORS.
 export const BASE_URL = isElectron ? `http://${host}:3001` : '';
 export const API_BASE_URL = `${BASE_URL}/api/v1`;
 

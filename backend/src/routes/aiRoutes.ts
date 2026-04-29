@@ -366,6 +366,7 @@ router.post('/overseer/reject', async (req, res) => {
 
 // ── Debug Traces ─────────────────────────────────────────────────────────────
 router.get('/debug/traces', AIController.getTraces);
+router.get('/debug/traces/health', AIController.getTraceHealth);
 router.patch('/debug/traces/:id/outcome', AIController.updateTraceOutcome);
 
 // ── Codebase Indexing ────────────────────────────────────────────────────────

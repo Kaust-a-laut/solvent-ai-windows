@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
-import { fetchWithRetry } from '../lib/api-client';
+import { fetchWithRetry, getTraceHealth, type TraceHealth } from '../lib/api-client';
 import { API_BASE_URL } from '../lib/config';
 import { socket } from '../lib/socket';
 
@@ -57,6 +57,15 @@ export const NotepadPiP = ({ onClose, onDetach }: { onClose?: () => void; onDeta
   const [missionTemplate, setMissionTemplate] = useState('consultation');
   const [launchingMission, setLaunchingMission] = useState(false);
   const [expandedMission, setExpandedMission] = useState<string | null>(null);
+
+  const [traceHealth, setTraceHealth] = useState<TraceHealth | null>(null);
+  useEffect(() => {
+    let active = true;
+    const poll = () => getTraceHealth().then(h => { if (active) setTraceHealth(h); }).catch(() => {});
+    poll();
+    const interval = setInterval(poll, 30_000);
+    return () => { active = false; clearInterval(interval); };
+  }, []);
 
   useEffect(() => {
     const handleOverseerDecision = (d: Record<string, unknown>) => {
@@ -298,6 +307,7 @@ export const NotepadPiP = ({ onClose, onDetach }: { onClose?: () => void; onDeta
               globalProvider={globalProvider}
               thinkingModeEnabled={thinkingModeEnabled}
               activeMissionCount={activeMissionCount}
+              traceHealth={traceHealth}
             />
           )}
 

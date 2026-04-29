@@ -21,11 +21,13 @@ export interface ChatSlice {
   isProcessing: boolean;
   lastGeneratedImage: string | null;
   currentSessionId: string | null;
+  pendingPrompt: string | null;
   addMessage: (message: Message, target?: string) => void;
   updateLastMessage: (content: string, target?: string) => void;
   setMessages: (messages: Message[], target?: string) => void;
   setIsProcessing: (isProcessing: boolean) => void;
   setLastGeneratedImage: (url: string | null) => void;
+  setPendingPrompt: (prompt: string | null) => void;
   persistSession: () => Promise<void>;
   loadSession: (sessionId: string) => Promise<void>;
   listSessions: (mode?: string) => Promise<unknown[]>;
@@ -41,6 +43,9 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (set, 
   isProcessing: false,
   lastGeneratedImage: null,
   currentSessionId: null,
+  pendingPrompt: null,
+
+  setPendingPrompt: (prompt) => set({ pendingPrompt: prompt }),
 
   addMessage: (message, target) => set((state) => {
     const activeMode = target || state.currentMode;

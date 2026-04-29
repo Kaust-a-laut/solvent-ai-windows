@@ -1,6 +1,7 @@
 import { Queue, Worker, Job, JobsOptions, QueueEvents, UnrecoverableError } from 'bullmq';
 import Redis from 'ioredis';
 import { logger } from '../utils/logger';
+import { bullMqPrefix } from '../utils/sidecarMode';
 
 export enum TaskQueue {
   DEFAULT = 'default',
@@ -30,10 +31,13 @@ export class TaskService {
   constructor(redisUrl: string = 'redis://127.0.0.1:6379') {
     this.redis = new Redis(redisUrl);
     
-    // Initialize all queues — each Queue gets its own connection per BullMQ recommendation
+    // Initialize all queues — each Queue gets its own connection per BullMQ recommendation.
+    // The `prefix` option namespaces every Redis key; sidecar backends use a
+    // distinct prefix so their jobs don't leak into the host's worker.
     Object.values(TaskQueue).forEach(queueName => {
-      this.queues.set(queueName, new Queue(queueName, { 
+      this.queues.set(queueName, new Queue(queueName, {
         connection: this.redis.duplicate(),
+        prefix: bullMqPrefix,
         defaultJobOptions: {
           attempts: 3,
           backoff: {
@@ -63,7 +67,7 @@ export class TaskService {
    */
   getQueueEvents(queueName: TaskQueue): QueueEvents {
     if (!this.queueEvents.has(queueName)) {
-      const qe = new QueueEvents(queueName, { connection: this.redis.duplicate() });
+      const qe = new QueueEvents(queueName, { connection: this.redis.duplicate(), prefix: bullMqPrefix });
       this.queueEvents.set(queueName, qe);
     }
     return this.queueEvents.get(queueName)!;

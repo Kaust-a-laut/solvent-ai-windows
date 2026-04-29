@@ -410,6 +410,143 @@ export const TOOL_DEFINITIONS = [
       },
       required: []
     }
+  },
+  // --- Native sidecar (runs a copy project's backend as a real child process on the host) ---
+  {
+    name: "native_backend_start",
+    description: "Spawn the backend of a copy project as a native child process on the host. Use when the user is dogfooding a copy whose backend can't run in WebContainer (native C++ deps, Redis, etc.). ASYNC: returns as soon as the child is spawned (port and pid bound), BEFORE the server is listening. First run can take 60–120s because `npm install` runs before `npm run dev`. You MUST poll native_backend_status and confirm ready === true before claiming the server is live; the returned port is reserved but not yet accepting connections. If status still shows ready === false after ~3 minutes, inspect lastLogs for install errors or port conflicts and report — do not assume success.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        projectPath: { type: "STRING", description: "Project directory relative to the workspace root (e.g. 'projects/solvent-copy'). Must contain a backend/package.json." },
+        port: { type: "NUMBER", description: "Preferred starting port (default 3002). The manager finds the first free port at or above this value." }
+      },
+      required: ["projectPath"]
+    }
+  },
+  {
+    name: "native_backend_stop",
+    description: "Stop the currently running native sidecar. Sends SIGTERM, then force-kills the whole process tree (taskkill /T /F on Windows) if it doesn't exit within 5s.",
+    parameters: {
+      type: "OBJECT",
+      properties: {},
+      required: []
+    }
+  },
+  {
+    name: "native_backend_status",
+    description: "Return sidecar state: running, ready, port, pid, uptimeMs, projectPath, exitCode, and the last ~500 log lines. A server is only 'live' when ready === true. running === true alone means the child process exists; it does NOT mean the HTTP server is listening. Always gate user-visible claims about server readiness on ready === true from this tool's output.",
+    parameters: {
+      type: "OBJECT",
+      properties: {},
+      required: []
+    }
+  },
+  // ── Agent planning tools ──
+  {
+    name: "create_plan",
+    description: "Create a structured execution plan for the current task. The plan will be visible in every subsequent turn so you don't need to hold the full task shape in context. Use this at the START of multi-step tasks.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        steps: {
+          type: "ARRAY",
+          description: "Ordered list of step titles. Each should be a short action phrase (e.g. 'Create auth middleware', 'Add user model', 'Write login endpoint').",
+          items: { type: "STRING" }
+        }
+      },
+      required: ["steps"]
+    }
+  },
+  {
+    name: "update_plan",
+    description: "Update the status of a plan step. Call this when you start, complete, or block on a step. The updated plan is injected into your context automatically.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        step_id: { type: "STRING", description: "The step ID from create_plan output" },
+        status: { type: "STRING", description: "New status", enum: ["in_progress", "completed", "blocked", "skipped"] },
+        notes: { type: "STRING", description: "Optional context (e.g. 'blocked on missing API key', 'completed with workaround')" }
+      },
+      required: ["step_id", "status"]
+    }
+  },
+  {
+    name: "reflect",
+    description: "Record a reflection checkpoint summarizing what you've verified, what's still assumed, and what you'll do next. Use this after 3+ tool actions or when switching sub-tasks to fight drift.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        verified: { type: "ARRAY", description: "Things you've confirmed to be true", items: { type: "STRING" } },
+        assumed: { type: "ARRAY", description: "Things you're assuming but haven't verified", items: { type: "STRING" } },
+        next: { type: "STRING", description: "What you'll do next — one sentence" }
+      },
+      required: ["verified", "assumed", "next"]
+    }
+  },
+  // ── Code editing tools ──
+  {
+    name: "apply_patch",
+    description: "Apply a unified diff patch to a file. More robust than edit_file because it uses line numbers and context lines instead of exact string matching. Use this when edit_file fails due to whitespace drift.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        path: { type: "STRING", description: "File path to patch" },
+        patch: { type: "STRING", description: "Unified diff content (--- a/file, +++ b/file, @@ hunks)" }
+      },
+      required: ["path", "patch"]
+    }
+  },
+  {
+    name: "read_file_range",
+    description: "Read a specific line range from a file. Use this instead of read_file when you only need a section of a large file (read_file truncates at 8KB).",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        path: { type: "STRING", description: "File path to read" },
+        start: { type: "NUMBER", description: "Starting line number (1-based, inclusive)" },
+        end: { type: "NUMBER", description: "Ending line number (1-based, inclusive). Max 500 lines per request." }
+      },
+      required: ["path", "start", "end"]
+    }
+  },
+  // ── Interaction tools ──
+  // ask_user removed: requires pause/resume SSE round-trip not yet implemented.
+  {
+    name: "run_tests_focused",
+    description: "Run TypeScript type-check or tests on a specific file only (much faster than run_tests which checks the entire project).",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        file: { type: "STRING", description: "File path to check. If a test file exists (e.g. foo.test.ts), tests will also be run." },
+        projectRoot: { type: "STRING", description: "Project root directory (optional, defaults to configured project)" }
+      },
+      required: ["file"]
+    }
+  },
+  {
+    name: "undo_last_action",
+    description: "Returns guidance on how to undo the last file-modifying tool call. The actual undo is done by writing the beforeContent (captured in tool_start events) back to the file. This tool explains the process.",
+    parameters: {
+      type: "OBJECT",
+      properties: {},
+      required: []
+    }
+  },
+  // ── Symbol navigation ──
+  {
+    name: "query_symbols",
+    description: "Search project symbols (functions, classes, types, interfaces, etc.) by name with fuzzy matching. Faster and more accurate than grep_files for finding symbol definitions.",
+    parameters: {
+      type: "OBJECT",
+      properties: {
+        query: { type: "STRING", description: "Symbol name to search for (fuzzy match)" },
+        kind: { type: "STRING", description: "Filter by symbol kind", enum: ["function", "class", "interface", "type", "const", "enum"] },
+        file: { type: "STRING", description: "Filter to symbols in files matching this substring" },
+        limit: { type: "NUMBER", description: "Max results to return (default 20)" }
+      },
+      required: ["query"]
+    }
   }
 ];
 

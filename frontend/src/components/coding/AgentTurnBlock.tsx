@@ -1,16 +1,21 @@
 import React from 'react';
-import { Copy, Check } from 'lucide-react';
+import { Copy, Check, Undo2 } from 'lucide-react';
 import { cn } from '../../lib/utils';
+import { useAppStore } from '../../store/useAppStore';
 import type { AgentMessage, ToolEvent } from '../../store/codingSlice';
 import { reconstructIterations } from '../../lib/agentIterations';
 import { AgentTextBlock } from './AgentTextBlock';
 import { AgentActionCard } from './AgentActionCard';
+
+const WRITE_TOOL_NAMES = new Set(['write_file', 'edit_file', 'create_file', 'replace_in_files', 'move_file', 'delete_file']);
 
 interface Props {
   msg: AgentMessage;
   isStreaming: boolean;
   copiedMsgId: string | null;
   onCopy: (msg: AgentMessage) => void;
+  /** Called to undo all write tools in a specific iteration. */
+  onUndoIteration?: (iteration: { index: number; toolEvents: ToolEvent[] }) => void;
 }
 
 function findResultEvent(toolEvents: ToolEvent[], startEvent: ToolEvent): ToolEvent | undefined {
@@ -19,12 +24,37 @@ function findResultEvent(toolEvents: ToolEvent[], startEvent: ToolEvent): ToolEv
   );
 }
 
-export const AgentTurnBlock: React.FC<Props> = ({ msg, isStreaming, copiedMsgId, onCopy }) => {
+export const AgentTurnBlock: React.FC<Props> = ({ msg, isStreaming, copiedMsgId, onCopy, onUndoIteration }) => {
   const iterations = reconstructIterations(msg);
+  const agentPlan = useAppStore((s) => s.agentPlan);
+
+  // Check if an iteration has any write tool events with beforeContent (undoable)
+  const hasUndoableWrites = (iter: { toolEvents: ToolEvent[] }) =>
+    iter.toolEvents.some(
+      (e) => e.type === 'tool_start' && WRITE_TOOL_NAMES.has(e.tool) && e.beforeContent !== undefined
+    );
 
   return (
     <div className="relative rounded-xl bg-white/[0.03] border border-white/[0.05] px-3 py-2 group">
-      {(msg.content || msg.iterations?.some(i => i.toolEvents.length) || msg.toolEvents?.length) && (
+      {agentPlan && agentPlan.steps.length > 0 && (
+        <div className="flex items-center gap-1.5 px-3 py-1.5 bg-white/[0.03] border-b border-white/[0.06] text-[11px] overflow-x-auto -mx-3 -mt-2 mb-2 rounded-t-xl">
+          <span className="text-white/40 font-medium shrink-0">PLAN</span>
+          {agentPlan.steps.map((step, i) => (
+            <span key={step.id} className={cn(
+              'flex items-center gap-1 shrink-0',
+              step.status === 'completed' ? 'text-emerald-400/80' :
+              step.status === 'in_progress' ? 'text-jb-accent' :
+              step.status === 'blocked' ? 'text-rose-400/80' :
+              'text-white/25'
+            )}>
+              {step.status === 'completed' ? '✓' : step.status === 'in_progress' ? '●' : step.status === 'blocked' ? '✗' : '○'}
+              <span className="max-w-[120px] truncate" title={step.title}>{step.title}</span>
+              {i < agentPlan.steps.length - 1 && <span className="text-white/10">→</span>}
+            </span>
+          ))}
+        </div>
+      )}
+      {!!(msg.content || msg.iterations?.some(i => i.toolEvents.length) || msg.toolEvents?.length) && (
         <button
           type="button"
           onClick={() => onCopy(msg)}
@@ -42,7 +72,7 @@ export const AgentTurnBlock: React.FC<Props> = ({ msg, isStreaming, copiedMsgId,
       <div className="space-y-3">
         {iterations.map((iter, idx) => (
           <React.Fragment key={iter.index}>
-            {iter.text && (
+            {(iter.text || (isStreaming && idx === iterations.length - 1)) && (
               <AgentTextBlock
                 text={iter.text}
                 isStreaming={isStreaming && idx === iterations.length - 1}
@@ -83,12 +113,22 @@ export const AgentTurnBlock: React.FC<Props> = ({ msg, isStreaming, copiedMsgId,
             )}
 
             {idx < iterations.length - 1 && (
-              <div className="flex items-center gap-2 py-1">
-                <div className="flex-1 h-px bg-white/[0.06]" />
-                <span className="text-[9px] font-bold uppercase tracking-wider text-white/20">
+              <div className="flex items-center justify-center gap-2 py-0.5">
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-white/[0.03] border border-white/[0.05] text-[9px] font-medium text-white/30 lowercase tracking-wide">
+                  <span className="w-1 h-1 rounded-full bg-white/20" />
                   iteration {iter.index + 1}
+                  {onUndoIteration && hasUndoableWrites(iter) && (
+                    <button
+                      type="button"
+                      onClick={() => onUndoIteration(iter)}
+                      className="ml-1 flex items-center gap-0.5 text-white/30 hover:text-rose-400 transition-colors"
+                      title="Undo all file writes in this iteration"
+                    >
+                      <Undo2 size={9} />
+                      undo
+                    </button>
+                  )}
                 </span>
-                <div className="flex-1 h-px bg-white/[0.06]" />
               </div>
             )}
           </React.Fragment>

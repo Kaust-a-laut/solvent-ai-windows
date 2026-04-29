@@ -11,6 +11,7 @@ export type IDEAction =
   | { type: 'sync_webcontainer'; path: string; content: string }
   | { type: 'terminal_output'; lines: string[] }
   | { type: 'show_terminal' }
+  | { type: 'run_sandbox' }
   | { type: 'refresh_file_tree' };
 
 export function toolResultToIDEActions(event: ToolEvent): IDEAction[] {
@@ -85,6 +86,7 @@ export function toolResultToIDEActions(event: ToolEvent): IDEAction[] {
       const deferredResult = result as Record<string, unknown> | undefined;
       if (deferredResult?.status === 'deferred_to_frontend') {
         actions.push({ type: 'show_terminal' });
+        actions.push({ type: 'run_sandbox' });
       }
       break;
     }

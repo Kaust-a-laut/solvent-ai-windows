@@ -10,6 +10,7 @@ import { BackupManager } from '../utils/backupManager';
 import { HNSWIndex } from '../utils/hnswIndex';
 import { memoryMetrics } from '../utils/memoryMetrics';
 import { OllamaService } from './ollamaService';
+import { sqliteService } from './db/sqliteService';
 
 interface VectorLink {
   targetId: string;
@@ -144,10 +145,9 @@ export class VectorService {
 
   private async loadMemory() {
     try {
-      const data = await fs.readFile(this.dbPath, 'utf-8');
-      this.memory = JSON.parse(data);
+      this.memory = sqliteService.getAllMemories();
       this.rebuildIndices();
-      logger.info(`Loaded ${this.memory.length} vectors from memory and rebuilt indices.`);
+      logger.info(`Loaded ${this.memory.length} vectors from SQLite memory and rebuilt indices.`);
       
       // If HNSW index is empty but we have memory, rebuild it
       if (this.useHNSW && this.hnswIndex && this.hnswIndex.size() === 0 && this.memory.length > 0) {
@@ -155,7 +155,7 @@ export class VectorService {
       }
     } catch (e: unknown) {
       const err = e as Error;
-      logger.error(`[VectorService] Failed to load memory: ${err.message}`);
+      logger.error(`[VectorService] Failed to load memory from SQLite: ${err.message}`);
 
       // Attempt recovery from backup
       const recovered = await this.attemptRecovery();
@@ -354,6 +354,7 @@ export class VectorService {
     const entriesToDelete = this.memory.filter(e => e.metadata.filePath === filePath);
     for (const entry of entriesToDelete) {
       this.removeFromIndices(entry.id);
+      sqliteService.deleteMemory(entry.id);
     }
     this.memory = this.memory.filter(e => e.metadata.filePath !== filePath);
     await this.saveMemory();
@@ -371,6 +372,7 @@ export class VectorService {
       entry.metadata.links = [];
     }
     entry.metadata.links.push(...links);
+    sqliteService.insertMemory(entry.id, entry.vector, entry.metadata);
     await this.saveMemory();
     return true;
   }
@@ -399,17 +401,25 @@ export class VectorService {
           m.metadata.confidence !== 'HIGH'
         );
 
+        let evicted: VectorEntry[] = [];
         if (critical.length >= MAX_ENTRIES) {
+           evicted = disposable;
            this.memory = critical.slice(-MAX_ENTRIES);
         } else {
            const slotsLeft = MAX_ENTRIES - critical.length;
+           evicted = disposable.slice(0, disposable.length - slotsLeft);
            const keptDisposable = disposable.slice(-slotsLeft);
            this.memory = [...critical, ...keptDisposable];
         }
+        
+        // Remove evicted from SQLite
+        for (const e of evicted) {
+          sqliteService.deleteMemory(e.id);
+        }
+        
         this.rebuildIndices();
       }
 
-      await AtomicFileSystem.writeJson(this.dbPath, this.memory);
       this.updateMetrics();
 
       // Periodic backup
@@ -673,6 +683,7 @@ export class VectorService {
     };
 
     this.memory.push(entry);
+    sqliteService.insertMemory(entry.id, entry.vector, entry.metadata);
     this.addToIndices(entry);
     if (this.hnswIndex && this.useHNSW) {
       this.hnswIndex.add(entry.id, entry.vector);
@@ -716,6 +727,7 @@ export class VectorService {
         }
       };
       this.memory.push(entry);
+      sqliteService.insertMemory(entry.id, entry.vector, entry.metadata);
       this.addToIndices(entry);
       if (this.hnswIndex && this.useHNSW) {
         this.hnswIndex.add(entry.id, entry.vector);
@@ -1105,8 +1117,8 @@ export class VectorService {
       };
 
       this.addToIndices(entry);
-      await this.saveMemory();
-      return true;
+      sqliteService.insertMemory(entry.id, entry.vector, entry.metadata);
+      await this.saveMemory();      return true;
     }
   
     async deprecateEntry(id: string, reason: string) {
@@ -1122,7 +1134,8 @@ export class VectorService {
       };
       
       logger.info(`[Gardening] Deprecated entry ${id}. Reason: ${reason}`);
-          await this.saveMemory();
+      sqliteService.insertMemory(entry.id, entry.vector, entry.metadata);
+      await this.saveMemory();
           return true;
         }
       
@@ -1374,6 +1387,7 @@ export class VectorService {
       const entry = this.memory.find(e => e.id === id);
       if (entry) {
         entry.metadata.retrievalCount = Number(entry.metadata.retrievalCount || 0) + 1;
+        sqliteService.insertMemory(entry.id, entry.vector, entry.metadata);
         changed = true;
       }
     }

@@ -25,7 +25,7 @@ interface ChatInputProps {
 }
 
 export const ChatInput = ({ compact = false }: ChatInputProps) => {
-  const { sendMessage, generateImageAction, isProcessing, addMessage, deviceInfo, thinkingModeEnabled, setThinkingModeEnabled, currentMode, selectedCloudModel, selectedLocalModel, globalProvider, browserInjectedContext, setBrowserInjectedContext } = useAppStore();
+  const { sendMessage, generateImageAction, isProcessing, addMessage, deviceInfo, thinkingModeEnabled, setThinkingModeEnabled, currentMode, selectedCloudModel, selectedLocalModel, globalProvider, browserInjectedContext, setBrowserInjectedContext, pendingPrompt, setPendingPrompt } = useAppStore();
   const [input, setInput] = useState('');
   const [showMenu, setShowMenu] = useState(false);
   const [uploadMode, setUploadMode] = useState<'image' | 'file'>('image');
@@ -72,6 +72,23 @@ export const ChatInput = ({ compact = false }: ChatInputProps) => {
       setInput(transcript);
     }
   }, [transcript]);
+
+  // Consume a draft prompt seeded by the empty state or other surfaces.
+  // Prefilling (rather than sending) lets users edit before submitting.
+  useEffect(() => {
+    if (pendingPrompt) {
+      setInput(pendingPrompt);
+      setPendingPrompt(null);
+      requestAnimationFrame(() => {
+        const el = textareaRef.current;
+        if (el) {
+          el.focus();
+          el.setSelectionRange(el.value.length, el.value.length);
+          adjustHeight();
+        }
+      });
+    }
+  }, [pendingPrompt, setPendingPrompt, adjustHeight]);
 
   const handleSend = async () => {
     if ((!input.trim() && !selectedImage && !attachedFile) || isProcessing) return;

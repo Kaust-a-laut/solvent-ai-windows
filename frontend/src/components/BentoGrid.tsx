@@ -1,7 +1,7 @@
 import React from 'react';
 import { motion } from 'framer-motion';
 import { cn } from '../lib/utils';
-import { Target } from 'lucide-react';
+import { ArrowRight } from 'lucide-react';
 
 interface BentoGridProps {
   children: React.ReactNode;
@@ -26,6 +26,8 @@ interface BentoCardProps {
   badge?: string;
   onClick?: () => void;
   actionText?: string;
+  /** Icon rendered next to actionText. Defaults to ArrowRight. */
+  actionIcon?: React.ElementType;
   delay?: number;
   image?: string;
   preview?: React.ReactNode;
@@ -45,7 +47,8 @@ export const BentoCard = ({
   span = '',
   badge,
   onClick,
-  actionText = 'Initiate Protocol',
+  actionText = 'Get Started',
+  actionIcon: ActionIcon = ArrowRight,
   delay = 0,
   image,
   preview,
@@ -117,21 +120,10 @@ export const BentoCard = ({
       </div>
       
       <div className="relative z-10 pt-6 flex items-center gap-2 text-[11px] font-black uppercase tracking-[0.3em] text-white/40 group-hover:text-white transition-all">
-        {actionText.startsWith('Dive') ? (
-          <div className="flex flex-col items-center w-full gap-1">
-            <div className="flex items-center justify-center w-full gap-[0.5em]">
-              <span className="group-hover:text-vibrant transition-colors duration-500">Dive</span>
-              <span>into</span>
-              <span>the</span>
-            </div>
-            <span className="text-center">{actionText.substring(13).trim()}</span>
-          </div>
-        ) : (
-          <div className="flex items-center gap-2">
-            {actionText}
-          </div>
-        )} 
-        <Target size={14} className="group-hover:translate-x-1 group-hover:rotate-45 transition-transform text-white/20 group-hover:text-white shrink-0" />
+        <div className="flex items-center gap-2">
+          {actionText}
+          <ActionIcon size={14} className="group-hover:translate-x-1 group-hover:rotate-45 transition-transform text-white/20 group-hover:text-white shrink-0" />
+        </div>
       </div>
     </motion.div>
   );

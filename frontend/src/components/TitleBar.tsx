@@ -1,12 +1,13 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   Minus, Square, X,
-  Search, Settings, Brain
+  Search, Settings, Brain, Command
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useAppStore } from '../store/useAppStore';
 import { motion } from 'framer-motion';
 import { Logo } from './Logo';
+import { CommandPalette } from './CommandPalette';
 
 export const TitleBar = () => {
   const {
@@ -15,12 +16,26 @@ export const TitleBar = () => {
     setCurrentMode
   } = useAppStore();
   const [isElectron, setIsElectron] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
 
   useEffect(() => {
     if (typeof window !== 'undefined' && window.electron) {
       setIsElectron(true);
     }
   }, []);
+
+  // ⌘K / Ctrl+K shortcut
+  const handleOpenCommandPalette = useCallback((e: KeyboardEvent) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+      e.preventDefault();
+      setCommandPaletteOpen(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener('keydown', handleOpenCommandPalette);
+    return () => window.removeEventListener('keydown', handleOpenCommandPalette);
+  }, [handleOpenCommandPalette]);
 
   return (
     <div className={cn(
@@ -62,12 +77,14 @@ export const TitleBar = () => {
         </button>
       </div>
 
-      {/* 2. Global Command Center (Omni-search) */}
+      {/* 2. Global Command Center (Omni-search) — fills available middle space */}
       {!deviceInfo.isMobile && (
-        <div className="absolute left-1/2 -translate-x-1/2 w-full max-w-[350px] xl:max-w-[450px] app-no-drag hidden lg:block">
-           <div className="relative group">
+        <div className="flex-1 px-6 min-w-0 app-no-drag hidden lg:block">
+           <div className="relative group max-w-[600px] mx-auto">
               <div className="absolute inset-0 bg-gradient-to-r from-jb-accent/10 via-jb-purple/10 to-jb-orange/10 rounded-xl blur-md opacity-0 group-focus-within:opacity-100 transition-opacity" />
-              <div className="relative flex items-center bg-white/[0.03] border border-white/10 rounded-xl px-5 py-2 backdrop-blur-xl group-focus-within:border-white/20 transition-all">
+              <div className="relative flex items-center bg-white/[0.03] border border-white/10 rounded-xl px-5 py-2 backdrop-blur-xl group-focus-within:border-white/20 transition-all cursor-pointer"
+                onClick={() => setCommandPaletteOpen(true)}
+              >
                  <Search size={14} className="text-slate-300 mr-3" />
             <input
               id="solvent-command-search"
@@ -75,11 +92,13 @@ export const TitleBar = () => {
               type="text"
               placeholder="Search // Command Solvent..."
               autoComplete="off"
-              className="flex-1 bg-transparent border-none outline-none text-xs font-bold text-white placeholder:text-slate-400"
+              readOnly
+              className="flex-1 bg-transparent border-none outline-none text-xs font-bold text-white placeholder:text-slate-400 cursor-pointer"
             />
                  <div className="flex items-center gap-2">
+                    <Command size={10} className="text-white/20" />
                     <div className="px-1.5 py-0.5 rounded-md bg-black border border-white/5 text-[11px] font-black text-slate-300 uppercase tracking-widest">
-                       ⌘K
+                       K
                     </div>
                  </div>
               </div>
@@ -126,6 +145,8 @@ export const TitleBar = () => {
           </>
         )}
       </div>
+
+      <CommandPalette open={commandPaletteOpen} onClose={() => setCommandPaletteOpen(false)} />
 
       <style>{`
         .app-drag-region {

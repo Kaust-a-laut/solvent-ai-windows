@@ -39,6 +39,7 @@ export function getModelTier(model: ModelOption | undefined): ModelTier {
   if (!model) return 'code-only';
   // GLM-4.7 and GLM-5 excluded — tool-use reliability is not production-grade for agentic work
   const fullAgentic = [
+    'accounts/fireworks/models/kimi-k2p6',
     'accounts/fireworks/models/kimi-k2p5',
     'google/gemini-2.5-flash',
     'google/gemini-2.5-pro-exp-03-25',
@@ -60,6 +61,7 @@ function getModelTraits(model: ModelOption | undefined): AgentModelTraits {
   const multimodalModels = [
     'anthropic/claude-sonnet-4',
     'openai/gpt-4o',
+    'accounts/fireworks/models/kimi-k2p6',
     'accounts/fireworks/models/kimi-k2p5',
     'qwen3.6-plus',
     'google/gemini-2.5-flash',
@@ -77,6 +79,7 @@ function getContextWindow(modelId: string): number {
   const limits: Record<string, number> = {
     'anthropic/claude-sonnet-4': 200000,
     'openai/gpt-4o': 128000,
+    'accounts/fireworks/models/kimi-k2p6': 262144,
     'accounts/fireworks/models/kimi-k2p5': 262144,
     'google/gemini-2.5-flash': 1048576,
     'google/gemini-2.5-pro-exp-03-25': 1048576,

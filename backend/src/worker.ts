@@ -7,9 +7,14 @@ import { TaskQueue } from './services/taskService';
 import Redis from 'ioredis';
 import { logger } from './utils/logger';
 import { pluginManager } from './services/pluginManager';
+import { bullMqPrefix, isSidecar } from './utils/sidecarMode';
 
 // Initialize Redis connection
 const redisConnection = new Redis('redis://127.0.0.1:6379');
+
+if (isSidecar) {
+  logger.info(`[Worker] Sidecar mode — BullMQ prefix="${bullMqPrefix}"`);
+}
 
 // Initialize the plugin manager
 pluginManager.initialize()
@@ -39,7 +44,7 @@ function createLazyWorker(
   processor: Processor,
   opts: { concurrency: number }
 ): LazyWorkerHandle {
-  const queueEvents = new QueueEvents(queue, { connection: redisConnection });
+  const queueEvents = new QueueEvents(queue, { connection: redisConnection, prefix: bullMqPrefix });
   const handle: LazyWorkerHandle = {
     worker: null,
     queueEvents,
@@ -58,6 +63,7 @@ function createLazyWorker(
       logger.info(`[LazyWorker] Activating worker for queue "${queue}"`);
       handle.worker = new Worker(queue, processor, {
         connection: redisConnection,
+        prefix: bullMqPrefix,
         concurrency: opts.concurrency,
       });
 

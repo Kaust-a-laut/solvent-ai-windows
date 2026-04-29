@@ -38,18 +38,32 @@ const BINARY_EXTS = new Set([
   '.pdf', '.doc', '.docx', '.xls', '.xlsx',
   '.exe', '.dll', '.so', '.dylib',
   '.class', '.pyc',
-  '.db', '.sqlite',
+  '.db', '.sqlite', '.bin', '.log',
 ]);
 
-// Directory segments that should never be uploaded (generated/dependency folders)
+// Directory segments that should never be uploaded (generated/dependency folders
+// and anything that would recursively include the destination project).
 const SKIP_DIRS = new Set([
   'node_modules', '.git', '.svn', 'dist', 'build', '.next', '.nuxt',
   'out', '.cache', '.turbo', '.vercel', '__pycache__', '.venv', 'venv',
   'target', '.gradle', '.idea', '.vscode',
+  'release', 'projects', '.solvent_sessions',
 ]);
 
+// Per-file denylist for secrets and live agent state that must never be copied
+// into a project (covers the Solvent-in-Solvent dogfooding case).
+function isSkippedFileName(name: string): boolean {
+  if (name === '.env') return true;
+  if (name.startsWith('.env.')) return true;
+  if (name.startsWith('.solvent_')) return true;
+  return false;
+}
+
 function shouldSkipPath(relativePath: string): boolean {
-  return relativePath.split('/').some(segment => SKIP_DIRS.has(segment));
+  const segments = relativePath.split('/');
+  if (segments.some(segment => SKIP_DIRS.has(segment))) return true;
+  const last = segments[segments.length - 1] ?? '';
+  return isSkippedFileName(last);
 }
 
 function isTextFile(name: string): boolean {

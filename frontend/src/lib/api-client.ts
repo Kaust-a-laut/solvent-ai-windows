@@ -213,6 +213,93 @@ export async function getTraces(filter: TraceFilter = {}): Promise<any[]> {
   }
 }
 
+export interface TraceHealth {
+  traceCount: number;
+  recentCount: number;
+  avgBudgetUtilization: number;
+  correctionRate: number;
+  avgPipelineMs: number;
+  lastTraceTs: string | null;
+}
+
+export async function getTraceHealth(): Promise<TraceHealth> {
+  const { API_BASE_URL } = await import('./config');
+  const empty: TraceHealth = { traceCount: 0, recentCount: 0, avgBudgetUtilization: 0, correctionRate: 0, avgPipelineMs: 0, lastTraceTs: null };
+  try {
+    const secret = await getSecret();
+    const res = await fetch(`${API_BASE_URL}/debug/traces/health`, {
+      method: 'GET',
+      headers: { 'X-Solvent-Secret': secret },
+    });
+    if (!res.ok) return empty;
+    return res.json();
+  } catch {
+    return empty;
+  }
+}
+
+// --- Native sidecar (Path B: host-spawned backend copy) ---
+
+export interface SidecarLogLine {
+  ts: number;
+  stream: 'stdout' | 'stderr' | 'system';
+  line: string;
+}
+
+export interface SidecarStatus {
+  running: boolean;
+  ready: boolean;
+  port: number | null;
+  pid: number | null;
+  projectPath: string | null;
+  startedAt: number | null;
+  uptimeMs: number;
+  exitCode: number | null;
+  lastLogs: SidecarLogLine[];
+}
+
+export async function startNativeBackend(projectPath: string, port?: number): Promise<{ ok: boolean; port: number; pid: number }> {
+  const { API_BASE_URL } = await import('./config');
+  const secret = await getSecret();
+  const res = await fetch(`${API_BASE_URL}/native-copy/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Solvent-Secret': secret },
+    body: JSON.stringify({ projectPath, ...(port ? { port } : {}) }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new APIError(body.error || `Start failed (${res.status})`, res.status);
+  }
+  return res.json();
+}
+
+export async function stopNativeBackend(): Promise<void> {
+  const { API_BASE_URL } = await import('./config');
+  const secret = await getSecret();
+  await fetch(`${API_BASE_URL}/native-copy/stop`, {
+    method: 'POST',
+    headers: { 'X-Solvent-Secret': secret },
+  });
+}
+
+export async function getNativeBackendStatus(): Promise<SidecarStatus> {
+  const { API_BASE_URL } = await import('./config');
+  const empty: SidecarStatus = {
+    running: false, ready: false, port: null, pid: null,
+    projectPath: null, startedAt: null, uptimeMs: 0, exitCode: null, lastLogs: [],
+  };
+  try {
+    const secret = await getSecret();
+    const res = await fetch(`${API_BASE_URL}/native-copy/status`, {
+      headers: { 'X-Solvent-Secret': secret },
+    });
+    if (!res.ok) return empty;
+    return res.json();
+  } catch {
+    return empty;
+  }
+}
+
 export async function updateTraceOutcome(
   traceId: string,
   outcome: 'correction' | 'crystallized' | 'rerequested' | 'accepted'

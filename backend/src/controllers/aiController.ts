@@ -6,6 +6,8 @@ import { taskService } from '../services/taskService';
 import { traceLogger } from '../services/traceLogger';
 import { logger } from '../utils/logger';
 import { createSSEWriter } from '../utils/sseWriter';
+import { requestContextStore } from '../utils/requestContext';
+import { PROJECT_ROOT } from '../utils/fileSystem';
 import { z } from 'zod';
 import { createReadStream } from 'fs';
 import { access } from 'fs/promises';
@@ -54,7 +56,23 @@ const chatRequestSchema = z.object({
       snippet: z.string().optional()
     })).nullable().optional()
   }).optional(),
-  sessionId: z.string().optional()
+  sessionId: z.string().optional(),
+  projectRoot: z.string().optional(),
+  previewState: z.object({
+    url: z.string().nullable().optional(),
+    bodyHash: z.string().nullable().optional(),
+    consoleBuffer: z.array(z.object({
+      level: z.string(),
+      message: z.string(),
+      timestamp: z.number(),
+    })).optional(),
+    selectedElement: z.object({
+      tag: z.string(),
+      id: z.string().optional(),
+      classes: z.array(z.string()),
+      text: z.string(),
+    }).nullable().optional(),
+  }).optional()
 });
 
 const searchRequestSchema = z.object({
@@ -296,7 +314,30 @@ export class AIController {
 
       const data = { ...parseResult.data, signal: sse.signal };
 
-      await aiService.processAgentChat(data, (event) => sse.send(event));
+      // Resolve the per-request project root (chat body) against the repo root,
+      // rejecting anything that escapes. Falls back to global PROJECT_ROOT when
+      // no project is open, preserving legacy behavior.
+      let resolvedProjectRoot: string | undefined;
+      if (parseResult.data.projectRoot) {
+        const candidate = path.resolve(PROJECT_ROOT, parseResult.data.projectRoot);
+        const rootWithSep = PROJECT_ROOT.endsWith(path.sep) ? PROJECT_ROOT : PROJECT_ROOT + path.sep;
+        if (candidate === PROJECT_ROOT || candidate.startsWith(rootWithSep)) {
+          resolvedProjectRoot = candidate;
+        } else {
+          sse.send({ type: 'error', message: 'Invalid projectRoot (escapes repo)' });
+          sse.end();
+          return;
+        }
+      }
+
+      // Hold the frontend-supplied preview state + project scope in AsyncLocalStorage
+      // so tools can read both without threading parameters through every call site.
+      await requestContextStore.run(
+        { previewState: parseResult.data.previewState, projectRoot: resolvedProjectRoot },
+        async () => {
+          await aiService.processAgentChat(data, (event) => sse.send(event));
+        }
+      );
 
       sse.send({ type: 'done' });
       sse.end();
@@ -340,6 +381,10 @@ export class AIController {
 
     try {
       await traceLogger.updateOutcome(id, parsed.data.outcome);
+      if (parsed.data.outcome === 'correction') {
+        const sessionId = aiService.getSessionForTrace(id);
+        if (sessionId) aiService.recordCorrection(sessionId);
+      }
       res.json({ success: true });
     } catch (error: unknown) {
       const err = error instanceof Error ? error : new Error(String(error));
@@ -395,6 +440,36 @@ export class AIController {
       res.json(results);
     } catch {
       res.status(500).json({ error: 'Failed to read trace file.' });
+    }
+  }
+
+  static async getTraceHealth(_req: Request, res: Response) {
+    try {
+      const allTraces = await traceLogger.readTraces();
+      const recent = allTraces.slice(-50);
+
+      if (recent.length === 0) {
+        res.json({ traceCount: 0, recentCount: 0, avgBudgetUtilization: 0, correctionRate: 0, avgPipelineMs: 0, lastTraceTs: null });
+        return;
+      }
+
+      const corrections = recent.filter(t => t.outcome === 'correction').length;
+      const budgetUtils = recent.map(t =>
+        t.promptTokens?.budget > 0 ? t.promptTokens.total / t.promptTokens.budget : 0
+      );
+      const avgBudget = budgetUtils.reduce((a, b) => a + b, 0) / recent.length;
+      const avgMs = recent.reduce((a, t) => a + t.pipelineMs, 0) / recent.length;
+
+      res.json({
+        traceCount: allTraces.length,
+        recentCount: recent.length,
+        avgBudgetUtilization: Math.round(avgBudget * 1000) / 1000,
+        correctionRate: Math.round((corrections / recent.length) * 1000) / 1000,
+        avgPipelineMs: Math.round(avgMs),
+        lastTraceTs: recent[recent.length - 1]?.ts || null,
+      });
+    } catch {
+      res.json({ traceCount: 0, recentCount: 0, avgBudgetUtilization: 0, correctionRate: 0, avgPipelineMs: 0, lastTraceTs: null });
     }
   }
 }

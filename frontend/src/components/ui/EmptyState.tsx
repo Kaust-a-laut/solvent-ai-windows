@@ -1,6 +1,12 @@
 import React from 'react';
 import { motion } from 'framer-motion';
-import { LucideIcon } from 'lucide-react';
+import { LucideIcon, ArrowRight, Code, Terminal, FileText, Lightbulb } from 'lucide-react';
+
+interface SuggestedPrompt {
+  label: string;
+  onClick: () => void;
+  icon?: LucideIcon;
+}
 
 interface EmptyStateProps {
   icon: LucideIcon;
@@ -16,7 +22,11 @@ interface EmptyStateProps {
     key: string;
     label: string;
   }>;
+  /** Grid of suggested prompts shown below the description. */
+  prompts?: SuggestedPrompt[];
 }
+
+const PROMPT_ICONS = [Code, Terminal, FileText, Lightbulb];
 
 export function EmptyState({
   icon: Icon,
@@ -25,6 +35,7 @@ export function EmptyState({
   accentColor = 'jb-accent',
   action,
   shortcuts,
+  prompts,
 }: EmptyStateProps) {
   return (
     <motion.div
@@ -55,6 +66,36 @@ export function EmptyState({
           {action.icon && <action.icon className="w-4 h-4" />}
           {action.label}
         </button>
+      )}
+
+      {prompts && prompts.length > 0 && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 w-full max-w-lg mt-2">
+          {prompts.map((p, idx) => {
+            const PromptIcon = p.icon ?? PROMPT_ICONS[idx % 4] ?? ArrowRight;
+            const borderClass = [
+              'border-t-blue-500/40 border-l-blue-500/40 hover:border-t-blue-400/70 hover:border-l-blue-400/70',
+              'border-t-orange-500/40 border-r-orange-500/40 hover:border-t-orange-400/70 hover:border-r-orange-400/70',
+              'border-b-orange-500/40 border-l-orange-500/40 hover:border-b-orange-400/70 hover:border-l-orange-400/70',
+              'border-b-blue-500/40 border-r-blue-500/40 hover:border-b-blue-400/70 hover:border-r-blue-400/70',
+            ][idx % 4];
+            return (
+              <button
+                key={idx}
+                onClick={p.onClick}
+                className={`group relative flex items-center gap-3 px-4 py-2.5 rounded-xl text-left
+                  bg-white/[0.02] border border-white/[0.08] ${borderClass}
+                  hover:bg-white/[0.04] hover:border-white/15
+                  transition-all duration-200`}
+              >
+                <PromptIcon className="w-4 h-4 text-white/25 group-hover:text-jb-accent/60 shrink-0 transition-colors" />
+                <span className="text-[12px] text-white/40 group-hover:text-white/70 leading-snug transition-colors">
+                  {p.label}
+                </span>
+                <ArrowRight size={12} className="w-3 h-3 text-white/10 group-hover:text-white/40 ml-auto shrink-0 transition-all group-hover:translate-x-0.5" />
+              </button>
+            );
+          })}
+        </div>
       )}
 
       {shortcuts && shortcuts.length > 0 && (

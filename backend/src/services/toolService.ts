@@ -1,4 +1,5 @@
 import fs from 'fs/promises';
+import fsSync from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
 import axios from 'axios';
@@ -6,10 +7,16 @@ import { vectorService } from './vectorService';
 import { logger } from '../utils/logger';
 import screenshot from 'screenshot-desktop';
 import sharp from 'sharp';
-import { validatePath, PROJECT_ROOT } from '../utils/fileSystem';
+import { validatePath, PROJECT_ROOT, getEffectiveProjectRoot } from '../utils/fileSystem';
 import { transactionService } from './transactionService';
 import { appEventBus } from '../utils/eventBus';
 import { coreMemory } from './coreMemory';
+import { getPreviewState } from '../utils/requestContext';
+import { nativeCopyManager } from './nativeCopyManager';
+import { agentScratchpadService } from './agentScratchpad';
+import { parseUnifiedDiff, applyHunks } from './patchApplier';
+import { buildSymbolIndex, querySymbols, hasSymbolIndex } from './projectIndexer';
+import { mcpClientManager } from './mcpClient';
 
 // Security: Explicit allowlist of permitted command prefixes
 // This replaces the insecure denylist approach which was trivially bypassed
@@ -43,6 +50,7 @@ const ALLOWED_COMMAND_PREFIXES = [
   'pnpm ',
   'yarn ',
   'bun ',
+  'cd ',
   'docker ',
   'curl ',
   'wget ',
@@ -53,11 +61,78 @@ const ALLOWED_COMMAND_PREFIXES = [
   'tee ',
   'awk ',
   'sed ',
+  // Additional CLI utilities for agent workflows
+  'rg ',           // ripgrep — faster grep
+  'jq ',           // JSON processing
+  'xargs ',        // parallel command execution
+  'basename ',     // path manipulation
+  'dirname ',      // path manipulation
+  'du ',           // disk usage
+  'df ',           // disk free space
+  'env ',          // environment variables
+  'printenv ',     // environment variables
+  'stat ',         // file metadata
+  'file ',         // file type detection
+  'diff ',         // file comparison
+  'patch ',        // apply unified diffs
+  'tr ',           // character translation
+  'cut ',          // column extraction
+  'paste ',        // column merging
+  'comm ',         // file comparison
+  'column ',       // table formatting
+  // Diagnostics the agent needs for "is something listening on this port?"
+  // checks. lsof/ss are POSIX; netstat/tasklist/where exist on Windows.
+  'lsof ',
+  'ss ',
+  'netstat ',
+  'netstat',       // bare `netstat` prints all, common usage
+  'tasklist ',
+  'tasklist',
+  'where ',        // Windows `which`
+  'which ',        // POSIX
+  'test ',         // `test -f node_modules/.bin/vite` — ghost-install check
 ];
 
 // Operators that may separate pipeline stages. Command is validated per-stage.
 // Order matters: longer operators first so we match `&&` before `&`.
 const PIPELINE_SEPARATOR = /(?:\|\||&&|;|\|)/;
+
+/**
+ * Capture the primary screen on Windows using System.Drawing via PowerShell.
+ * The bundled `screenshot-desktop` helper exe (screenCapture_1.3.2.exe) is
+ * commonly missing or quarantined by AV on Windows — this avoids that binary
+ * entirely by using WinForms/System.Drawing APIs already shipped with .NET.
+ */
+async function captureScreenWindows(outPath: string): Promise<void> {
+  // Escape for a single-quoted PowerShell string: double-up any embedded single quotes.
+  const psEscapedPath = outPath.replace(/'/g, "''");
+  const script = `
+Add-Type -AssemblyName System.Windows.Forms,System.Drawing;
+$bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen;
+$bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height);
+$gfx = [System.Drawing.Graphics]::FromImage($bmp);
+$gfx.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size);
+$bmp.Save('${psEscapedPath}', [System.Drawing.Imaging.ImageFormat]::Png);
+$gfx.Dispose(); $bmp.Dispose();
+`;
+  await new Promise<void>((resolve, reject) => {
+    const proc = spawn('powershell.exe', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script], {
+      windowsHide: true,
+    });
+    let stderr = '';
+    proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+    const timer = setTimeout(() => {
+      proc.kill();
+      reject(new Error('Screenshot timed out after 10s'));
+    }, 10_000);
+    proc.on('error', (err) => { clearTimeout(timer); reject(err); });
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) resolve();
+      else reject(new Error(`PowerShell screenshot exited with ${code}: ${stderr.trim()}`));
+    });
+  });
+}
 
 // Redirect operators — kept attached to a stage, not used to split stages.
 // The shell still interprets them when we route through `sh -c`.
@@ -76,6 +151,48 @@ function splitPipelineStages(command: string): string[] {
   // Split on pipeline/chain operators only. Redirects stay attached.
   return command.split(PIPELINE_SEPARATOR).map(s => s.trim()).filter(Boolean);
 }
+
+/**
+ * Rewrite a subset of POSIX shell idioms into Windows cmd.exe equivalents so
+ * the same command string works on both platforms. The agent is trained on
+ * POSIX syntax; this lets it stay POSIX-native while we still shell out to
+ * cmd /c on Windows (required for `npm.cmd` et al. to resolve).
+ *
+ * Scope is intentionally narrow: only idioms that appear frequently in
+ * agent-generated commands and have a clean Windows mapping. Anything more
+ * ambitious (variable expansion, glob semantics) belongs in a POSIX shell,
+ * not a regex rewriter.
+ */
+function translatePosixShellismsForWindows(command: string): string {
+  // `/dev/null` → `nul`. Match only when it's a standalone token, not
+  // part of a longer path. The \b after `null` lets it end at whitespace,
+  // pipe/redirect operators, or end-of-string.
+  return command.replace(/\/dev\/null\b/g, 'nul');
+}
+
+/**
+ * Probe for git-bash on Windows. The agent writes POSIX shell (`&` backgrounds,
+ * `$!`, `sleep`, `/dev/null`, etc.) and cmd.exe doesn't understand any of it.
+ * Git for Windows is on ~every dev machine that has git, and its bundled
+ * bash.exe handles `npm`, `node`, and other shimmed binaries correctly.
+ *
+ * We probe once at module-load — the result is a stable property of the
+ * machine, not something that changes request-to-request.
+ */
+const WINDOWS_BASH_CANDIDATES = [
+  'C:\\Program Files\\Git\\bin\\bash.exe',
+  'C:\\Program Files (x86)\\Git\\bin\\bash.exe',
+  'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
+];
+const WIN_BASH_PATH: string | null = (() => {
+  if (process.platform !== 'win32') return null;
+  for (const candidate of WINDOWS_BASH_CANDIDATES) {
+    try {
+      if (fsSync.existsSync(candidate)) return candidate;
+    } catch { /* continue */ }
+  }
+  return null;
+})();
 
 // Commands that require explicit opt-in via SOLVENT_ALLOW_SHELL=true
 const DANGEROUS_COMMANDS = [
@@ -276,8 +393,212 @@ export class ToolService {
         case 'get_project_info':
           result = await this.getProjectInfo(args.path as string | undefined);
           break;
+        case 'get_console_logs':
+          result = this.getConsoleLogs(
+            args.filter as 'error' | 'warn' | 'log' | undefined,
+            args.limit as number | undefined
+          );
+          break;
+        case 'get_selected_element':
+          result = this.getSelectedElement();
+          break;
+        case 'native_backend_start': {
+          const { port, pid } = await nativeCopyManager.start(
+            args.projectPath as string,
+            (args.port as number) ?? 3002
+          );
+          result = { ok: true, port, pid, hint: 'Call native_backend_status to confirm readiness before declaring the server live.' };
+          break;
+        }
+        case 'native_backend_stop':
+          await nativeCopyManager.stop();
+          result = { ok: true };
+          break;
+        case 'native_backend_status':
+          result = nativeCopyManager.status();
+          break;
+
+        // ── Agent planning tools ──
+        // All three use sessionId='default' to match the prompt injection in
+        // baseOpenAIService which calls renderForPrompt('default').
+        case 'create_plan': {
+          const sessionId = 'default';
+          const steps = (args.steps as string[]) || [];
+          if (steps.length === 0) throw new Error('create_plan requires at least one step');
+          const plan = agentScratchpadService.createPlan(sessionId, steps);
+          result = {
+            status: 'plan_created',
+            sessionId,
+            plan: plan.map(s => ({ id: s.id, title: s.title, status: s.status, notes: s.notes })),
+            note: 'Plan injected into context. Use update_plan to mark steps as you work.',
+          };
+          break;
+        }
+        case 'update_plan': {
+          const sessionId = 'default';
+          const stepId = args.step_id as string;
+          const status = args.status as string;
+          if (!stepId || !status) throw new Error('update_plan requires step_id and status');
+          const step = agentScratchpadService.updateStep(sessionId, stepId, status as any, args.notes as string);
+          if (!step) throw new Error(`Step ${stepId} not found in plan`);
+          const pad = agentScratchpadService.getScratchpad(sessionId);
+          result = {
+            status: 'step_updated',
+            step: { id: step.id, title: step.title, status: step.status },
+            plan: pad?.plan.map(s => ({ id: s.id, title: s.title, status: s.status, notes: s.notes })),
+          };
+          break;
+        }
+        case 'reflect': {
+          const sessionId = 'default';
+          const verified = (args.verified as string[]) || [];
+          const assumed = (args.assumed as string[]) || [];
+          const next = args.next as string;
+          if (!next) throw new Error('reflect requires a "next" action');
+          const reflection = agentScratchpadService.addReflection(sessionId, verified, assumed, next);
+          result = { status: 'reflection_recorded', reflection };
+          break;
+        }
+
+        // ── Code editing tools ──
+        case 'apply_patch': {
+          const patchPath = args.path as string;
+          const patchContent = args.patch as string;
+          if (!patchPath || !patchContent) throw new Error('apply_patch requires path and patch');
+
+          const fullPatchPath = validatePath(patchPath);
+          const existingContent = await fs.readFile(fullPatchPath, 'utf-8');
+
+          const hunks = parseUnifiedDiff(patchContent);
+          if (hunks.length === 0) throw new Error('apply_patch: no valid hunks found in patch');
+
+          const patchResult = applyHunks(existingContent, hunks);
+          if (!patchResult.success) {
+            throw new Error(`apply_patch: ${patchResult.error}`);
+          }
+
+          await this.ensureApprovalForWrite(patchPath);
+          await fs.writeFile(fullPatchPath, patchResult.newContent, 'utf-8');
+          result = {
+            status: 'patch_applied',
+            path: patchPath,
+            hunksApplied: patchResult.hunksApplied,
+          };
+          break;
+        }
+
+        case 'read_file_range': {
+          const rangePath = args.path as string;
+          const start = Math.max(1, args.start as number);
+          const end = Math.min(start + 500, args.end as number); // cap at 500 lines
+          if (!rangePath || !start || !end) throw new Error('read_file_range requires path, start, and end');
+
+          const fullRangePath = validatePath(rangePath);
+          const content = await fs.readFile(fullRangePath, 'utf-8');
+          const allLines = content.split('\n');
+
+          const startIdx = Math.max(0, start - 1); // 1-based to 0-based
+          const endIdx = Math.min(allLines.length, end);
+          const rangeLines = allLines.slice(startIdx, endIdx);
+
+          result = {
+            path: rangePath,
+            start,
+            end: endIdx,
+            totalLines: allLines.length,
+            content: rangeLines.map((line, i) => `${startIdx + i + 1}: ${line}`).join('\n'),
+          };
+          break;
+        }
+
+        // ── Interaction tools ──
+        // ask_user removed: requires a pause/resume SSE round-trip that doesn't
+        // exist yet. Re-add when the agent loop supports blocking for user input.
+
+        case 'run_tests_focused': {
+          const focusFile = args.file as string;
+          if (!focusFile) throw new Error('run_tests_focused requires a file path');
+
+          const relPath = focusFile.replace(/\\/g, '/');
+
+          // Use existing getErrors and filter to the target file
+          const allErrors = await this.getErrors();
+          const relevantErrors = (allErrors.errors || []).filter((e: { file?: string; message?: string }) =>
+            e.file?.includes(relPath) || e.file?.includes(path.basename(relPath))
+          );
+
+          // Check for corresponding test files
+          const baseName = relPath.replace(/\.(ts|tsx|js|jsx)$/, '');
+          const effectiveRoot = getEffectiveProjectRoot();
+          const testPatterns = [`${baseName}.test.ts`, `${baseName}.spec.ts`, `${baseName}.test.tsx`, `${baseName}.spec.tsx`];
+          const testFiles = await Promise.all(
+            testPatterns.map(async (tp) => {
+              try {
+                await fs.access(path.join(effectiveRoot, tp));
+                return tp;
+              } catch {
+                return null;
+              }
+            })
+          ).then(results => results.filter(Boolean) as string[]);
+
+          result = {
+            file: focusFile,
+            typeCheck: {
+              status: relevantErrors.length === 0 ? 'clean' : 'errors',
+              errorCount: relevantErrors.length,
+              errors: relevantErrors.slice(0, 5),
+            },
+            testFiles,
+          };
+          break;
+        }
+
+        case 'undo_last_action': {
+          result = {
+            status: 'info',
+            note: 'Undo is handled via the agent loop. The beforeContent captured in tool_start events for write tools (write_file, edit_file, create_file) can be written back to restore the previous state. Use write_file with the beforeContent to undo a specific change.',
+          };
+          break;
+        }
+
+        case 'query_symbols': {
+          const symQuery = args.query as string;
+          if (!symQuery) throw new Error('query_symbols requires a query');
+          const symRoot = getEffectiveProjectRoot();
+
+          // Build index if not yet built for this project
+          if (!hasSymbolIndex(symRoot)) {
+            await buildSymbolIndex(symRoot);
+          }
+
+          const symbols = querySymbols(symRoot, symQuery, {
+            kind: args.kind as string | undefined,
+            file: args.file as string | undefined,
+            limit: args.limit as number | undefined,
+          });
+
+          result = {
+            query: symQuery,
+            count: symbols.length,
+            symbols: symbols.map(s => ({
+              name: s.name,
+              kind: s.kind,
+              file: s.file,
+              line: s.line,
+              signature: s.signature,
+            })),
+          };
+          break;
+        }
+
         default:
-          throw new Error(`Unknown tool: ${toolName}`);
+          // Check if this is an MCP tool call
+          if (mcpClientManager.isMCPTool(toolName)) {
+            result = await mcpClientManager.callTool(toolName, args);
+          } else {
+            throw new Error(`Unknown tool: ${toolName}`);
+          }
       }
 
       await transactionService.logComplete(txId, result);
@@ -495,13 +816,74 @@ export class ToolService {
     const filePath = path.join(uploadDir, fileName);
     await fs.mkdir(uploadDir, { recursive: true });
 
-    await screenshot({ filename: filePath });
+    try {
+      if (process.platform === 'win32') {
+        await captureScreenWindows(filePath);
+      } else {
+        await screenshot({ filename: filePath });
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[ToolService] capture_ui screenshot failed: ${msg}`);
+      return {
+        error: `Screen capture failed: ${msg}. On Windows this usually means the system's native screenshot path is blocked by an antivirus or a missing System.Drawing assembly. Falling back to text-only context — use get_ui_text or fetch_preview_source instead.`,
+      };
+    }
+
     const base64 = await fs.readFile(filePath, 'base64');
 
     return {
       path: filePath,
       base64: `data:image/png;base64,${base64}`,
       message: "UI state captured. Rolling cache maintained (last 3 kept)."
+    };
+  }
+
+  private getConsoleLogs(filter?: 'error' | 'warn' | 'log', limit?: number) {
+    const state = getPreviewState();
+    if (!state) {
+      return {
+        error: 'No preview context available. The agent must be running inside an /agent/chat request with previewState supplied by the frontend.',
+        entries: [],
+      };
+    }
+    const buffer = state.consoleBuffer ?? [];
+    let filtered = buffer;
+    if (filter) {
+      filtered = buffer.filter(e => e.level === filter);
+    }
+    const cap = Math.max(1, Math.min(limit ?? 20, 200));
+    const entries = filtered.slice(-cap).map(e => ({
+      level: e.level,
+      message: e.message.slice(0, 500),
+      timestamp: e.timestamp,
+    }));
+    return {
+      url: state.url ?? null,
+      total: buffer.length,
+      filtered: filtered.length,
+      returned: entries.length,
+      filter: filter ?? 'all',
+      entries,
+    };
+  }
+
+  private getSelectedElement() {
+    const state = getPreviewState();
+    if (!state) {
+      return {
+        error: 'No preview context available. The agent must be running inside an /agent/chat request with previewState supplied by the frontend.',
+        element: null,
+      };
+    }
+    if (!state.selectedElement) {
+      return {
+        element: null,
+        note: 'User has not selected an element in the preview.',
+      };
+    }
+    return {
+      element: state.selectedElement,
     };
   }
 
@@ -599,7 +981,8 @@ export class ToolService {
   }
 
   private async grepFiles(pattern: string, searchPath?: string, include?: string): Promise<string> {
-    const basePath = searchPath ? validatePath(searchPath) : PROJECT_ROOT;
+    const effectiveRoot = getEffectiveProjectRoot();
+    const basePath = searchPath ? validatePath(searchPath) : effectiveRoot;
     const includeGlob = include || '*.{ts,tsx,js,jsx,css,json,md}';
     const pathSep = process.platform === 'win32' ? '\\' : '/';
 
@@ -629,7 +1012,7 @@ export class ToolService {
 
     return new Promise((resolve) => {
       const proc = spawn(bin, binArgs, {
-        cwd: PROJECT_ROOT,
+        cwd: effectiveRoot,
       });
 
       let output = '';
@@ -640,7 +1023,7 @@ export class ToolService {
           return;
         }
         const lines = output.trim().split('\n').slice(0, 30);
-        const relativized = lines.map((l) => l.replace(PROJECT_ROOT + pathSep, ''));
+        const relativized = lines.map((l) => l.replace(effectiveRoot + pathSep, ''));
         const suffix = output.trim().split('\n').length > 30 ? '\n... (results truncated at 30)' : '';
         resolve(relativized.join('\n') + suffix);
       });
@@ -762,7 +1145,7 @@ export class ToolService {
     return new Promise((resolve) => {
       // On Windows, commands like npm/npx/git are .cmd scripts that require shell
       const useShell = process.platform === 'win32';
-      const proc = spawn(bin, args, { cwd: options.cwd ?? PROJECT_ROOT, shell: useShell });
+      const proc = spawn(bin, args, { cwd: options.cwd ?? getEffectiveProjectRoot(), shell: useShell });
       let stdout = '';
       let resolved = false;
       const done = (result: { stdout: string; exitCode: number }) => {
@@ -778,7 +1161,8 @@ export class ToolService {
   }
 
   private async runTests(command?: string, cwd?: string): Promise<{ stdout: string; exitCode: number }> {
-    const workDir = cwd ? path.join(PROJECT_ROOT, cwd) : PROJECT_ROOT;
+    const effectiveRoot = getEffectiveProjectRoot();
+    const workDir = cwd ? path.join(effectiveRoot, cwd) : effectiveRoot;
     const cmd = command || 'npx tsc --noEmit --pretty false';
     const parts = cmd.split(/\s+/);
     const bin = parts[0] ?? 'npx';
@@ -803,7 +1187,8 @@ export class ToolService {
   }
 
   private async installPackage(packages: string[], cwd?: string): Promise<{ status: string; packages: string[] }> {
-    const workDir = cwd ? path.join(PROJECT_ROOT, cwd) : PROJECT_ROOT;
+    const effectiveRoot = getEffectiveProjectRoot();
+    const workDir = cwd ? path.join(effectiveRoot, cwd) : effectiveRoot;
     const { exitCode, stdout } = await this.spawnProcess('npm', ['install', ...packages], { cwd: workDir, timeoutMs: 120_000 });
     if (exitCode !== 0) throw new Error(`npm install failed: ${stdout.slice(0, 500)}`);
     return { status: 'success', packages };
@@ -828,7 +1213,8 @@ export class ToolService {
   }
 
   private async getProjectInfo(projectPath?: string): Promise<Record<string, unknown>> {
-    const basePath = projectPath ? path.join(PROJECT_ROOT, projectPath) : PROJECT_ROOT;
+    const effectiveRoot = getEffectiveProjectRoot();
+    const basePath = projectPath ? path.join(effectiveRoot, projectPath) : effectiveRoot;
     try {
       const pkg = JSON.parse(await fs.readFile(path.join(basePath, 'package.json'), 'utf-8')) as {
         name?: string; version?: string; scripts?: Record<string, string>;
@@ -873,6 +1259,37 @@ export class ToolService {
     // Check if arbitrary shell execution is explicitly enabled
     const allowArbitraryShell = process.env.SOLVENT_ALLOW_SHELL === 'true';
 
+    // Reject long-running dev-server commands — they never exit and would
+    // hang the tool loop. The agent should use ide_run_in_sandbox (WebContainer)
+    // for dev servers, not the backend shell.
+    //
+    // IMPORTANT: only match when the dev-server name is the *command being
+    // invoked*, not when it appears inside an argument path. `ls
+    // node_modules/.bin/vite` must be allowed, otherwise the agent cannot
+    // verify that ghost `npm install` runs actually produced the binary.
+    // We split on pipeline operators and check each stage's leading token.
+    const stages = splitPipelineStages(command);
+    const devServerStagePatterns = [
+      /^npm(?:\.cmd)?\s+(?:run\s+)?(?:dev|start|serve|watch|preview)\b/i,
+      /^yarn(?:\.cmd)?\s+(?:dev|start|serve|watch|preview)\b/i,
+      /^pnpm(?:\.cmd)?\s+(?:run\s+)?(?:dev|start|serve|watch|preview)\b/i,
+      // `vite` / `vite --host` / `./node_modules/.bin/vite` — but NOT
+      // `vite build`, and NOT `ls path/to/vite` (which begins with `ls`).
+      /^(?:\.?\/[^\s]*\/)?(?:npx\s+)?vite(?:\s+(?!build\b)|$)/i,
+      /^(?:npx\s+)?next\s+(?:dev|start)\b/i,
+      /^(?:npx\s+)?nodemon\b/i,
+      /^(?:npx\s+)?tsx\s+watch\b/i,
+      /^(?:npx\s+)?nuxt\s+(?:dev|preview)\b/i,
+      // `node_modules/.bin/vite ...` as the literal command.
+      /^node_modules\/\.bin\/(?:vite|next|nodemon|nuxt)(?:\s|$)/i,
+    ];
+    const offendingStage = stages.find(stage => devServerStagePatterns.some(re => re.test(stage)));
+    if (offendingStage) {
+      throw new Error(
+        `Command rejected: '${offendingStage.substring(0, 60)}' looks like a long-running dev server, which will hang the tool loop. Use the 'ide_run_in_sandbox' tool (WebContainer) to start dev servers, or ask the user to click the Run button in the coding panel.`
+      );
+    }
+
     if (!allowArbitraryShell) {
       const normalizedCommand = command.trim().toLowerCase();
 
@@ -907,19 +1324,31 @@ export class ToolService {
       }
     }
 
-    // If the command uses pipes/redirects, spawn through a shell so it
-    // parses them. Otherwise direct-spawn with arg splitting (faster, no shell).
+    // Windows shell routing: prefer git-bash if present (agent writes POSIX
+    // shell — `&` backgrounds, `$!`, `sleep`, `|| echo`, `/dev/null`, etc.
+    // — none of which cmd.exe handles correctly). Fall back to cmd /c with
+    // a narrow POSIX→cmd translation when git-bash isn't installed.
     const useShell = hasShellMetacharacters(command);
     let executable: string;
     let args: string[];
-    if (useShell) {
-      if (process.platform === 'win32') {
-        executable = 'cmd';
-        args = ['/c', command.trim()];
-      } else {
-        executable = '/bin/sh';
+    let overridePath: string | null = null;
+    if (process.platform === 'win32') {
+      if (WIN_BASH_PATH) {
+        // Spawn git-bash by absolute path. Keep the cwd Windows-style —
+        // CreateProcess requires it, and git-bash handles Windows paths
+        // (and POSIX ones) natively once it's running.
+        executable = WIN_BASH_PATH;
         args = ['-c', command.trim()];
+        // Prepend git-bash's bin to PATH so shimmed binaries (npm, node,
+        // etc. that live in Git's msys layout) resolve inside the shell.
+        overridePath = path.dirname(WIN_BASH_PATH) + path.delimiter + (process.env.PATH ?? '');
+      } else {
+        executable = 'cmd';
+        args = ['/c', translatePosixShellismsForWindows(command.trim())];
       }
+    } else if (useShell) {
+      executable = '/bin/sh';
+      args = ['-c', command.trim()];
     } else {
       const parts = command.trim().split(/\s+/);
       const first = parts[0];
@@ -929,9 +1358,14 @@ export class ToolService {
     }
 
     return new Promise((resolve, reject) => {
+      const spawnEnv: NodeJS.ProcessEnv = {
+        ...process.env as NodeJS.ProcessEnv,
+        NO_COLOR: '1',
+      };
+      if (overridePath) spawnEnv.PATH = overridePath;
       const proc = spawn(executable, args, {
-        cwd: PROJECT_ROOT as string,
-        env: { ...process.env as NodeJS.ProcessEnv, NO_COLOR: '1' },
+        cwd: getEffectiveProjectRoot(),
+        env: spawnEnv,
         shell: false,
         stdio: ['pipe', 'pipe', 'pipe']
       });
@@ -948,6 +1382,15 @@ export class ToolService {
 
       let stdout = '';
       let stderr = '';
+      let timedOut = false;
+
+      // Kill any command that runs longer than 3 minutes — protects against
+      // unexpected long-runners that slipped past the dev-server pattern check.
+      const TIMEOUT_MS = 180_000;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        proc.kill();
+      }, TIMEOUT_MS);
 
       child.stdout.on('data', (data: Buffer) => {
         stdout += data.toString();
@@ -958,11 +1401,15 @@ export class ToolService {
       });
 
       child.on('error', (err: Error) => {
+        clearTimeout(timer);
         reject(new Error(`Command execution failed: ${err.message}`));
       });
 
       child.on('close', (code: number | null) => {
-        if (code === 0) {
+        clearTimeout(timer);
+        if (timedOut) {
+          reject(new Error(`Command timed out after ${TIMEOUT_MS / 1000}s and was killed. Partial stdout:\n${stdout.slice(-500)}`));
+        } else if (code === 0) {
           resolve({ stdout, stderr });
         } else {
           reject(new Error(`Command exited with code ${code}\n${stderr}`));

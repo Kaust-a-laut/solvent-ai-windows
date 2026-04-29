@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { useAppStore } from '../store/useAppStore';
-import { 
-  MessageSquare, Globe, Brain, Swords, GitCompare, 
-  Users, FlaskConical, ScanEye, Search, BookOpen, LineChart, ChevronRight, Settings, Code, Menu, X as CloseIcon,
+import {
+  MessageSquare, Globe, Brain, Swords, GitCompare,
+  Users, FlaskConical, ScanEye, Search, BookOpen, LineChart, Settings, Code, Menu, X as CloseIcon,
   ChevronsLeft, ChevronsRight, PanelLeftClose, PanelLeftOpen, Home, Sparkles
 } from 'lucide-react';
 import { cn } from '../lib/utils';
@@ -88,8 +88,15 @@ export const Navigation = () => {
 
         {isActive && !isCollapsed && (
           <motion.div layoutId="navIndicator" className="flex items-center relative z-10">
-             <ChevronRight size={12} className="text-white/30" />
+             <span className={cn("w-1.5 h-1.5 rounded-full", color)} style={{ backgroundColor: 'currentColor' }} />
           </motion.div>
+        )}
+
+        {/* Custom tooltip for collapsed mode — appears faster than native title */}
+        {isCollapsed && (
+          <span className="pointer-events-none absolute left-full ml-3 px-2 py-1 bg-black border border-white/10 rounded text-[11px] font-bold text-white whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity z-50">
+            {label}
+          </span>
         )}
       </motion.button>
     );
@@ -125,10 +132,10 @@ export const Navigation = () => {
         )}
       </div>
 
-      <div className={cn("flex-1 overflow-y-auto scrollbar-hide space-y-10", isCollapsed ? "px-2 space-y-6" : "px-6")}>
+      <div className={cn("flex-1 overflow-y-auto scrollbar-hide", isCollapsed ? "px-2 space-y-5" : "px-6 space-y-6")}>
         <div className="space-y-1.5">
           {!isCollapsed && (
-            <div className="flex items-center gap-2 px-4 mb-4">
+            <div className="flex items-center gap-2 px-4 mb-3">
               <span className="w-1 h-1 rounded-full bg-jb-accent/60" />
               <p className="text-[11px] font-black text-slate-300 uppercase tracking-[0.3em]">Modes</p>
             </div>
@@ -148,7 +155,7 @@ export const Navigation = () => {
 
         <div className="space-y-1.5">
            {!isCollapsed && (
-             <div className="flex items-center gap-2 px-4 mb-4">
+             <div className="flex items-center gap-2 px-4 mb-3">
                <span className="w-1 h-1 rounded-full bg-jb-purple/60" />
                <p className="text-[11px] font-black text-slate-300 uppercase tracking-[0.3em]">Model Lab</p>
              </div>

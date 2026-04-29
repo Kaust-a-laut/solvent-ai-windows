@@ -9,6 +9,8 @@ export interface ToolStartEvent {
   args: Record<string, unknown>;
   iteration: number;
   callId: string;
+  /** Snapshot of the file content before a write-tool ran. Used for undo. */
+  beforeContent?: string;
 }
 
 export interface ToolResultEvent {
@@ -47,10 +49,24 @@ export interface ErrorEvent {
   message: string;
 }
 
+export interface UsageEvent {
+  type: 'usage';
+  promptTokens: number;
+  completionTokens: number;
+  cachedTokens?: number;
+}
+
 export interface BrowserToolEvent {
   type: 'browser-tool';
   tool: string;
   callId: string;
+}
+
+export interface PlanUpdateEvent {
+  type: 'plan_update';
+  plan: {
+    steps: Array<{ id: string; title: string; status: string; notes?: string }>;
+  };
 }
 
 export type AgentEvent =
@@ -59,6 +75,8 @@ export type AgentEvent =
   | ToolErrorEvent
   | TextDeltaEvent
   | TextCompleteEvent
+  | UsageEvent
   | DoneEvent
   | ErrorEvent
-  | BrowserToolEvent;
+  | BrowserToolEvent
+  | PlanUpdateEvent;

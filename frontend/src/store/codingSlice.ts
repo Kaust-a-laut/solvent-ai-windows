@@ -1,5 +1,8 @@
 import { StateCreator } from 'zustand';
 import { AppState } from './types';
+import { BASE_URL } from '../lib/config';
+import { getSecret } from '../lib/api-client';
+import { useAppStore } from './useAppStore';
 
 // --- Project Management Types ---
 
@@ -165,6 +168,15 @@ export interface PendingDiff {
   description: string;
 }
 
+export interface StagedDiff {
+  filePath: string;
+  original: string;
+  modified: string;
+  description: string;
+  callId: string;
+  status: 'pending' | 'approved' | 'rejected';
+}
+
 // --- Preview Runtime State Types (Phase 2) ---
 
 export interface ConsoleEntry {
@@ -182,8 +194,20 @@ export interface ElementInfo {
   rect: { x: number; y: number; width: number; height: number };
 }
 
+export interface AgentPlanStep {
+  id: string;
+  title: string;
+  status: string;
+  notes?: string;
+}
+
+export interface AgentPlan {
+  steps: AgentPlanStep[];
+}
+
 export interface CodingSlice {
   pendingDiff: PendingDiff | null;
+  stagedDiffs: StagedDiff[];
   agentMessages: AgentMessage[];
   panelWidths: { fileTree: number; chat: number };
   fileTreeVisible: boolean;
@@ -191,6 +215,10 @@ export interface CodingSlice {
   terminalVisible: boolean;
   currentProject: ProjectInfo | null;
   projectHistory: ProjectInfo[];
+
+  // Agent plan strip
+  agentPlan: AgentPlan | null;
+  setAgentPlan: (plan: AgentPlan | null) => void;
 
   // Terminal lines (shared across CodingArea + agent)
   terminalLines: string[];
@@ -209,6 +237,10 @@ export interface CodingSlice {
   // File tree refresh trigger (incremented to signal a refresh)
   fileTreeRefreshTrigger: number;
   triggerFileTreeRefresh: () => void;
+
+  // Sandbox run trigger (incremented by agent ide_run_in_sandbox → CodingArea handleRun)
+  sandboxRunTrigger: number;
+  requestSandboxRun: () => void;
 
   // Preview URL (the WebContainer server-ready URL) — shared so AgentChatPanel can read it
   previewUrl: string | null;
@@ -235,18 +267,44 @@ export interface CodingSlice {
   preferredCodeModel: string | null;
   setPreferredCodeModel: (model: string) => void;
 
+  // Agent busy state — shared so PreviewPanel can show/hide the fix chip
+  agentBusy: boolean;
+  setAgentBusy: (busy: boolean) => void;
+  // Queued agent prompt (e.g. from PreviewPanel's "Ask agent to fix" chip)
+  queuedAgentPrompt: string | null;
+  setQueuedAgentPrompt: (prompt: string | null) => void;
+
+  // Session token usage tracking (accumulated across agent turns)
+  sessionPromptTokens: number;
+  sessionCompletionTokens: number;
+  sessionCachedTokens: number;
+  accumulateTokenUsage: (usage: { promptTokens: number; completionTokens: number; cachedTokens?: number }) => void;
+  resetTokenUsage: () => void;
+
+  // Memory panel visibility
+  memoryVisible: boolean;
+  setMemoryVisible: (visible: boolean) => void;
+
   // Project file-tree index map (fetched on project open)
   projectMap: string | null;
   setProjectMap: (map: string | null) => void;
 
   setPendingDiff: (diff: PendingDiff) => void;
   clearPendingDiff: () => void;
+  addStagedDiff: (diff: { filePath: string; original: string; modified: string; description: string; callId: string }) => void;
+  setStagedDiffStatus: (callId: string, status: 'approved' | 'rejected') => void;
+  applyAllStagedDiffs: () => Promise<void>;
+  clearStagedDiffs: () => void;
   addAgentMessage: (msg: AgentMessage) => void;
   updateAgentMessage: (
     id: string,
     updates: Partial<AgentMessage> | ((prev: AgentMessage) => Partial<AgentMessage>)
   ) => void;
   clearAgentMessages: () => void;
+  /** Truncate messages after the given message ID (for edit-and-rerun). */
+  truncateAfterMessage: (messageId: string) => void;
+  /** Update a user message's content (for edit-and-rerun). */
+  updateUserMessageContent: (id: string, content: string) => void;
   setPanelWidths: (widths: { fileTree: number; chat: number }) => void;
   setFileTreeVisible: (v: boolean) => void;
   setChatPanelVisible: (v: boolean) => void;
@@ -269,6 +327,7 @@ export const createCodingSlice: StateCreator<AppState, [], [], CodingSlice> = (s
 
   return ({
   pendingDiff: null,
+  stagedDiffs: [],
   agentMessages: [],
   panelWidths: { fileTree: 240, chat: 360 },
   fileTreeVisible: true,
@@ -276,6 +335,9 @@ export const createCodingSlice: StateCreator<AppState, [], [], CodingSlice> = (s
   terminalVisible: false,
   currentProject: null,
   projectHistory: savedHistory,
+
+  agentPlan: null,
+  setAgentPlan: (agentPlan) => set({ agentPlan }),
 
   terminalLines: ['[SYSTEM]: Agentic IDE Core Initialized.'],
   addTerminalLine: (line) => set((state) => {
@@ -301,6 +363,9 @@ export const createCodingSlice: StateCreator<AppState, [], [], CodingSlice> = (s
   fileTreeRefreshTrigger: 0,
   triggerFileTreeRefresh: () => set((state) => ({ fileTreeRefreshTrigger: state.fileTreeRefreshTrigger + 1 })),
 
+  sandboxRunTrigger: 0,
+  requestSandboxRun: () => set((state) => ({ sandboxRunTrigger: state.sandboxRunTrigger + 1 })),
+
   previewUrl: null,
   setPreviewUrl: (previewUrl) => set({ previewUrl }),
   previewSnapshot: null,
@@ -313,8 +378,49 @@ export const createCodingSlice: StateCreator<AppState, [], [], CodingSlice> = (s
   previewSelectedElement: null,
   previewScreenshotUrl: null,
 
-  setPendingDiff: (diff) => set({ pendingDiff: diff }),
+  setPendingDiff: (diff) => set((state) => {
+    // Also stage it for the new multi-file tray
+    const staged: StagedDiff = {
+      ...diff,
+      callId: `pending-${Date.now()}`,
+      status: 'pending',
+    };
+    return {
+      pendingDiff: diff,
+      stagedDiffs: [...state.stagedDiffs.filter(d => d.filePath !== diff.filePath), staged],
+    };
+  }),
   clearPendingDiff: () => set({ pendingDiff: null }),
+  addStagedDiff: (diff) => set((state) => ({
+    stagedDiffs: [...state.stagedDiffs.filter(d => d.filePath !== diff.filePath), { ...diff, status: 'pending' }],
+  })),
+  setStagedDiffStatus: (callId, status) => set((state) => ({
+    stagedDiffs: state.stagedDiffs.map(d => d.callId === callId ? { ...d, status } : d),
+  })),
+  applyAllStagedDiffs: async () => {
+    const state = useAppStore.getState();
+    const approved = state.stagedDiffs.filter(d => d.status === 'approved' || d.status === 'pending');
+    for (const diff of approved) {
+      try {
+        // Write to backend
+        const secret = await getSecret();
+        await fetch(`${BASE_URL}/api/files/write`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Solvent-Secret': secret },
+          body: JSON.stringify({ path: diff.filePath, content: diff.modified, project: state.currentProject?.path }),
+        });
+        // Update openFiles
+        const currentFiles = useAppStore.getState().openFiles;
+        useAppStore.getState().setOpenFiles(
+          currentFiles.map(f => f.path === diff.filePath ? { ...f, content: diff.modified } : f)
+        );
+      } catch {
+        // Silently fail — the diff stays in the list
+      }
+    }
+    set({ stagedDiffs: [], pendingDiff: null });
+  },
+  clearStagedDiffs: () => set({ stagedDiffs: [], pendingDiff: null }),
   addAgentMessage: (msg) => set((state) => {
     const messages = [...state.agentMessages, msg];
     // Cap in-memory messages — oldest are dropped (persistence already caps at 50).
@@ -331,7 +437,17 @@ export const createCodingSlice: StateCreator<AppState, [], [], CodingSlice> = (s
           : m
       ),
     })),
-  clearAgentMessages: () => set({ agentMessages: [] }),
+  clearAgentMessages: () => set({ agentMessages: [], agentPlan: null }),
+  truncateAfterMessage: (messageId) => set((state) => {
+    const idx = state.agentMessages.findIndex(m => m.id === messageId);
+    if (idx === -1) return state;
+    return { agentMessages: state.agentMessages.slice(0, idx + 1) };
+  }),
+  updateUserMessageContent: (id, content) => set((state) => ({
+    agentMessages: state.agentMessages.map(m =>
+      m.id === id ? { ...m, content } : m
+    ),
+  })),
   setPanelWidths: (panelWidths) => set({ panelWidths }),
   setFileTreeVisible: (fileTreeVisible) => set({ fileTreeVisible }),
   setChatPanelVisible: (chatPanelVisible) => set({ chatPanelVisible }),
@@ -352,6 +468,25 @@ export const createCodingSlice: StateCreator<AppState, [], [], CodingSlice> = (s
 
   preferredCodeModel: null,
   setPreferredCodeModel: (preferredCodeModel) => set({ preferredCodeModel }),
+
+  agentBusy: false,
+  setAgentBusy: (agentBusy) => set({ agentBusy }),
+
+  queuedAgentPrompt: null,
+  setQueuedAgentPrompt: (queuedAgentPrompt) => set({ queuedAgentPrompt }),
+
+  sessionPromptTokens: 0,
+  sessionCompletionTokens: 0,
+  sessionCachedTokens: 0,
+  accumulateTokenUsage: (usage) => set((state) => ({
+    sessionPromptTokens: state.sessionPromptTokens + usage.promptTokens,
+    sessionCompletionTokens: state.sessionCompletionTokens + usage.completionTokens,
+    sessionCachedTokens: state.sessionCachedTokens + (usage.cachedTokens ?? 0),
+  })),
+  resetTokenUsage: () => set({ sessionPromptTokens: 0, sessionCompletionTokens: 0, sessionCachedTokens: 0 }),
+
+  memoryVisible: false,
+  setMemoryVisible: (memoryVisible) => set({ memoryVisible }),
 
   projectMap: null,
   setProjectMap: (map) => set({ projectMap: map }),

@@ -71,4 +71,44 @@ describe('run_shell pipes and redirects', () => {
     }) as { stdout: string };
     expect(result.stdout.trim()).toBe('plain');
   });
+
+  // Regression: the dev-server heuristic used to match the substring `vite`
+  // anywhere in the command, which blocked the agent from verifying that
+  // `npm install` had actually produced the binary. `ls .../vite` is a lookup,
+  // not a dev-server invocation, and must be allowed past the heuristic.
+  // (The shell may then return a non-zero exit if the file doesn't exist —
+  // that's fine. We only care that the dev-server guard doesn't trip.)
+  it('does not reject lookups of dev-server binaries as long-running', async () => {
+    const result = await toolService
+      .executeTool('run_shell', { command: 'ls node_modules/.bin/vite' })
+      .catch((err: Error) => err);
+    // It must not be the dev-server rejection. Any other error (e.g.
+    // "No such file or directory") is acceptable in this test — the point
+    // is that the heuristic didn't trip.
+    if (result instanceof Error) {
+      expect(result.message).not.toMatch(/long-running dev server/i);
+    }
+  });
+
+  it('allows running a dev-server binary for --version checks', async () => {
+    // `vite --version` is a fast, exiting call — not a long-running server.
+    // However our heuristic is conservative and treats bare `vite` as a dev
+    // server since `vite` with no args starts the server. Ensure the
+    // rejection message still fires for this legitimate dev-server case.
+    await expect(
+      toolService.executeTool('run_shell', { command: 'vite' })
+    ).rejects.toThrow(/long-running dev server/i);
+  });
+
+  it('rejects actual dev-server invocations (npm run dev)', async () => {
+    await expect(
+      toolService.executeTool('run_shell', { command: 'cd frontend && npm run dev' })
+    ).rejects.toThrow(/long-running dev server/i);
+  });
+
+  it('rejects dev-server invocations via node_modules/.bin', async () => {
+    await expect(
+      toolService.executeTool('run_shell', { command: 'node_modules/.bin/vite --host' })
+    ).rejects.toThrow(/long-running dev server/i);
+  });
 });

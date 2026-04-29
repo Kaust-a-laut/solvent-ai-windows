@@ -107,10 +107,12 @@ async function getFileTree(dir: string, base: string = ''): Promise<Array<{ name
 
     for (const entry of entries) {
       if (['node_modules', '.git', 'dist', '.next'].includes(entry.name)) continue;
-      
-      const relPath = path.join(base, entry.name);
+
+      // Always emit forward-slash paths — consumers (WebContainer, toWcPath)
+      // split on '/' only, so backslashes from path.join on Windows break sync.
+      const relPath = (base ? base + '/' + entry.name : entry.name).replace(/\\/g, '/');
       const fullPath = path.join(dir, entry.name);
-      
+
       if (entry.isDirectory()) {
         nodes.push({
           name: entry.name,

@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion } from 'framer-motion';
-import { Globe, X, RefreshCw, PanelRightClose, Camera } from 'lucide-react';
+import { Globe, X, RefreshCw, PanelRightClose, Camera, Wrench } from 'lucide-react';
 import { API_BASE_URL } from '../../lib/config';
 import { useAppStore } from '../../store/useAppStore';
 
@@ -10,10 +10,20 @@ interface PreviewPanelProps {
   editorVisible: boolean;
   onToggleEditor: () => void;
   onSnap?: () => void;
+  /** Called when the user clicks "Ask agent to fix" on a console error. */
+  onAskAgentFix?: (errorMessage: string) => void;
 }
 
-export const PreviewPanel: React.FC<PreviewPanelProps> = ({ iframeUrl, onClose, editorVisible, onToggleEditor, onSnap: _onSnap }) => {
+export const PreviewPanel: React.FC<PreviewPanelProps> = ({ iframeUrl, onClose, editorVisible, onToggleEditor, onSnap: _onSnap, onAskAgentFix }) => {
   const iframeRef = React.useRef<HTMLIFrameElement>(null);
+
+  const { previewConsoleBuffer, agentBusy } = useAppStore(
+    (s) => ({ previewConsoleBuffer: s.previewConsoleBuffer, agentBusy: s.agentBusy })
+  );
+
+  // Latest console error for the fix chip
+  const latestError = [...previewConsoleBuffer].reverse().find(e => e.level === 'error');
+  const showFixChip = latestError && !agentBusy && !!onAskAgentFix;
 
   const handleCaptureScreenshot = async () => {
     if (!iframeRef.current?.contentWindow) return;
@@ -109,6 +119,23 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({ iframeUrl, onClose, 
           <X size={11} />
         </button>
       </div>
+
+      {/* Proactive fix chip — shows when a console error exists and agent is idle */}
+      {showFixChip && (
+        <div className="shrink-0 bg-rose-500/8 border-t border-b border-rose-500/15 px-3 py-1.5 flex items-center gap-2">
+          <Wrench size={12} className="text-rose-400 shrink-0" />
+          <span className="text-[11px] text-rose-300/80 truncate flex-1 min-w-0" title={latestError!.message}>
+            {latestError!.message.slice(0, 120)}
+          </span>
+          <button
+            type="button"
+            onClick={() => onAskAgentFix!(latestError!.message)}
+            className="shrink-0 text-[10px] font-medium text-rose-400 hover:text-rose-300 bg-rose-500/15 hover:bg-rose-500/25 px-2 py-0.5 rounded transition-colors"
+          >
+            Ask agent to fix
+          </button>
+        </div>
+      )}
 
       {/* Preview iframe — fills remaining height */}
       <iframe
