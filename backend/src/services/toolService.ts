@@ -58,13 +58,9 @@ const ALLOWED_COMMAND_PREFIXES = [
   'wc ',
   'sort ',
   'uniq ',
-  'tee ',
-  'awk ',
-  'sed ',
   // Additional CLI utilities for agent workflows
   'rg ',           // ripgrep — faster grep
   'jq ',           // JSON processing
-  'xargs ',        // parallel command execution
   'basename ',     // path manipulation
   'dirname ',      // path manipulation
   'du ',           // disk usage
@@ -152,6 +148,33 @@ function splitPipelineStages(command: string): string[] {
   return command.split(PIPELINE_SEPARATOR).map(s => s.trim()).filter(Boolean);
 }
 
+// Per-stage argv-level safety. Runs after the prefix allowlist check.
+// Blocks code-eval / arbitrary-spawn flags on otherwise-allowed binaries.
+function rejectDangerousArgv(stage: string): void {
+  const lower = stage.toLowerCase();
+  if (/^node(?:\.exe)?\s/.test(lower)) {
+    if (/\s(-e|--eval|-p|--print|-r|--require|-i|--interactive)\b/.test(lower)) {
+      throw new Error(
+        `Command rejected: 'node' with -e/--eval/-p/--print/-r/--require/-i flags is not permitted (executes arbitrary code).`
+      );
+    }
+  }
+  if (/^npx(?:\.cmd)?\s/.test(lower)) {
+    if (/\s(-p|--package|-c|--call)\b/.test(lower)) {
+      throw new Error(
+        `Command rejected: 'npx' with -p/--package/-c/--call is not permitted (runs arbitrary packages).`
+      );
+    }
+  }
+  if (/^find\s/.test(lower)) {
+    if (/\s(-exec|-execdir|-ok|-okdir)\b/.test(lower)) {
+      throw new Error(
+        `Command rejected: 'find' with -exec/-execdir/-ok/-okdir is not permitted (spawns arbitrary commands).`
+      );
+    }
+  }
+}
+
 /**
  * Rewrite a subset of POSIX shell idioms into Windows cmd.exe equivalents so
  * the same command string works on both platforms. The agent is trained on
@@ -208,7 +231,9 @@ const DANGEROUS_COMMANDS = [
   'bash -c',
   'sh -c',
   'eval ',
-  'exec '
+  'exec ',
+  'begin{system',   // awk system() escape, even if awk re-added later
+  'begin{getline',  // awk getline pipe escape
 ];
 
 export class ToolService {
@@ -1321,6 +1346,7 @@ export class ToolService {
             `Command rejected by security policy: pipeline stage '${stage.substring(0, 50)}${stage.length > 50 ? '...' : ''}' is not in the allowlist. Allowed commands: ${ALLOWED_COMMAND_PREFIXES.join(', ')}.`
           );
         }
+        rejectDangerousArgv(stage);
       }
     }
 

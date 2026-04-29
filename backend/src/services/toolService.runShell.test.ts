@@ -111,4 +111,97 @@ describe('run_shell pipes and redirects', () => {
       toolService.executeTool('run_shell', { command: 'node_modules/.bin/vite --host' })
     ).rejects.toThrow(/long-running dev server/i);
   });
+
+  // Wrapper-bypass regressions (P0 audit fix #3)
+  it('rejects find -exec wrapper that spawns arbitrary commands', async () => {
+    // May be caught by either the DANGEROUS_COMMANDS pattern (sh -c) or the
+    // new find -exec argv check — either rejection is acceptable.
+    await expect(
+      toolService.executeTool('run_shell', { command: 'find . -exec sh -c "whoami" {} \\;' })
+    ).rejects.toThrow(/find.*-exec|dangerous pattern/i);
+  });
+
+  it('rejects find -execdir variant', async () => {
+    await expect(
+      toolService.executeTool('run_shell', { command: 'find . -execdir cat {} +' })
+    ).rejects.toThrow(/find.*-exec/i);
+  });
+
+  it('rejects node -e code-eval flag', async () => {
+    await expect(
+      toolService.executeTool('run_shell', { command: 'node -e "require(\'child_process\').exec(\'whoami\')"' })
+    ).rejects.toThrow(/node.*--eval|eval/i);
+  });
+
+  it('rejects node --require for arbitrary preload', async () => {
+    await expect(
+      toolService.executeTool('run_shell', { command: 'node --require ./pwn.js script.js' })
+    ).rejects.toThrow(/node/i);
+  });
+
+  it('rejects npx -p / --package for arbitrary package execution', async () => {
+    await expect(
+      toolService.executeTool('run_shell', { command: 'npx -p evil-pkg evil-bin' })
+    ).rejects.toThrow(/npx/i);
+  });
+
+  it('rejects npx -c arbitrary command string', async () => {
+    await expect(
+      toolService.executeTool('run_shell', { command: 'npx -c "rm -rf /"' })
+    ).rejects.toThrow(/npx|dangerous pattern/i);
+  });
+
+  it('rejects awk (removed from allowlist)', async () => {
+    await expect(
+      toolService.executeTool('run_shell', { command: 'awk \'BEGIN{system("whoami")}\'' })
+    ).rejects.toThrow(/allowlist|dangerous pattern/i);
+  });
+
+  it('rejects sed (removed from allowlist)', async () => {
+    await expect(
+      toolService.executeTool('run_shell', { command: 'sed -e "e cat /etc/passwd" file' })
+    ).rejects.toThrow(/allowlist/i);
+  });
+
+  it('rejects xargs (removed from allowlist) — wrapper around sh -c', async () => {
+    await expect(
+      toolService.executeTool('run_shell', { command: 'xargs sh -c "whoami"' })
+    ).rejects.toThrow(/allowlist|dangerous pattern/i);
+  });
+
+  it('rejects tee (removed from allowlist) — write capability', async () => {
+    await expect(
+      toolService.executeTool('run_shell', { command: 'echo malicious | tee /etc/foo' })
+    ).rejects.toThrow(/allowlist/i);
+  });
+
+  it('still allows legitimate node script invocation', async () => {
+    // node <script.js> with no eval flags should still pass argv check.
+    // We don't actually execute (the file may not exist); we just want to
+    // confirm the security policy doesn't reject it.
+    const result = await toolService
+      .executeTool('run_shell', { command: 'node --version' })
+      .catch((err: Error) => err);
+    if (result instanceof Error) {
+      expect(result.message).not.toMatch(/security policy|allowlist/i);
+    }
+  });
+
+  it('still allows npx tsc / npx vitest (legitimate flag-free usage)', async () => {
+    const result = await toolService
+      .executeTool('run_shell', { command: 'npx tsc --noEmit' })
+      .catch((err: Error) => err);
+    if (result instanceof Error) {
+      expect(result.message).not.toMatch(/security policy|allowlist/i);
+    }
+  });
+
+  it('still allows find without -exec', async () => {
+    const result = await toolService
+      .executeTool('run_shell', { command: 'find . -name "*.ts" -type f' })
+      .catch((err: Error) => err);
+    if (result instanceof Error) {
+      expect(result.message).not.toMatch(/security policy|allowlist|find/i);
+    }
+  });
 });
