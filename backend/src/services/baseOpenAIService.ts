@@ -8,6 +8,7 @@ import { config } from '../config';
 import { normalizeMessages } from '../utils/messageUtils';
 import type { AgentEvent } from '../types/agentEvents';
 import { spawn as nodeSpawn } from 'child_process';
+import { StringDecoder } from 'node:string_decoder';
 import nodePath from 'path';
 import { PROJECT_ROOT, getEffectiveProjectRoot } from '../utils/fileSystem';
 import { agentScratchpadService } from './agentScratchpad';
@@ -269,11 +270,14 @@ async function autoVerify(
       { cwd: projectRoot, shell: process.platform === 'win32' }
     );
 
+    const timer = setTimeout(() => { proc.kill(); resolve(null); }, 30_000);
+
     let output = '';
     proc.stdout.on('data', (d: Buffer) => { output += d.toString(); });
     proc.stderr.on('data', (d: Buffer) => { output += d.toString(); });
 
     proc.on('close', (code) => {
+      clearTimeout(timer);
       if (code === 0) { resolve(null); return; }
 
       const errorLines = output
@@ -297,12 +301,10 @@ async function autoVerify(
             )
           : newErrors;
 
-      clearTimeout(timer);
       resolve(relevant.slice(0, 10).join('\n') || null);
     });
 
     proc.on('error', () => { clearTimeout(timer); resolve(null); }); // tsc unavailable — skip silently
-    let timer = setTimeout(() => { proc.kill(); resolve(null); }, 30_000);
   });
 }
 
@@ -670,17 +672,21 @@ export abstract class BaseOpenAIService implements AIProvider {
           let buf = '';
           let streamDone = false;
           const stream = response.data as import('stream').Readable;
+          // StringDecoder handles UTF-8 codepoints split across chunk boundaries,
+          // which raw chunk.toString() would surface as U+FFFD replacement chars.
+          const decoder = new StringDecoder('utf8');
 
           const done = () => {
             if (streamDone) return;
             streamDone = true;
+            buf += decoder.end();
             stream.destroy();
             streamResolve();
           };
 
           stream.on('data', (chunk: Buffer) => {
             if (streamDone) return;
-            buf += chunk.toString();
+            buf += decoder.write(chunk);
             const lines = buf.split('\n');
             buf = lines.pop() ?? '';
 
