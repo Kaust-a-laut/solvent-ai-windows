@@ -241,16 +241,24 @@ const API_SECRET = config.BACKEND_INTERNAL_SECRET;
 
 logger.info(`[Server] API_SECRET initialized: ${API_SECRET === 'solvent_dev_insecure_default' ? '✓ Using default (dev mode)' : '✓ Using custom secret'}`);
 
-// Secret exchange endpoint — mirrors what Electron's getSessionSecret() preload does.
-// Allows the browser frontend (running at localhost:5173) to retrieve the session secret
-// so that fetchWithRetry() works in dev without any manual .env setup.
-// Guarded by localhost IP check — only responds to requests from 127.0.0.1 / ::1.
+// Secret exchange endpoint for browser-dev workflow only (Electron uses IPC).
+// Hardening: production returns 404 (endpoint must not exist outside dev). In dev,
+// requires localhost IP AND Origin header matching the configured CORS allowlist —
+// raises the bar against any other local process curling for the secret.
 app.get('/dev-secret', (req, res) => {
+  if (process.env.NODE_ENV !== 'development') {
+    return res.status(404).end();
+  }
   const ip = req.ip || '';
   const isLocalhost = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
   if (!isLocalhost) {
-    logger.warn(`[Security] /dev-secret accessed from non-localhost IP: ${ip}`);
-    return res.status(403).json({ error: 'Forbidden' });
+    logger.warn(`[Security] /dev-secret rejected: non-localhost IP ${ip}`);
+    return res.status(404).end();
+  }
+  const origin = req.headers.origin;
+  if (!origin || !allowedOrigins.includes(origin)) {
+    logger.warn(`[Security] /dev-secret rejected: bad/missing Origin "${origin ?? ''}" from ${ip}`);
+    return res.status(404).end();
   }
   res.json({ secret: API_SECRET });
 });
@@ -265,7 +273,6 @@ app.use((req, res, next) => {
     req.path === '/dev-secret' ||
     req.path.startsWith('/generated_images') ||
     req.path.startsWith('/files') ||
-    req.path.startsWith('/api/files/raw') ||
     req.path === '/health' ||
     req.path === '/api/v1/health' ||
     req.path === '/api/v1/ready' ||
