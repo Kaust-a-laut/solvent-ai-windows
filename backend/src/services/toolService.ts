@@ -17,6 +17,7 @@ import { agentScratchpadService } from './agentScratchpad';
 import { parseUnifiedDiff, applyHunks } from './patchApplier';
 import { buildSymbolIndex, querySymbols, hasSymbolIndex } from './projectIndexer';
 import { mcpClientManager } from './mcpClient';
+import { safeAxiosGet, UrlSafetyError } from '../utils/urlSafety';
 
 // Security: Explicit allowlist of permitted command prefixes
 // This replaces the insecure denylist approach which was trivially bypassed
@@ -340,10 +341,11 @@ export class ToolService {
             break;
           }
           try {
-            const response = await axios.get<string>(url, {
+            const response = await safeAxiosGet(url, {
               timeout: 10_000,
               headers: { Accept: 'text/html' },
               responseType: 'text',
+              maxHops: 5,
             });
             const html = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
             result = {
@@ -352,6 +354,10 @@ export class ToolService {
               length: html.length,
             };
           } catch (err: unknown) {
+            if (err instanceof UrlSafetyError) {
+              result = { error: 'Cannot fetch private/local addresses' };
+              break;
+            }
             const msg = err instanceof Error ? err.message : String(err);
             result = { error: `Failed to fetch preview: ${msg}` };
           }
@@ -935,8 +941,9 @@ export class ToolService {
   }
 
   private async fetchWebContent(url: string) {
-    const response = await axios.get(url, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+    const response = await safeAxiosGet(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+      maxHops: 5,
     });
     // Return a slice of HTML to avoid token overflow, ideally we'd parse this to markdown
     return response.data.slice(0, 10000);

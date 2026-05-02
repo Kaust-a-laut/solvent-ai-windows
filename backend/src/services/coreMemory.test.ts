@@ -15,7 +15,8 @@ describe('CoreMemory', () => {
     core = new CoreMemory(TEST_PATH, 10);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await core.flush();
     if (existsSync(TEST_PATH)) unlinkSync(TEST_PATH);
     if (existsSync(SESSION_PATH)) unlinkSync(SESSION_PATH);
   });

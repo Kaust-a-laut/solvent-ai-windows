@@ -267,8 +267,10 @@ app.get('/dev-secret', (req, res) => {
 app.use((req, res, next) => {
   // Skip secret check for:
   // - Static files (images, uploads)
-  // - Read-only informational endpoints (health, models, settings GET)
-  // - API key validation (user-provided keys, no server secrets exposed)
+  // - Read-only informational endpoints (health, models, settings GET — redacted)
+  // Note: /api/settings/providers/.../validate-key is auth-required because it
+  // mutates singleton provider state and could otherwise be used as an
+  // unauthenticated key-checking oracle.
   const isPublicPath =
     req.path === '/dev-secret' ||
     req.path.startsWith('/generated_images') ||
@@ -279,8 +281,7 @@ app.use((req, res, next) => {
     req.path === '/api/v1/health/services' ||
     req.path === '/api/v1/health/models' ||
     req.path === '/api/v1/models' ||
-    (req.path === '/api/settings' && req.method === 'GET') ||
-    req.path.match(/^\/api\/settings\/providers\/\w+\/validate-key$/);
+    (req.path === '/api/settings' && req.method === 'GET');
 
   if (isPublicPath) return next();
 

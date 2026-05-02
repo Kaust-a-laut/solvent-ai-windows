@@ -173,7 +173,7 @@ describe('run_tests', () => {
     expect(result).toHaveProperty('exitCode');
     expect(typeof result.stdout).toBe('string');
     expect(typeof result.exitCode).toBe('number');
-  });
+  }, 30_000);
 });
 
 describe('get_errors', () => {

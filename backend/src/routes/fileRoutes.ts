@@ -4,8 +4,10 @@ import path from 'path';
 import multer from 'multer';
 
 import mammoth from 'mammoth';
+import { config } from '../config';
 import { handleRouteError } from '../utils/routeErrors';
 import { logger } from '../utils/logger';
+import { PathSecurityError, resolveSecureChildPath, resolveSecurePath } from '../utils/pathSecurity';
 
 const router = Router();
 // Allow dynamic project root, but default to a dedicated 'projects' or empty directory
@@ -148,7 +150,7 @@ router.get('/list', async (req, res) => {
     let projectBase = '';
     if (req.query.project) {
       const projectName = req.query.project as string;
-      targetDir = path.join(root, projectName);
+      targetDir = await resolveSecureChildPath(root, projectName, permittedRoots);
       projectBase = projectName;
       await fs.mkdir(targetDir, { recursive: true });
     }
@@ -157,6 +159,9 @@ router.get('/list', async (req, res) => {
     const tree = await getFileTree(targetDir, projectBase);
     res.json(tree);
   } catch (error) {
+    if (error instanceof PathSecurityError) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
     res.status(500).json({ error: 'Failed to list files' });
   }
 });
@@ -176,40 +181,7 @@ router.get('/list', async (req, res) => {
  * @throws {Error} If the path is outside permitted roots or doesn't exist
  */
 async function getSecurePath(userPath: string, root: string): Promise<string> {
-  // Resolve to absolute path
-  const resolvedPath = path.resolve(root, userPath);
-  
-  // Security: Use trailing separator to prevent prefix attacks (e.g., /home/user vs /home/user-docs)
-  const normalizedRoot = path.resolve(root);
-  const rootWithSeparator = normalizedRoot.endsWith(path.sep) 
-    ? normalizedRoot 
-    : normalizedRoot + path.sep;
-  
-  // Check if path starts with the permitted root (with trailing separator)
-  // Also check exact match for the root itself
-  if (!resolvedPath.startsWith(rootWithSeparator) && resolvedPath !== normalizedRoot) {
-    throw new Error('Access denied: Path traversal detected.');
-  }
-  
-  // Resolve symlinks to prevent symlink attacks
-  const realPath = await fs.realpath(resolvedPath).catch(() => {
-    // File doesn't exist yet (e.g., for write operations)
-    // Return the resolved path as-is, existence will be checked later
-    return resolvedPath;
-  });
-  
-  // Validate the real path is still within permitted roots
-  for (const permittedRoot of permittedRoots) {
-    const permittedWithSeparator = permittedRoot.endsWith(path.sep) 
-      ? permittedRoot 
-      : permittedRoot + path.sep;
-    
-    if (realPath.startsWith(permittedWithSeparator) || realPath === permittedRoot) {
-      return realPath;
-    }
-  }
-  
-  throw new Error('Access denied: Path outside permitted directories.');
+  return resolveSecurePath(userPath, root, permittedRoots);
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -233,7 +205,7 @@ router.get('/raw', async (req, res) => {
     res.send(data);
   } catch (error: unknown) {
     const err = error as { message?: string; code?: string };
-    if (err.message?.includes('Access denied')) {
+    if (error instanceof PathSecurityError || err.message?.includes('Access denied')) {
       return res.status(403).json({ error: 'Access denied' });
     }
     if (err.code === 'ENOENT') {
@@ -254,7 +226,7 @@ router.get('/read', async (req, res) => {
     res.json({ content });
   } catch (error: unknown) {
     const err = error as { message?: string; code?: string };
-    if (err.message?.includes('Access denied')) {
+    if (error instanceof PathSecurityError || err.message?.includes('Access denied')) {
       return res.status(403).json({ error: 'Access denied' });
     }
     if (err.code === 'ENOENT') {
@@ -281,7 +253,7 @@ router.post('/write', async (req, res) => {
   } catch (error: unknown) {
     logger.error(`[file/write] Error: ${error instanceof Error ? error.message : String(error)}`);
     const err = error as { message?: string };
-    if (err.message?.includes('Access denied')) {
+    if (error instanceof PathSecurityError || err.message?.includes('Access denied')) {
       return res.status(403).json({ error: 'Access denied' });
     }
     handleRouteError({ res, error, context: 'file-write' });
@@ -291,11 +263,30 @@ router.post('/write', async (req, res) => {
 router.post('/shell', async (req, res) => {
   const { command } = req.body;
   if (!command) return res.status(400).json({ error: 'Command required' });
+  if (!config.SOLVENT_ENABLE_HTTP_SHELL) {
+    return res.status(403).json({ error: 'HTTP shell execution is disabled' });
+  }
   try {
     const { toolService } = await import('../services/toolService');
+    const commandText = String(command);
+    const commandPrefix = commandText.trim().split(/\s+/)[0] || '';
+    logger.warn('[file/shell] Accepted HTTP shell command', {
+      requestId: req.id,
+      commandPrefix,
+      cwd: process.cwd(),
+    });
     const result = await toolService.executeTool('run_shell', { command });
+    logger.warn('[file/shell] HTTP shell command completed', {
+      requestId: req.id,
+      commandPrefix,
+      status: 'success',
+    });
     res.json(result);
   } catch (error) {
+    logger.warn('[file/shell] HTTP shell command failed', {
+      requestId: req.id,
+      status: 'failed',
+    });
     handleRouteError({ res, error, context: 'file-shell' });
   }
 });
@@ -304,16 +295,14 @@ router.get('/index', async (req, res) => {
   try {
     const { indexProject } = await import('../services/projectIndexer');
     const project = req.query.project as string | undefined;
-    const targetDir = project ? path.resolve(rootDir, project) : path.resolve(rootDir);
-
-    const isPermitted = permittedRoots.some((r) => targetDir.startsWith(r));
-    if (!isPermitted) {
-      return res.status(403).json({ error: 'Path not permitted' });
-    }
+    const targetDir = await resolveSecureChildPath(rootDir, project, permittedRoots);
 
     const map = await indexProject(targetDir);
     return res.json({ map });
   } catch (err: unknown) {
+    if (err instanceof PathSecurityError) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
     return handleRouteError({ res, error: err, context: 'file-index' });
   }
 });

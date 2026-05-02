@@ -153,3 +153,14 @@ describe('Overseer Endpoints', () => {
     });
   });
 });
+
+describe('Codebase path security', () => {
+  it('rejects codebase watch roots outside the project', async () => {
+    const response = await request(app)
+      .post('/api/v1/codebase/watch')
+      .send({ enabled: true, rootPath: '../outside-project' });
+
+    expect(response.status).toBe(403);
+    expect(response.body.error).toBe('Access denied');
+  });
+});

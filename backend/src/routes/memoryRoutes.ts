@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import path from 'path';
+import { z } from 'zod';
 import { vectorService } from '../services/vectorService';
 import { logger } from '../utils/logger';
 
@@ -11,15 +12,30 @@ const DEFAULT_LIMIT = 20;
 const MAX_CONTENT_LENGTH = 100 * 1024; // 100KB
 const MAX_SEARCH_LENGTH = 200;
 
-function parseLimit(value: string | undefined, defaultVal: number, max: number): number {
-  const parsed = parseInt(value || '', 10);
-  if (isNaN(parsed) || parsed < 1) return defaultVal;
-  return Math.min(parsed, max);
-}
+// Coercing schemas so query strings parse cleanly into numbers; .catch keeps
+// existing behavior of falling back to a default when malformed input arrives.
+const entriesQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(MAX_LIMIT).catch(DEFAULT_LIMIT).default(DEFAULT_LIMIT),
+  offset: z.coerce.number().int().min(0).catch(0).default(0),
+  tier: z.string().min(1).max(64).optional(),
+  type: z.string().min(1).max(64).optional(),
+  search: z.string().max(MAX_SEARCH_LENGTH).optional(),
+});
 
-function parseOffset(value: string | undefined): number {
-  const parsed = parseInt(value || '', 10);
-  return isNaN(parsed) || parsed < 0 ? 0 : parsed;
+const memorySearchSchema = z.object({
+  query: z.string().min(1).max(MAX_SEARCH_LENGTH),
+  limit: z.number().int().min(1).max(MAX_LIMIT).default(10),
+}).strict();
+
+const patchEntrySchema = z.object({
+  content: z.string().trim().min(1).max(MAX_CONTENT_LENGTH),
+}).strict();
+
+function badRequest(res: Response, error: z.ZodError) {
+  return res.status(400).json({
+    error: 'Invalid request',
+    details: error.errors.map(issue => ({ path: issue.path, message: issue.message })),
+  });
 }
 
 // GET /api/v1/memory/stats
@@ -42,15 +58,10 @@ router.get('/memory/stats', (_req: Request, res: Response) => {
 
 // GET /api/v1/memory/entries?limit=20&offset=0&tier=&search=
 router.get('/memory/entries', (req: Request, res: Response) => {
-  const limit = parseLimit(req.query.limit as string, DEFAULT_LIMIT, MAX_LIMIT);
-  const offset = parseOffset(req.query.offset as string);
-  const tier = req.query.tier as string | undefined;
-  const type = req.query.type as string | undefined;
-  const rawSearch = req.query.search as string | undefined;
-  if (rawSearch && (typeof rawSearch !== 'string' || rawSearch.length > MAX_SEARCH_LENGTH)) {
-    return res.status(400).json({ error: `search must be a string with max ${MAX_SEARCH_LENGTH} characters` });
-  }
-  const search = rawSearch?.toLowerCase();
+  const parsed = entriesQuerySchema.safeParse(req.query);
+  if (!parsed.success) return badRequest(res, parsed.error);
+  const { limit, offset, tier, type } = parsed.data;
+  const search = parsed.data.search?.toLowerCase();
 
   let entries = vectorService.getRecentEntries(MAX_MEMORY_LOAD).filter(e => !e.metadata?.deprecated);
 
@@ -80,8 +91,9 @@ router.get('/memory/entries', (req: Request, res: Response) => {
 
 // POST /api/v1/memory/search — semantic search via embeddings
 router.post('/memory/search', async (req: Request, res: Response) => {
-  const { query, limit = 10 } = req.body as { query?: string; limit?: number };
-  if (!query) return res.status(400).json({ error: 'query is required' });
+  const parsed = memorySearchSchema.safeParse(req.body);
+  if (!parsed.success) return badRequest(res, parsed.error);
+  const { query, limit } = parsed.data;
 
   const results = await vectorService.search(query, limit);
   const formattedResults = results.map((r: { id: string; score: number; metadata?: Record<string, unknown> }) => ({
@@ -104,12 +116,9 @@ router.post('/memory/search', async (req: Request, res: Response) => {
 // PATCH /api/v1/memory/entries/:id — update entry content
 router.patch('/memory/entries/:id', async (req: Request, res: Response) => {
   const { id } = req.params;
-  const { content } = req.body as { content?: string };
-  if (!content?.trim()) return res.status(400).json({ error: 'content is required' });
-  if (typeof content !== 'string' || content.length > MAX_CONTENT_LENGTH) {
-    return res.status(400).json({ error: `content must be a string with max ${MAX_CONTENT_LENGTH} characters` });
-  }
-  const ok = await vectorService.updateEntry(id!, { content: content!.trim(), lastUpdated: new Date().toISOString() });
+  const parsed = patchEntrySchema.safeParse(req.body);
+  if (!parsed.success) return badRequest(res, parsed.error);
+  const ok = await vectorService.updateEntry(id!, { content: parsed.data.content, lastUpdated: new Date().toISOString() });
   if (!ok) return res.status(404).json({ error: 'Entry not found' });
   res.json({ success: true });
 });

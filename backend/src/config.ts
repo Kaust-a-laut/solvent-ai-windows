@@ -2,8 +2,9 @@ import { z } from 'zod';
 import dotenv from 'dotenv';
 import path from 'path';
 
-// Load .env from project root
-dotenv.config({ path: path.resolve(__dirname, '../../.env'), override: true });
+// Load .env from project root. override:false so explicit process env (vitest
+// injection, deployment overrides) wins over committed defaults.
+dotenv.config({ path: path.resolve(__dirname, '../../.env'), override: false });
 
 const OLD_INSECURE_DEFAULT = 'solvent_dev_insecure_default';
 
@@ -29,6 +30,10 @@ const envSchema = z.object({
   ENABLE_OLLAMA: z.string().transform(v => v === 'true').default('true'),
   BACKEND_INTERNAL_SECRET: z.string().min(32, 'BACKEND_INTERNAL_SECRET must be at least 32 characters for security'),
   CORS_ORIGIN: z.string().default('http://localhost:5173'),
+  SOLVENT_ENABLE_HTTP_SHELL: z.string().transform(v => v === 'true').default(
+    process.env.NODE_ENV === 'development' ? 'true' : 'false'
+  ),
+  SOLVENT_SQLITE_PATH: z.string().optional(),
   AI_PROVIDER_TIMEOUT_MS: z.string()
     .transform(Number)
     .pipe(z.number().min(1000).max(300000))

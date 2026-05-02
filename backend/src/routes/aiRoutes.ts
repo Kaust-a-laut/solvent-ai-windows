@@ -11,6 +11,7 @@ import { orchestrationService } from '../services/orchestrationService';
 import { ConversationStorageService } from '../services/conversationStorageService';
 import { handleRouteError } from '../utils/routeErrors';
 import { logger } from '../utils/logger';
+import { PathSecurityError, resolveSecureChildPath } from '../utils/pathSecurity';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -373,12 +374,7 @@ router.patch('/debug/traces/:id/outcome', AIController.updateTraceOutcome);
 router.post('/codebase/index', async (req, res) => {
   try {
     const { rootPath = process.cwd() } = req.body;
-
-    // Prevent arbitrary filesystem traversal — rootPath must be within cwd
-    const resolved = path.resolve(rootPath);
-    if (!resolved.startsWith(process.cwd())) {
-      return res.status(400).json({ error: 'rootPath must be within the project directory' });
-    }
+    const resolved = await resolveSecureChildPath(process.cwd(), rootPath, [process.cwd()]);
 
     const { codebaseIndexer } = await import('../services/codebaseIndexer');
 
@@ -387,6 +383,9 @@ router.post('/codebase/index', async (req, res) => {
 
     res.json({ success: true, message: 'Codebase indexing complete' });
   } catch (error) {
+    if (error instanceof PathSecurityError) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
     handleRouteError({ res, error, context: 'codebase-index' });
   }
 });
@@ -405,15 +404,19 @@ router.post('/codebase/watch', async (req, res) => {
   try {
     const { rootPath = process.cwd(), enabled } = req.body;
     const { codebaseIndexer } = await import('../services/codebaseIndexer');
+    const resolved = await resolveSecureChildPath(process.cwd(), rootPath, [process.cwd()]);
     
     if (enabled) {
-      await codebaseIndexer.start({ rootPath });
+      await codebaseIndexer.start({ rootPath: resolved });
       res.json({ success: true, message: 'File watcher started' });
     } else {
       await codebaseIndexer.stop();
       res.json({ success: true, message: 'File watcher stopped' });
     }
   } catch (error) {
+    if (error instanceof PathSecurityError) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
     handleRouteError({ res, error, context: 'codebase-watch' });
   }
 });

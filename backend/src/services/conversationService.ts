@@ -1,4 +1,4 @@
-import { v4 as uuid } from 'uuid';
+import { randomUUID as uuid } from 'crypto';
 import { orchestrationService, MissionTemplate, MissionAgent } from './orchestrationService';
 import { providerSelector } from './providerSelector';
 import { pluginManager } from './pluginManager';

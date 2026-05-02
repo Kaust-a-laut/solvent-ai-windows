@@ -6,6 +6,7 @@ import {
 import { useAppStore } from '../../store/useAppStore';
 import { useShallow } from 'zustand/react/shallow';
 import { BASE_URL } from '../../lib/config';
+import { fetchWithRetry } from '../../lib/api-client';
 import { cn } from '../../lib/utils';
 import { staggerContainer, staggerItem } from './shared';
 import { API_KEY_CONFIGS } from './settingsDefaults';
@@ -27,12 +28,15 @@ export const ApiKeysTab = () => {
     if (!key) return;
     setValidationStatus(prev => ({ ...prev, [provider]: 'loading' }));
     try {
-      const res = await fetch(`${BASE_URL}/api/settings/providers/${provider}/validate-key`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: key }),
-      });
-      const data = await res.json();
+      const data = await fetchWithRetry<{ valid: boolean }>(
+        `${BASE_URL}/api/settings/providers/${provider}/validate-key`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apiKey: key }),
+          retries: 1,
+        }
+      );
       setValidationStatus(prev => ({ ...prev, [provider]: data.valid ? 'success' : 'error' }));
     } catch {
       setValidationStatus(prev => ({ ...prev, [provider]: 'error' }));

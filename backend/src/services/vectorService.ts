@@ -89,14 +89,14 @@ export class VectorService {
     }
     // Initialize Ollama as fallback for embeddings
     this.ollama = new OllamaService();
-    this.dbPath = path.resolve(__dirname, '../../../.solvent_memory.json');
-    this.embeddingCachePath = path.resolve(__dirname, '../../../.solvent_embedding_cache.json');
+    this.dbPath = process.env.SOLVENT_VECTOR_MEMORY_PATH || path.resolve(__dirname, '../../../.solvent_memory.json');
+    this.embeddingCachePath = process.env.SOLVENT_EMBEDDING_CACHE_PATH || path.resolve(__dirname, '../../../.solvent_embedding_cache.json');
     this.backupManager = new BackupManager(
       this.dbPath,
-      path.resolve(__dirname, '../../../.solvent_backups'),
+      process.env.SOLVENT_BACKUP_DIR || path.resolve(__dirname, '../../../.solvent_backups'),
       5
     );
-    this.hnswIndexPath = path.resolve(__dirname, '../../../.solvent_hnsw.bin');
+    this.hnswIndexPath = process.env.SOLVENT_HNSW_PATH || path.resolve(__dirname, '../../../.solvent_hnsw.bin');
     this.loadMemory();
     this.embeddingCacheLoaded = this.loadEmbeddingCache();
     this.initHNSWIndex();

@@ -45,7 +45,10 @@ describe('POST /api/v1/memory/search', () => {
       .send({ limit: 10 });
 
     expect(response.status).toBe(400);
-    expect(response.body).toHaveProperty('error', 'query is required');
+    expect(response.body).toHaveProperty('error', 'Invalid request');
+    expect(response.body.details).toEqual(
+      expect.arrayContaining([expect.objectContaining({ path: ['query'] })])
+    );
   });
 
   it('should handle empty results', async () => {

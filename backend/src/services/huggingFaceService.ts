@@ -40,7 +40,7 @@ export class HuggingFaceService {
       }
 
       // Handle JSON error hidden in 200 status
-      const contentType = response.headers['content-type'] || '';
+      const contentType = String(response.headers['content-type'] ?? '');
       if (contentType.includes('application/json')) {
         const json = JSON.parse(Buffer.from(response.data).toString());
         if (json.error) throw new Error(`HF API Error: ${json.error}`);

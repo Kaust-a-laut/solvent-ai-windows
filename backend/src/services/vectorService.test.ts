@@ -33,7 +33,7 @@ beforeAll(async () => {
   (vectorService as any).rebuildIndices();
 });
 
-const EMBEDDING_CACHE_PATH = path.resolve(__dirname, '../../../.solvent_embedding_cache.json');
+const EMBEDDING_CACHE_PATH = (vectorService as any).embeddingCachePath as string;
 
 describe('VectorService Enhancements', () => {
   beforeEach(() => {

@@ -206,6 +206,27 @@ Output STRICT JSON only:
       };
     }
 
+    // Pattern: Many candidates are being suppressed; retrieve fewer items by default.
+    const avgSuppressionRatio = recent.reduce((sum, trace) => {
+      const active = trace.active.length;
+      const suppressed = trace.suppressed.length;
+      const total = active + suppressed;
+      return sum + (total > 0 ? suppressed / total : 0);
+    }, 0) / Math.max(recent.length, 1);
+    if (avgSuppressionRatio > 0.60) {
+      return {
+        id: uuidv4(),
+        iteration: 0,
+        runId: 'fallback',
+        ts: new Date().toISOString(),
+        deltas: {
+          RETRIEVAL_COUNT_DEFAULT: Math.max(3, (snapshot.RETRIEVAL_COUNT_DEFAULT || 8) - 2),
+        },
+        rationale: `Fallback: avg suppression ratio ${(avgSuppressionRatio * 100).toFixed(0)}%`,
+        targetsFailureModes: ['high_suppression'],
+      };
+    }
+
     return null;
   }
 }

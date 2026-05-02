@@ -22,8 +22,13 @@ frontend/dist/
 .solvent_hnsw.bin
 .solvent_hnsw.bin.meta.json
 .solvent_retrieval_traces.jsonl
+.solvent_core_memory*.json
+.solvent_sessions/
 .omg/
 projects/
+
+# Test artifacts
+.vitest-tmp/
 
 # Logs
 *.log

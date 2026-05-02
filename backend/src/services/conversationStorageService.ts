@@ -33,18 +33,31 @@ export interface StoredMessage {
   timestamp: number;
 }
 
-const SESSIONS_DIR = path.resolve(__dirname, '../../../.solvent_sessions');
-const INDEX_FILE = path.join(SESSIONS_DIR, 'index.json');
+const DEFAULT_SESSIONS_DIR = path.resolve(__dirname, '../../../.solvent_sessions');
+
+export interface ConversationStorageOptions {
+  baseDir?: string;
+}
 
 export class ConversationStorageService {
-  constructor() {
-    this.ensureStorageDirectory();
+  private readonly sessionsDir: string;
+  private readonly indexFile: string;
+  private readonly directoryReady: Promise<void>;
+
+  constructor(options: ConversationStorageOptions = {}) {
+    this.sessionsDir = options.baseDir
+      ? path.resolve(options.baseDir)
+      : (process.env.SOLVENT_SESSIONS_DIR
+        ? path.resolve(process.env.SOLVENT_SESSIONS_DIR)
+        : DEFAULT_SESSIONS_DIR);
+    this.indexFile = path.join(this.sessionsDir, 'index.json');
+    this.directoryReady = this.ensureStorageDirectory();
   }
 
-  private async ensureStorageDirectory() {
+  private async ensureStorageDirectory(): Promise<void> {
     try {
-      await fs.mkdir(SESSIONS_DIR, { recursive: true });
-      logger.info(`[ConversationStorage] Session directory ready: ${SESSIONS_DIR}`);
+      await fs.mkdir(this.sessionsDir, { recursive: true });
+      logger.info(`[ConversationStorage] Session directory ready: ${this.sessionsDir}`);
     } catch (error) {
       logger.error('[ConversationStorage] Failed to create session directory', error);
     }
@@ -54,13 +67,14 @@ export class ConversationStorageService {
     if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
       throw new Error('Invalid session ID');
     }
-    return path.join(SESSIONS_DIR, `${sessionId}.json`);
+    return path.join(this.sessionsDir, `${sessionId}.json`);
   }
 
   /**
    * Save a session to disk
    */
   async saveSession(session: StoredSession): Promise<void> {
+    await this.directoryReady;
     try {
       const filePath = this.getSessionFilePath(session.id);
       
@@ -110,7 +124,7 @@ export class ConversationStorageService {
    */
   async listSessions(mode?: string): Promise<StoredSession[]> {
     try {
-      const indexData = await fs.readFile(INDEX_FILE, 'utf-8');
+      const indexData = await fs.readFile(this.indexFile, 'utf-8');
       const index: StoredSession[] = JSON.parse(indexData);
       
       if (mode) {
@@ -223,7 +237,7 @@ export class ConversationStorageService {
     try {
       let index: StoredSession[] = [];
       try {
-        const data = await fs.readFile(INDEX_FILE, 'utf-8');
+        const data = await fs.readFile(this.indexFile, 'utf-8');
         index = JSON.parse(data);
       } catch {
         // Index doesn't exist yet
@@ -236,7 +250,7 @@ export class ConversationStorageService {
         index.push(session);
       }
 
-      await fs.writeFile(INDEX_FILE, JSON.stringify(index, null, 2), 'utf-8');
+      await fs.writeFile(this.indexFile, JSON.stringify(index, null, 2), 'utf-8');
     } catch (error) {
       logger.error('[ConversationStorage] Index update failed', error);
     }
@@ -247,10 +261,10 @@ export class ConversationStorageService {
    */
   private async removeFromIndex(sessionId: string): Promise<void> {
     try {
-      const data = await fs.readFile(INDEX_FILE, 'utf-8');
+      const data = await fs.readFile(this.indexFile, 'utf-8');
       const index: StoredSession[] = JSON.parse(data);
       const filtered = index.filter(s => s.id !== sessionId);
-      await fs.writeFile(INDEX_FILE, JSON.stringify(filtered, null, 2), 'utf-8');
+      await fs.writeFile(this.indexFile, JSON.stringify(filtered, null, 2), 'utf-8');
     } catch (error: unknown) {
       const err = error as NodeJS.ErrnoException;
       if (err.code !== 'ENOENT') {

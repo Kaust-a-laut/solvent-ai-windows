@@ -1,5 +1,5 @@
 import { readFileSync, existsSync } from 'fs';
-import { writeFile } from 'fs/promises';
+import { mkdir, writeFile } from 'fs/promises';
 import path from 'path';
 import { logger } from '../utils/logger';
 
@@ -80,7 +80,11 @@ export class CoreMemory {
 
   save(): void {
     const data = Array.from(this.entries.values());
-    this.pendingSave = writeFile(this.filePath, JSON.stringify(data, null, 2))
+    this.pendingSave = this.pendingSave.catch(() => undefined)
+      .then(async () => {
+        await mkdir(path.dirname(this.filePath), { recursive: true });
+        await writeFile(this.filePath, JSON.stringify(data, null, 2));
+      })
       .catch((err: unknown) => {
         logger.error('[CoreMemory] Failed to save:', err instanceof Error ? err.message : String(err));
       });

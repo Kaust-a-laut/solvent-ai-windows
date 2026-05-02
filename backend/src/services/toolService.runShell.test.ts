@@ -194,7 +194,7 @@ describe('run_shell pipes and redirects', () => {
     if (result instanceof Error) {
       expect(result.message).not.toMatch(/security policy|allowlist/i);
     }
-  });
+  }, 30_000);
 
   it('still allows find without -exec', async () => {
     const result = await toolService

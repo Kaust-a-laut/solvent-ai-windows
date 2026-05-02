@@ -8,6 +8,7 @@ import { logger } from '../utils/logger';
 import { createSSEWriter } from '../utils/sseWriter';
 import { requestContextStore } from '../utils/requestContext';
 import { PROJECT_ROOT } from '../utils/fileSystem';
+import { requestBodySummary } from '../utils/redaction';
 import { z } from 'zod';
 import { createReadStream } from 'fs';
 import { access } from 'fs/promises';
@@ -122,8 +123,11 @@ export class AIController {
     try {
       const parseResult = chatRequestSchema.safeParse(req.body);
       if (!parseResult.success) {
-        logger.error(`[AIController] Invalid request body: ${JSON.stringify(req.body)}`);
-        logger.error(`[AIController] Validation errors: ${JSON.stringify(parseResult.error.errors)}`);
+        logger.error('[AIController] Invalid request body', {
+          route: req.path,
+          requestId: req.id,
+          ...requestBodySummary(req.body, parseResult.error.issues),
+        });
         return res.status(400).json({
           error: 'Invalid request body',
           details: parseResult.error.errors

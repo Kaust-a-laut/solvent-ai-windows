@@ -1,4 +1,3 @@
-import axios from 'axios';
 import * as cheerio from 'cheerio';
 import TurndownService from 'turndown';
 import { PageContent } from '../types/ai';
@@ -6,6 +5,7 @@ import { AIProviderFactory } from './aiProviderFactory';
 import { config } from '../config';
 import { MODELS } from '../constants/models';
 import { logger } from '../utils/logger';
+import { safeAxiosGet, UrlSafetyError } from '../utils/urlSafety';
 
 const turndown = new TurndownService({
   headingStyle: 'atx',
@@ -25,28 +25,6 @@ turndown.addRule('images', {
 const MAX_CONTENT_LENGTH = 50_000;
 const FETCH_TIMEOUT_MS = 15_000;
 const MAX_RESPONSE_SIZE = 10 * 1024 * 1024; // 10MB
-
-const PRIVATE_IP_PATTERNS = [
-  /^127\./,
-  /^10\./,
-  /^172\.(1[6-9]|2\d|3[01])\./,
-  /^192\.168\./,
-  /^0\./,
-  /^169\.254\./,
-  /^::1$/,
-  /^fc00:/,
-  /^fe80:/,
-  /^localhost$/i,
-];
-
-function isPrivateUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url);
-    return PRIVATE_IP_PATTERNS.some(p => p.test(parsed.hostname));
-  } catch {
-    return true;
-  }
-}
 
 const STRIP_SELECTORS = [
   'script', 'style', 'noscript', 'iframe', 'nav', 'footer',
@@ -101,7 +79,7 @@ const PAYWALL_TEXT_PATTERNS = [
 
 class BrowseService {
   private async fetchHtml(targetUrl: string) {
-    return axios.get(targetUrl, {
+    return safeAxiosGet(targetUrl, {
       timeout: FETCH_TIMEOUT_MS,
       maxContentLength: MAX_RESPONSE_SIZE,
       headers: {
@@ -110,7 +88,7 @@ class BrowseService {
         'Accept-Language': 'en-US,en;q=0.9',
       },
       responseType: 'text',
-      maxRedirects: 5,
+      maxHops: 5,
     });
   }
 
@@ -164,9 +142,6 @@ class BrowseService {
     if (!/^https?:\/\//i.test(url)) {
       throw new Error('Only http and https URLs are supported');
     }
-    if (isPrivateUrl(url)) {
-      throw new Error('Cannot browse private/local addresses');
-    }
 
     let response;
     try {
@@ -176,10 +151,13 @@ class BrowseService {
       if (err.restricted) {
         return err.restrictedResult as PageContent;
       }
+      if (error instanceof UrlSafetyError) {
+        throw new Error('Cannot browse private/local addresses');
+      }
       throw error;
     }
 
-    const contentType = response.headers['content-type'] || '';
+    const contentType = String(response.headers['content-type'] ?? '');
     if (!contentType.includes('text/html') && !contentType.includes('application/xhtml')) {
       throw new Error(`Unsupported content type: ${contentType}`);
     }

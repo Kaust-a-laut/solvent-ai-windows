@@ -62,7 +62,7 @@ export class FalService {
     // Step 2: Fetch the image and convert to base64
     const imgRes = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 30_000 });
     const base64 = Buffer.from(imgRes.data, 'binary').toString('base64');
-    const contentType: string = imgRes.headers['content-type'] ?? 'image/jpeg';
+    const contentType = String(imgRes.headers['content-type'] ?? 'image/jpeg');
 
     logger.info('[FAL] Image generation complete');
     return { base64, mimeType: contentType };

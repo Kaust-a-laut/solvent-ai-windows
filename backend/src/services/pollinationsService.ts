@@ -31,7 +31,7 @@ export class PollinationsService {
       const base64 = Buffer.from(response.data, 'binary').toString('base64');
       
       // Determine mime type from headers or default to image/jpeg (Pollinations usually returns JPEG)
-      const contentType = response.headers['content-type'] || 'image/jpeg';
+      const contentType = String(response.headers['content-type'] ?? 'image/jpeg');
 
       return {
         base64,
