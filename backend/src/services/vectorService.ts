@@ -145,7 +145,10 @@ export class VectorService {
 
   private async loadMemory() {
     try {
-      this.memory = sqliteService.getAllMemories();
+      // Use the async, chunked loader so a large memory store doesn't block
+      // the event loop on startup. Rows are JSON-parsed in batches of 500
+      // with setImmediate yields between batches.
+      this.memory = (await sqliteService.getAllMemoriesAsync()) as VectorEntry[];
       this.rebuildIndices();
       logger.info(`Loaded ${this.memory.length} vectors from SQLite memory and rebuilt indices.`);
       

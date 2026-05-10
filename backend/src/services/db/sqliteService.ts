@@ -41,6 +41,10 @@ export class SqliteService {
         );
       `);
       this.migrateMemoryEntries();
+      // Indices on the columns vectorService filters/sorts by. Cheap to create
+      // and IF NOT EXISTS makes the call idempotent across migrations.
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_memory_entries_type ON memory_entries(type)`);
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_memory_entries_created_at ON memory_entries(created_at)`);
       logger.info('[SqliteService] Schema initialized successfully.');
     } catch (error) {
       logger.error('[SqliteService] Failed to initialize schema', error);
@@ -136,6 +140,34 @@ export class SqliteService {
       vector: JSON.parse(r.vector),
       metadata: JSON.parse(r.metadata)
     }));
+  }
+
+  /**
+   * Async variant that yields to the event loop every {@link chunkSize} rows
+   * during JSON parsing. With ~10k entries the synchronous variant blocks for
+   * hundreds of ms during startup; this version keeps the loop responsive at
+   * the cost of a few extra microtask hops.
+   *
+   * Uses `iterate()` so we never materialize the full row set into memory at
+   * once — relevant when memory_entries grows past ~50k.
+   */
+  public async getAllMemoriesAsync(chunkSize: number = 500): Promise<Array<{ id: string; vector: number[]; metadata: unknown }>> {
+    const stmt = this.db.prepare(`SELECT id, vector, metadata FROM memory_entries`);
+    const out: Array<{ id: string; vector: number[]; metadata: unknown }> = [];
+    let i = 0;
+    for (const row of stmt.iterate() as IterableIterator<{ id: string; vector: string; metadata: string }>) {
+      out.push({
+        id: row.id,
+        vector: JSON.parse(row.vector),
+        metadata: JSON.parse(row.metadata),
+      });
+      if (++i % chunkSize === 0) {
+        // Yield to other I/O / timers — event loop stays responsive even on
+        // large stores.
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+    }
+    return out;
   }
 }
 
