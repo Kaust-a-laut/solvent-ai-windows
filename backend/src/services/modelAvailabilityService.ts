@@ -56,9 +56,14 @@ const PROVIDER_ENDPOINTS: Record<string, { url: string; keyEnv: string; parseMod
   },
 };
 
+// 1h TTL on the per-provider model list. Without this, a key rotated
+// mid-process keeps the stale model set forever; with this, the next scan
+// after the TTL refetches.
+const PROVIDER_CACHE_TTL_MS = 60 * 60 * 1000;
+
 class ModelAvailabilityService {
   private lastScan: AvailabilityScanResult | null = null;
-  private providerModelCache: Map<string, Set<string>> = new Map();
+  private providerModelCache: Map<string, { models: Set<string>; fetchedAt: number }> = new Map();
 
   /**
    * Extract all unique model+provider pairs referenced by waterfall presets.
@@ -126,8 +131,9 @@ class ModelAvailabilityService {
     }
 
     for (const [, entry] of presetModels) {
-      const liveModels = this.providerModelCache.get(entry.provider);
-      if (!liveModels) continue;
+      const cacheEntry = this.providerModelCache.get(entry.provider);
+      if (!cacheEntry) continue;
+      const liveModels = cacheEntry.models;
 
       const prefix = this.extractModelPrefix(entry.model);
       if (prefix.length < 3) continue; // too short to be meaningful
@@ -200,17 +206,25 @@ class ModelAvailabilityService {
   async scan(): Promise<AvailabilityScanResult> {
     const presetModels = this.getPresetModels();
     const scanErrors: string[] = [];
+    const now = Date.now();
 
-    // Fetch model lists from all providers in parallel
+    // Fetch model lists from all providers in parallel — but skip providers
+    // whose cached list is still inside the TTL window. Saves redundant
+    // round-trips when scan() is called frequently (e.g. on every settings
+    // change).
     const providers = [...new Set([...presetModels.values()].map(m => m.provider))];
     await Promise.all(
       providers.map(async (provider) => {
+        const cached = this.providerModelCache.get(provider);
+        if (cached && now - cached.fetchedAt < PROVIDER_CACHE_TTL_MS) {
+          return { provider, models: [...cached.models] };
+        }
         const models = await this.fetchProviderModels(provider);
         if (models === null) {
           scanErrors.push(provider);
           return { provider, models: null };
         }
-        this.providerModelCache.set(provider, new Set(models));
+        this.providerModelCache.set(provider, { models: new Set(models), fetchedAt: Date.now() });
         return { provider, models };
       })
     );
@@ -218,10 +232,10 @@ class ModelAvailabilityService {
     // Cross-reference preset models against live model lists
     const unavailable: ModelStatus[] = [];
     for (const [, entry] of presetModels) {
-      const liveModels = this.providerModelCache.get(entry.provider);
-      if (!liveModels) continue;  // provider scan failed — don't flag as unavailable
+      const cacheEntry = this.providerModelCache.get(entry.provider);
+      if (!cacheEntry) continue;  // provider scan failed — don't flag as unavailable
 
-      if (!liveModels.has(entry.model)) {
+      if (!cacheEntry.models.has(entry.model)) {
         unavailable.push({
           model: entry.model,
           provider: entry.provider,
@@ -270,6 +284,19 @@ class ModelAvailabilityService {
   isUnavailable(provider: string, model: string): boolean {
     if (!this.lastScan) return false;
     return this.lastScan.unavailable.some(m => m.provider === provider && m.model === model);
+  }
+
+  /**
+   * Drop cached model lists. Call when an API key is rotated so the next scan
+   * fetches a fresh model list instead of waiting for the TTL to expire.
+   * Pass a provider to invalidate just that one; omit to clear everything.
+   */
+  invalidateCache(provider?: string): void {
+    if (provider) {
+      this.providerModelCache.delete(provider);
+    } else {
+      this.providerModelCache.clear();
+    }
   }
 }
 
