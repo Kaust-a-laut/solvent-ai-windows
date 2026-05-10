@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isProblematicToolResult, prependTruthfulnessNote, parseToolCalls, buildRecoveryHint } from './baseOpenAIService';
+import { isProblematicToolResult, prependTruthfulnessNote, parseToolCalls, buildRecoveryHint, parseXmlToolCalls, stripRanges } from './baseOpenAIService';
 
 describe('isProblematicToolResult', () => {
   it('flags strings starting with "Error"', () => {
@@ -85,6 +85,53 @@ describe('buildRecoveryHint', () => {
 
   it('returns the message unchanged for unrelated tools', () => {
     expect(buildRecoveryHint('grep_files', 'something else', 1, 3)).toBe('something else');
+  });
+});
+
+describe('parseXmlToolCalls + stripRanges', () => {
+  const tools = ['read_file', 'write_file'];
+
+  it('parses a single XML call and reports its byte range', () => {
+    const content = 'I will read the config now.\n<read_file><path>src/config.ts</path></read_file>';
+    const { calls, ranges } = parseXmlToolCalls(content, tools);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.name).toBe('read_file');
+    expect(calls[0]?.args).toEqual({ path: 'src/config.ts' });
+    expect(ranges).toHaveLength(1);
+    expect(content.slice(ranges[0]!.start, ranges[0]!.end)).toMatch(/^<read_file>.*<\/read_file>$/);
+  });
+
+  it('preserves narrative when stripping XML ranges (H1 regression)', () => {
+    const content = 'Sure — checking now.\n<read_file><path>a.ts</path></read_file>\nThen I will summarize.';
+    const { ranges } = parseXmlToolCalls(content, tools);
+    const cleaned = stripRanges(content, ranges);
+    expect(cleaned).toContain('Sure — checking now.');
+    expect(cleaned).toContain('Then I will summarize.');
+    expect(cleaned).not.toContain('<read_file>');
+  });
+
+  it('strips multiple, possibly out-of-order ranges', () => {
+    // Two tools — outer loop visits read_file first, write_file second, so ranges are name-grouped
+    // not document-ordered. stripRanges must still produce coherent output.
+    const content = 'A <write_file><path>b</path><content>x</content></write_file> B <read_file><path>a</path></read_file> C';
+    const { ranges } = parseXmlToolCalls(content, tools);
+    const cleaned = stripRanges(content, ranges);
+    expect(cleaned).toBe('A  B  C'.trim());
+  });
+
+  it('returns content unchanged when no calls match', () => {
+    const content = 'just narrative, no tools';
+    const { calls, ranges } = parseXmlToolCalls(content, tools);
+    expect(calls).toEqual([]);
+    expect(ranges).toEqual([]);
+    expect(stripRanges(content, ranges)).toBe(content);
+  });
+
+  it('skips malformed (unclosed) tags', () => {
+    const content = '<read_file><path>truncated';
+    const { calls, ranges } = parseXmlToolCalls(content, tools);
+    expect(calls).toEqual([]);
+    expect(ranges).toEqual([]);
   });
 });
 

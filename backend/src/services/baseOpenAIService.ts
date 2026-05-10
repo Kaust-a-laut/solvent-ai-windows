@@ -17,25 +17,35 @@ import { delegationService, parseDelegationTags } from './delegationService';
 /**
  * Simple XML tool call parser using string operations to avoid regex issues.
  * Parses formats like: <tool_name><param>value</param></tool_name>
+ *
+ * Returns parsed calls plus the byte ranges they occupied in `content`, so
+ * callers can strip the XML and preserve any surrounding narrative text.
  */
-function parseXmlToolCalls(content: string, validNames: string[]): Array<{id: string; name: string; args: Record<string, unknown>}> {
-  const calls: Array<{id: string; name: string; args: Record<string, unknown>}> = [];
-  
+export function parseXmlToolCalls(
+  content: string,
+  validNames: string[]
+): {
+  calls: Array<{ id: string; name: string; args: Record<string, unknown> }>;
+  ranges: Array<{ start: number; end: number }>;
+} {
+  const calls: Array<{ id: string; name: string; args: Record<string, unknown> }> = [];
+  const ranges: Array<{ start: number; end: number }> = [];
+
   for (const name of validNames) {
     const openTag = '<' + name + '>';
     const closeTag = '</' + name + '>';
     let searchPos = 0;
-    
+
     while (true) {
       const openIdx = content.indexOf(openTag, searchPos);
       if (openIdx === -1) break;
-      
+
       const closeIdx = content.indexOf(closeTag, openIdx);
       if (closeIdx === -1) break;
-      
+
       const blockEnd = closeIdx + closeTag.length;
       const inner = content.substring(openIdx + openTag.length, closeIdx);
-      
+
       // Parse parameters from inner content
       const args: Record<string, unknown> = {};
       const paramRegex = /<(\w+)>([\s\S]*?)<\/\1>/g;
@@ -45,13 +55,28 @@ function parseXmlToolCalls(content: string, validNames: string[]): Array<{id: st
           args[match[1]] = match[2].trim();
         }
       }
-      
+
       calls.push({ id: randomUUID(), name, args });
+      ranges.push({ start: openIdx, end: blockEnd });
       searchPos = blockEnd;
     }
   }
-  
-  return calls;
+
+  return { calls, ranges };
+}
+
+/** Remove a set of byte ranges from `content` and return what's left (trimmed). */
+export function stripRanges(content: string, ranges: Array<{ start: number; end: number }>): string {
+  if (ranges.length === 0) return content;
+  const sorted = [...ranges].sort((a, b) => a.start - b.start);
+  let out = '';
+  let cursor = 0;
+  for (const r of sorted) {
+    if (r.start > cursor) out += content.slice(cursor, r.start);
+    if (r.end > cursor) cursor = r.end;
+  }
+  if (cursor < content.length) out += content.slice(cursor);
+  return out.trim();
 }
 
 /**
@@ -868,12 +893,15 @@ export abstract class BaseOpenAIService implements AIProvider {
           // Fallback: check if the model emitted tool calls as XML in content
           const validNames = (this.getToolDefinitions() as Array<{ function: { name: string } }>)
             .map(t => t.function.name);
-          const xmlCalls = parseXmlToolCalls(typeof content === 'string' ? content : JSON.stringify(content), validNames);
+          const xmlSource = typeof content === 'string' ? content : JSON.stringify(content);
+          const { calls: xmlCalls, ranges: xmlRanges } = parseXmlToolCalls(xmlSource, validNames);
 
           if (xmlCalls.length > 0) {
             logger.info('[' + this.name + '] XML tool calls detected: ' + xmlCalls.map(c => c.name).join(', '));
-            
-            const cleanContent = '';
+
+            // Preserve any narrative the model wrote alongside the XML tool calls
+            // by stripping just the parsed blocks rather than blanking content.
+            const cleanContent = stripRanges(xmlSource, xmlRanges);
             currentMessages.push({
               role: 'assistant',
               content: cleanContent,
