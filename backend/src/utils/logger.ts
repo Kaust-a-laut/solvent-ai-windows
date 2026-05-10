@@ -5,6 +5,14 @@ enum LogLevel {
   DEBUG = 'DEBUG'
 }
 
+/**
+ * `context` may be either a value or a thunk that produces one. Hot paths
+ * (per-chunk stream loops, inner tool loops) can pass a thunk so the object
+ * is only constructed when the level actually emits — currently relevant for
+ * `debug()`, which is suppressed in production.
+ */
+export type LogContext = unknown | (() => unknown);
+
 class LoggerService {
   private scrub(data: unknown): unknown {
     if (typeof data === 'string') {
@@ -25,27 +33,39 @@ class LoggerService {
     return data;
   }
 
-  private formatMessage(level: LogLevel, message: string, context?: unknown) {
+  private resolveContext(context?: LogContext): unknown {
+    if (typeof context === 'function') {
+      try {
+        return (context as () => unknown)();
+      } catch {
+        return '<context thunk threw>';
+      }
+    }
+    return context;
+  }
+
+  private formatMessage(level: LogLevel, message: string, context?: LogContext) {
     const timestamp = new Date().toISOString();
     const scrubbedMessage = this.scrub(message);
-    const scrubbedContext = context ? this.scrub(context) : null;
+    const resolved = this.resolveContext(context);
+    const scrubbedContext = resolved !== undefined && resolved !== null ? this.scrub(resolved) : null;
     const ctxString = scrubbedContext ? ` | Context: ${JSON.stringify(scrubbedContext)}` : '';
     return `[${timestamp}] [${level}] ${scrubbedMessage}${ctxString}`;
   }
 
-  info(message: string, context?: unknown) {
+  info(message: string, context?: LogContext) {
     console.log(this.formatMessage(LogLevel.INFO, message, context));
   }
 
-  warn(message: string, context?: unknown) {
+  warn(message: string, context?: LogContext) {
     console.warn(this.formatMessage(LogLevel.WARN, message, context));
   }
 
-  error(message: string, context?: unknown) {
+  error(message: string, context?: LogContext) {
     console.error(this.formatMessage(LogLevel.ERROR, message, context));
   }
 
-  debug(message: string, context?: unknown) {
+  debug(message: string, context?: LogContext) {
     if (process.env.NODE_ENV !== 'production') {
       console.debug(this.formatMessage(LogLevel.DEBUG, message, context));
     }
