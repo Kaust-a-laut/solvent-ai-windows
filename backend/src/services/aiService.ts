@@ -28,6 +28,11 @@ import { fitConversation } from '../utils/conversationWindow';
 import { getContextBudget } from '../utils/tokenEstimator';
 import { ProviderSemaphore } from './providerSemaphore';
 import { circuitBreaker } from './circuitBreaker';
+import { LRUMap } from '../utils/lruMap';
+
+// Cap per-session bookkeeping. 5000 is generous for a single user across many
+// chat sessions; oldest entries fall off rather than growing unbounded.
+const SESSION_MAP_MAX = 5000;
 import { providerSelector } from './providerSelector';
 
 const providerSemaphore = new ProviderSemaphore(parseInt(process.env.MAX_CONCURRENT_PROVIDER_CALLS || '5', 10));
@@ -94,10 +99,11 @@ export class AIService {
   private waterfallService = new WaterfallService();
   // Maps sessionId → last trace id for that session (used for auto-accepted signal).
   // Ephemeral: cleared on backend restart. Phase C will persist this.
-  private lastTraceBySession = new Map<string, string>();
-  private traceToSession = new Map<string, string>();
+  // LRU-bounded so long-running backends don't accumulate stale session ids.
+  private lastTraceBySession = new LRUMap<string, string>(SESSION_MAP_MAX);
+  private traceToSession = new LRUMap<string, string>(SESSION_MAP_MAX);
   // Per-session minScore adjustment raised by correction signals (+0.03 per correction, capped at +0.15).
-  private sessionMinScoreAdj = new Map<string, number>();
+  private sessionMinScoreAdj = new LRUMap<string, number>(SESSION_MAP_MAX);
 
   async performSearch(query: string, page?: number) {
     return searchService.webSearch(query, page);
@@ -153,6 +159,8 @@ export class AIService {
       const prevTraceId = this.lastTraceBySession.get(sessionId);
       if (prevTraceId) {
         traceLogger.updateOutcome(prevTraceId, 'accepted').catch(() => {});
+        // Reverse map drops the stale traceId so the two stay in sync.
+        this.traceToSession.delete(prevTraceId);
       }
 
       // 2.1 Log retrieval trace (fire-and-forget — never blocks the response)
@@ -276,6 +284,7 @@ export class AIService {
     const prevTraceId = this.lastTraceBySession.get(sessionId);
     if (prevTraceId) {
       traceLogger.updateOutcome(prevTraceId, 'accepted').catch(() => {});
+      this.traceToSession.delete(prevTraceId);
     }
     const traceId = uuidv4();
     this.lastTraceBySession.set(sessionId, traceId);

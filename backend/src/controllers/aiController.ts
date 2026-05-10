@@ -30,15 +30,15 @@ const chatRequestSchema = z.object({
   smartRouter: z.boolean().optional(),
   fallbackModel: z.string().optional(),
   imageProvider: z.string().optional(),
-  temperature: z.number().optional(),
-  maxTokens: z.number().optional(),
+  temperature: z.number().min(0).max(2).optional(),
+  maxTokens: z.number().int().min(1).max(200_000).optional(),
   apiKeys: z.record(z.string()).optional(),
   thinkingModeEnabled: z.boolean().optional(),
   tier: z.enum(['full-agentic', 'code-only']).optional(),
   traits: z.object({
     toolUse: z.enum(['strong', 'basic']),
     multimodal: z.boolean(),
-    contextWindow: z.number(),
+    contextWindow: z.number().int().min(1).max(2_000_000),
   }).optional(),
   deviceInfo: z.object({
     isMobile: z.boolean(),
@@ -77,9 +77,9 @@ const chatRequestSchema = z.object({
 });
 
 const searchRequestSchema = z.object({
-  query: z.string().min(1, 'Query is required'),
-  page: z.number().int().min(1).optional(),
-  expandedQuery: z.string().optional(),
+  query: z.string().min(1, 'Query is required').max(2_000),
+  page: z.number().int().min(1).max(100).optional(),
+  expandedQuery: z.string().max(2_000).optional(),
 });
 
 const compareRequestSchema = z.object({
@@ -102,8 +102,8 @@ const modelSelectionSchema = z.object({
 }).optional();
 
 const waterfallRequestSchema = z.object({
-  prompt: z.string().min(1, 'Prompt is required'),
-  globalProvider: z.string().optional(),
+  prompt: z.string().min(1, 'Prompt is required').max(50_000),
+  globalProvider: z.string().max(64).optional(),
   notepadContent: z.string().optional(),
   openFiles: z.array(z.object({ path: z.string(), content: z.string() })).optional(),
   forceProceed: z.boolean().optional(),
@@ -113,9 +113,9 @@ const waterfallRequestSchema = z.object({
 
 const waterfallStepRequestSchema = z.object({
   step: z.enum([WaterfallStep.PLANNER, WaterfallStep.EXECUTOR, WaterfallStep.REVIEWER]),
-  input: z.string(),
+  input: z.string().max(200_000),
   context: z.record(z.unknown()).nullable().optional(),
-  globalProvider: z.string().optional()
+  globalProvider: z.string().max(64).optional()
 });
 
 export class AIController {

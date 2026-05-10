@@ -27,7 +27,7 @@ router.post('/chat', AIController.chat);
 router.post('/chat/stream', AIController.chatStream);
 
 // ── Notepad Link Preview (OG metadata) ────────────────────────────────────
-const linkPreviewSchema = z.object({ url: z.string().url() });
+const linkPreviewSchema = z.object({ url: z.string().url().max(2048) });
 router.post('/notepad/link-preview', async (req, res) => {
   const parsed = linkPreviewSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -48,8 +48,8 @@ router.post('/notepad/link-preview', async (req, res) => {
 // Keeps image intent logic in one place (aiService) instead of duplicating
 // the regex in the frontend's actionSlice.
 const detectIntentSchema = z.object({
-  message: z.string().min(1),
-  mode: z.string().optional()
+  message: z.string().min(1).max(50_000),
+  mode: z.string().max(64).optional()
 });
 
 router.post('/detect-intent', (req, res) => {
@@ -83,9 +83,9 @@ router.get('/local-image-status', AIController.checkLocalImageStatus);
 
 // ── Adversarial Debate ─────────────────────────────────────────────────────
 const debateRequestSchema = z.object({
-  topic: z.string().min(1, 'topic is required'),
-  proponentModel: z.object({ provider: z.string(), model: z.string() }).optional(),
-  criticModel: z.object({ provider: z.string(), model: z.string() }).optional()
+  topic: z.string().min(1, 'topic is required').max(10_000),
+  proponentModel: z.object({ provider: z.string().max(64), model: z.string().max(256) }).optional(),
+  criticModel: z.object({ provider: z.string().max(64), model: z.string().max(256) }).optional()
 });
 
 router.post('/debate', async (req, res) => {
