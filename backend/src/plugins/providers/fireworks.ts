@@ -2,10 +2,11 @@ import { IProviderPlugin, ProviderHealth } from '../../types/plugins';
 import { config } from '../../config';
 import { logger } from '../../utils/logger';
 import { BaseOpenAIService } from '../../services/baseOpenAIService';
+import { OPENAI_COMPATIBLE_PROVIDERS } from '../../services/aiProviderFactory';
 
 export class FireworksProviderPlugin extends BaseOpenAIService implements IProviderPlugin {
   readonly name = 'Fireworks AI';
-  protected baseUrl = 'https://api.fireworks.ai/inference/v1';
+  protected baseUrl = OPENAI_COMPATIBLE_PROVIDERS.fireworks!.baseUrl;
   protected apiKey: string = '';
 
   id = 'fireworks';

@@ -1,12 +1,11 @@
 import { IProviderPlugin, ProviderHealth } from '../../types/plugins';
 import { config } from '../../config';
 import { BaseOpenAIService } from '../../services/baseOpenAIService';
-
-const OPENROUTER_BASE_URL = 'https://openrouter.ai/api/v1';
+import { OPENAI_COMPATIBLE_PROVIDERS } from '../../services/aiProviderFactory';
 
 export class OpenRouterProviderPlugin extends BaseOpenAIService implements IProviderPlugin {
   readonly name = 'OpenRouter';
-  protected baseUrl = OPENROUTER_BASE_URL;
+  protected baseUrl = OPENAI_COMPATIBLE_PROVIDERS.openrouter!.baseUrl;
   protected apiKey: string = '';
 
   id = 'openrouter';
@@ -37,7 +36,7 @@ export class OpenRouterProviderPlugin extends BaseOpenAIService implements IProv
   async healthCheck(): Promise<boolean> {
     try {
       if (!this.apiKey) return false;
-      const response = await fetch(`${OPENROUTER_BASE_URL}/models`, {
+      const response = await fetch(`${this.baseUrl}/models`, {
         headers: { Authorization: `Bearer ${this.apiKey}` },
       });
       return response.ok;

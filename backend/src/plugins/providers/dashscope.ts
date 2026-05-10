@@ -3,12 +3,11 @@ import { ChatMessage, CompletionOptions } from '../../types/ai';
 import { config } from '../../config';
 import { logger } from '../../utils/logger';
 import { BaseOpenAIService } from '../../services/baseOpenAIService';
-
-const DASHSCOPE_BASE_URL = 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1';
+import { OPENAI_COMPATIBLE_PROVIDERS } from '../../services/aiProviderFactory';
 
 export class DashScopeProviderPlugin extends BaseOpenAIService implements IProviderPlugin {
   readonly name = 'dashscope';
-  protected baseUrl = DASHSCOPE_BASE_URL;
+  protected baseUrl = OPENAI_COMPATIBLE_PROVIDERS.dashscope!.baseUrl;
   protected apiKey!: string;
   
   id = 'dashscope';

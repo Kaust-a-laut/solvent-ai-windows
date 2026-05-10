@@ -2,10 +2,11 @@ import { IProviderPlugin, ProviderHealth } from '../../types/plugins';
 import { config } from '../../config';
 import { logger } from '../../utils/logger';
 import { BaseOpenAIService } from '../../services/baseOpenAIService';
+import { OPENAI_COMPATIBLE_PROVIDERS } from '../../services/aiProviderFactory';
 
 export class CerebrasProviderPlugin extends BaseOpenAIService implements IProviderPlugin {
   readonly name = 'Cerebras Cloud';
-  protected baseUrl = 'https://api.cerebras.ai/v1';
+  protected baseUrl = OPENAI_COMPATIBLE_PROVIDERS.cerebras!.baseUrl;
   protected apiKey: string = '';
 
   id = 'cerebras';

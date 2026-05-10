@@ -52,7 +52,7 @@ export const OPENAI_COMPATIBLE_PROVIDERS: Record<string, ProviderConfig> = {
     baseUrl: 'https://api.fireworks.ai/inference/v1',
     apiKeyEnvVar: 'FIREWORKS_API_KEY',
     defaultModel: 'accounts/fireworks/models/llama-v3p3-70b-instruct'
-  }
+  },
 };
 
 export class AIProviderFactory {

@@ -2,10 +2,11 @@ import { IProviderPlugin, ProviderHealth } from '../../types/plugins';
 import { config } from '../../config';
 import { logger } from '../../utils/logger';
 import { BaseOpenAIService } from '../../services/baseOpenAIService';
+import { OPENAI_COMPATIBLE_PROVIDERS } from '../../services/aiProviderFactory';
 
 export class GroqProviderPlugin extends BaseOpenAIService implements IProviderPlugin {
   readonly name = 'Groq Cloud';
-  protected baseUrl = 'https://api.groq.com/openai/v1';
+  protected baseUrl = OPENAI_COMPATIBLE_PROVIDERS.groq!.baseUrl;
   protected apiKey: string = '';
 
   id = 'groq';
