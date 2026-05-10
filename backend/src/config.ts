@@ -38,6 +38,13 @@ const envSchema = z.object({
     .transform(Number)
     .pipe(z.number().min(1000).max(300000))
     .default('120000'),
+  // Idle timeout between chunks while consuming a streaming provider response.
+  // Axios's `timeout` only governs the connect/initial response; once bytes
+  // start flowing, a stalled provider would otherwise hang indefinitely.
+  AI_STREAM_IDLE_TIMEOUT_MS: z.string()
+    .transform(Number)
+    .pipe(z.number().min(1000).max(300000))
+    .default('60000'),
   MEMORY_CACHE_SIZE: z.string()
     .transform(Number)
     .pipe(z.number().min(10).max(10000))

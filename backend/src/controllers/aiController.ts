@@ -162,6 +162,10 @@ export class AIController {
       for await (const event of aiService.processChatStream(parseResult.data, sse.signal)) {
         if (sse.signal.aborted) break;
         sse.send(event);
+        // Apply socket backpressure: if the client is slow, wait for drain
+        // before pulling more from the upstream provider stream. Prevents
+        // unbounded buffering in Node when the consumer falls behind.
+        if (sse.isBackpressured) await sse.flushed();
       }
     } catch (error: unknown) {
       const err = error instanceof Error ? error : new Error(String(error));

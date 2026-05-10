@@ -2,6 +2,7 @@ import { spawn, ChildProcess } from 'child_process';
 import * as net from 'net';
 import * as path from 'path';
 import * as fs from 'fs/promises';
+import { StringDecoder } from 'node:string_decoder';
 import { logger } from '../utils/logger';
 import { PROJECT_ROOT } from '../utils/fileSystem';
 
@@ -53,6 +54,11 @@ interface SidecarState {
  */
 class NativeCopyManager {
   private state: SidecarState | null = null;
+  // Per-stream UTF-8 decoders so multibyte codepoints split across chunk
+  // boundaries don't surface as U+FFFD in the dev-server log panel.
+  // Recreated each start; flushed on exit.
+  private stdoutDecoder: StringDecoder | null = null;
+  private stderrDecoder: StringDecoder | null = null;
 
   /**
    * Start a sidecar against `projectPath`. The path must resolve inside
@@ -124,11 +130,22 @@ class NativeCopyManager {
 
     this.pushLog('system', `Starting sidecar: npm run dev in ${backendDir} (PORT=${port})`);
 
+    this.stdoutDecoder = new StringDecoder('utf8');
+    this.stderrDecoder = new StringDecoder('utf8');
+
     child.stdout?.on('data', (buf: Buffer) => this.handleOutput('stdout', buf));
     child.stderr?.on('data', (buf: Buffer) => this.handleOutput('stderr', buf));
 
     child.on('exit', (code, signal) => {
       state.exitCode = code;
+      // Flush any trailing partial multibyte sequence so the last log line
+      // isn't truncated.
+      const tailOut = this.stdoutDecoder?.end();
+      if (tailOut) this.handleOutputString('stdout', tailOut);
+      const tailErr = this.stderrDecoder?.end();
+      if (tailErr) this.handleOutputString('stderr', tailErr);
+      this.stdoutDecoder = null;
+      this.stderrDecoder = null;
       this.pushLog('system', `Sidecar exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`);
       logger.info(`[NativeCopy] Sidecar exited code=${code} signal=${signal}`);
     });
@@ -292,7 +309,14 @@ class NativeCopyManager {
   }
 
   private handleOutput(stream: 'stdout' | 'stderr', buf: Buffer): void {
-    const chunk = buf.toString('utf8');
+    // Use a per-stream StringDecoder so multibyte codepoints split across
+    // chunk boundaries are buffered instead of becoming U+FFFD.
+    const decoder = stream === 'stdout' ? this.stdoutDecoder : this.stderrDecoder;
+    const chunk = decoder ? decoder.write(buf) : buf.toString('utf8');
+    if (chunk) this.handleOutputString(stream, chunk);
+  }
+
+  private handleOutputString(stream: 'stdout' | 'stderr', chunk: string): void {
     // Split on newline but preserve partial trailing line semantics by just
     // filtering empties — dev-server output is line-oriented and this is
     // good enough for log display.

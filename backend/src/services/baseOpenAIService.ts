@@ -636,8 +636,22 @@ export abstract class BaseOpenAIService implements AIProvider {
     const decoder = new StringDecoder('utf8');
     let buffer = '';
 
+    // Idle-timeout watchdog: axios `timeout` only governs initial connect, so
+    // a provider that starts emitting bytes and then stalls would hang the
+    // request forever. Reset on every chunk; destroy the stream if it fires.
+    const idleMs = config.AI_STREAM_IDLE_TIMEOUT_MS ?? 60_000;
+    let idleTimer: NodeJS.Timeout | null = null;
+    const resetIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        stream.destroy(new Error(`${this.name} stream idle timeout (${idleMs}ms)`));
+      }, idleMs);
+    };
+    resetIdle();
+
     try {
       for await (const chunk of stream) {
+        resetIdle();
         if (options.signal?.aborted) {
           stream.destroy();
           return;
@@ -671,6 +685,7 @@ export abstract class BaseOpenAIService implements AIProvider {
       }
       buffer += decoder.end();
     } finally {
+      if (idleTimer) clearTimeout(idleTimer);
       if (!stream.destroyed) stream.destroy();
     }
   }
@@ -787,9 +802,27 @@ export abstract class BaseOpenAIService implements AIProvider {
           // which raw chunk.toString() would surface as U+FFFD replacement chars.
           const decoder = new StringDecoder('utf8');
 
+          // Idle-timeout watchdog. The axios `timeout` only governs the
+          // initial response — once the provider starts streaming, a stalled
+          // upstream would otherwise hang the loop forever. Reset on every
+          // chunk and reject if the gap between chunks exceeds the budget.
+          const idleMs = config.AI_STREAM_IDLE_TIMEOUT_MS ?? 60_000;
+          let idleTimer: NodeJS.Timeout | null = null;
+          const resetIdle = () => {
+            if (idleTimer) clearTimeout(idleTimer);
+            idleTimer = setTimeout(() => {
+              if (streamDone) return;
+              streamDone = true;
+              stream.destroy();
+              streamReject(new Error(`${this.name} stream idle timeout (${idleMs}ms)`));
+            }, idleMs);
+          };
+          resetIdle();
+
           const done = () => {
             if (streamDone) return;
             streamDone = true;
+            if (idleTimer) clearTimeout(idleTimer);
             buf += decoder.end();
             stream.destroy();
             streamResolve();
@@ -797,6 +830,7 @@ export abstract class BaseOpenAIService implements AIProvider {
 
           stream.on('data', (chunk: Buffer) => {
             if (streamDone) return;
+            resetIdle();
             buf += decoder.write(chunk);
             const lines = buf.split('\n');
             buf = lines.pop() ?? '';
@@ -870,7 +904,10 @@ export abstract class BaseOpenAIService implements AIProvider {
           });
 
           stream.on('end', done);
-          stream.on('error', streamReject);
+          stream.on('error', (err) => {
+            if (idleTimer) clearTimeout(idleTimer);
+            streamReject(err);
+          });
         });
 
         const content = stripThinkTags(rawContent);
