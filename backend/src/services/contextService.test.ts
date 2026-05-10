@@ -32,7 +32,7 @@ describe('ContextService', () => {
   it('should enrich context with notepad content', async () => {
     const data: ChatRequestData = {
       provider: 'gemini',
-      model: 'gemini-2.0-flash',
+      model: 'gemini-3-flash-preview',
       messages: [{ role: 'user', content: 'Hello' }],
       notepadContent: 'User likes pizza.',
       deviceInfo: {
@@ -54,7 +54,7 @@ describe('ContextService', () => {
   it('should include environment info', async () => {
     const data: ChatRequestData = {
       provider: 'gemini',
-      model: 'gemini-2.0-flash',
+      model: 'gemini-3-flash-preview',
       messages: [{ role: 'user', content: 'Hello' }],
       deviceInfo: {
         isMobile: true,
@@ -102,7 +102,7 @@ describe('ContextService', () => {
 
       const result = await contextService.enrichContext({
         messages: [{ role: 'user', content: 'How does authentication work?' }],
-        model: 'gemini-1.5-flash',
+        model: 'gemini-3-flash-preview',
         mode: 'chat',
         provider: 'gemini'
       });
@@ -119,7 +119,7 @@ describe('ContextService', () => {
     it('should expose deduplication in suppressed items', async () => {
       const result = await contextService.enrichContext({
         messages: [{ role: 'user', content: 'How does authentication work?' }],
-        model: 'gemini-1.5-flash',
+        model: 'gemini-3-flash-preview',
         mode: 'chat',
         provider: 'gemini'
       });

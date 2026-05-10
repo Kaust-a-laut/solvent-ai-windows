@@ -9,12 +9,12 @@ export class GeminiProviderPlugin implements IProviderPlugin {
   name = 'Google Gemini';
   description = 'Google\'s Gemini AI provider';
   version = '1.0.0';
-  defaultModel = 'gemini-1.5-flash';
+  defaultModel = 'gemini-3-flash-preview';
   capabilities = {
     supportsVision: true,
     supportsStreaming: true,
     supportsEmbeddings: true,
-    contextWindow: 1000000,  // Gemini 1.5 Pro
+    contextWindow: 1000000,  // Gemini 3 Flash
     maxOutputTokens: 8192,
     supportsFunctionCalling: true,
     costPer1k: { input: 0.075, output: 0.30 } // Prices in USD per 1000 tokens
@@ -25,7 +25,7 @@ export class GeminiProviderPlugin implements IProviderPlugin {
       if (!this.genAI) return false;
 
       // Perform a minimal API call to check health
-      const model = this.genAI.getGenerativeModel({ model: this.defaultModel || 'gemini-1.5-flash' });
+      const model = this.genAI.getGenerativeModel({ model: this.defaultModel || 'gemini-3-flash-preview' });
       const result = await model.generateContent('Hello');
       return !!result.response.text();
     } catch (error) {

@@ -3,7 +3,7 @@ import { useAppStore } from '../store/useAppStore';
 import {
   MessageSquare, Globe, Brain, Swords, GitCompare,
   Users, FlaskConical, ScanEye, Search, BookOpen, LineChart, Settings, Code, Menu, X as CloseIcon,
-  ChevronsLeft, ChevronsRight, PanelLeftClose, PanelLeftOpen, Home, Sparkles
+  ChevronsLeft, ChevronsRight, PanelLeftClose, PanelLeftOpen, Home, Sparkles, NotebookPen
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -145,6 +145,7 @@ export const Navigation = () => {
           <NavItem mode="vision" icon={ScanEye} label="SolventSee Lab" color="text-jb-orange" />
           <NavItem mode="coding" icon={Code} label="Coding Suite" color="text-jb-cyan" />
           <NavItem mode="browser" icon={Globe} label="Web Search" color="text-jb-purple" />
+          <NavItem mode="notepad" icon={NotebookPen} label="Notepad" color="text-jb-purple" />
         </div>
 
         {!isCollapsed && (

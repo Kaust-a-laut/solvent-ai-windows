@@ -565,6 +565,92 @@ export abstract class BaseOpenAIService implements AIProvider {
   }
 
   /**
+   * Plain chat streaming for OpenAI-compatible providers. Yields content deltas as they arrive.
+   * Tool calls are NOT supported in this path — pure conversational use only.
+   * Honors AbortSignal via options.signal so the SSE controller can cancel mid-stream.
+   */
+  async *generateChatStream(messages: ChatMessage[], options: CompletionOptions): AsyncGenerator<string> {
+    const apiKey = options.apiKey || this.apiKey;
+    if (!apiKey) throw new Error(`${this.name} API Key missing`);
+
+    const model = options.model || this.defaultModel;
+    const normalized = normalizeMessages(messages).map(m => ({ role: m.role, content: m.content }));
+
+    const payload: Record<string, unknown> = {
+      model,
+      messages: normalized,
+      temperature: options.temperature ?? 0.7,
+      max_tokens: options.maxTokens ?? 8192,
+      stream: true,
+    };
+
+    let response;
+    try {
+      response = await axios.post(
+        `${this.baseUrl}/chat/completions`,
+        payload,
+        {
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+            'Accept': 'text/event-stream',
+            ...(this.getExtraHeaders?.() || {})
+          },
+          timeout: config.AI_PROVIDER_TIMEOUT_MS ?? 120_000,
+          responseType: 'stream',
+          signal: options.signal,
+        }
+      );
+    } catch (err) {
+      const e = err as { response?: { data?: { error?: { message?: string } } }; message?: string };
+      const msg = e.response?.data?.error?.message || e.message || 'unknown';
+      throw new Error(`${this.name} stream request failed: ${msg}`);
+    }
+
+    const stream = response.data as import('stream').Readable;
+    const decoder = new StringDecoder('utf8');
+    let buffer = '';
+
+    try {
+      for await (const chunk of stream) {
+        if (options.signal?.aborted) {
+          stream.destroy();
+          return;
+        }
+        buffer += decoder.write(chunk as Buffer);
+
+        let eventEnd: number;
+        while ((eventEnd = buffer.indexOf('\n\n')) !== -1) {
+          const rawEvent = buffer.slice(0, eventEnd);
+          buffer = buffer.slice(eventEnd + 2);
+
+          for (const line of rawEvent.split('\n')) {
+            if (!line.startsWith('data:')) continue;
+            const data = line.slice(5).trim();
+            if (!data || data === '[DONE]') continue;
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.error) {
+                throw new Error(parsed.error.message ?? 'provider stream error');
+              }
+              const delta: string | undefined = parsed.choices?.[0]?.delta?.content;
+              if (typeof delta === 'string' && delta.length > 0) {
+                yield stripThinkTags(delta);
+              }
+            } catch (parseErr) {
+              if ((parseErr as Error).message?.startsWith('provider stream error')) throw parseErr;
+              // Ignore malformed chunks — providers occasionally split JSON mid-line
+            }
+          }
+        }
+      }
+      buffer += decoder.end();
+    } finally {
+      if (!stream.destroyed) stream.destroy();
+    }
+  }
+
+  /**
    * Event-emitting variant of generateChatCompletion.
    * Same recursive tool loop, but emits AgentEvents for each tool call
    * so the frontend can show real-time tool activity.

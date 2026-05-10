@@ -65,11 +65,11 @@ export const WATERFALL_PRESET_LIST: WaterfallPresetMeta[] = [
     speed: '~2-3m',
     category: 'recommended',
     selection: {
-      planner:  { model: 'glm-4.7:cloud', provider: 'ollama' },
-      executor: { model: 'moonshotai/kimi-k2-instruct-0905', provider: 'groq' },
+      planner:  { model: 'glm-5.1:cloud', provider: 'ollama' },
+      executor: { model: 'accounts/fireworks/models/kimi-k2p6', provider: 'fireworks' },
       reviewer: { model: 'nemotron-3-super:cloud', provider: 'ollama' },
     },
-    stageLabels: { planner: 'GLM-4.7', executor: 'Kimi K2', reviewer: 'Nemotron 3 Super' },
+    stageLabels: { planner: 'GLM-5.1', executor: 'Kimi K2.6', reviewer: 'Nemotron 3 Super' },
   },
   {
     key: 'deepseek-coder',
@@ -80,11 +80,11 @@ export const WATERFALL_PRESET_LIST: WaterfallPresetMeta[] = [
     speed: '~5m+',
     category: 'recommended',
     selection: {
-      planner:  { model: 'deepseek-v3.2:cloud', provider: 'ollama' },
+      planner:  { model: 'deepseek-v4-pro:cloud', provider: 'ollama' },
       executor: { model: 'qwen3-coder-plus', provider: 'dashscope' },
       reviewer: { model: 'glm-5.1:cloud', provider: 'ollama' },
     },
-    stageLabels: { planner: 'DeepSeek V3.2', executor: 'Qwen3 Coder+', reviewer: 'GLM-5.1' },
+    stageLabels: { planner: 'DeepSeek V4 Pro', executor: 'Qwen3 Coder+', reviewer: 'GLM-5.1' },
   },
 
   // ── Top — tested, honest reviewer ────────────────────────────────────────
@@ -97,11 +97,11 @@ export const WATERFALL_PRESET_LIST: WaterfallPresetMeta[] = [
     speed: '~5m+',
     category: 'top',
     selection: {
-      planner:  { model: 'glm-4.7:cloud', provider: 'ollama' },
+      planner:  { model: 'glm-5.1:cloud', provider: 'ollama' },
       executor: { model: 'qwen3.6-plus', provider: 'dashscope' },
       reviewer: { model: 'glm-5.1:cloud', provider: 'ollama' },
     },
-    stageLabels: { planner: 'GLM-4.7', executor: 'Qwen 3.6 Plus', reviewer: 'GLM-5.1' },
+    stageLabels: { planner: 'GLM-5.1', executor: 'Qwen 3.6 Plus', reviewer: 'GLM-5.1' },
   },
   {
     key: 'glm-speed',
@@ -112,11 +112,11 @@ export const WATERFALL_PRESET_LIST: WaterfallPresetMeta[] = [
     speed: '~2-3m',
     category: 'top',
     selection: {
-      planner:  { model: 'glm-4.7:cloud', provider: 'ollama' },
-      executor: { model: 'moonshotai/kimi-k2-instruct-0905', provider: 'groq' },
+      planner:  { model: 'glm-5.1:cloud', provider: 'ollama' },
+      executor: { model: 'accounts/fireworks/models/kimi-k2p6', provider: 'fireworks' },
       reviewer: { model: 'glm-5.1:cloud', provider: 'ollama' },
     },
-    stageLabels: { planner: 'GLM-4.7', executor: 'Kimi K2', reviewer: 'GLM-5.1' },
+    stageLabels: { planner: 'GLM-5.1', executor: 'Kimi K2.6', reviewer: 'GLM-5.1' },
   },
   {
     key: 'glm-kimi',
@@ -127,11 +127,11 @@ export const WATERFALL_PRESET_LIST: WaterfallPresetMeta[] = [
     speed: '~2-3m',
     category: 'top',
     selection: {
-      planner:  { model: 'glm-4.7:cloud', provider: 'ollama' },
-      executor: { model: 'moonshotai/kimi-k2-instruct-0905', provider: 'groq' },
+      planner:  { model: 'glm-5.1:cloud', provider: 'ollama' },
+      executor: { model: 'accounts/fireworks/models/kimi-k2p6', provider: 'fireworks' },
       reviewer: { model: 'qwen3.6-plus', provider: 'dashscope' },
     },
-    stageLabels: { planner: 'GLM-4.7', executor: 'Kimi K2', reviewer: 'Qwen 3.6 Plus' },
+    stageLabels: { planner: 'GLM-5.1', executor: 'Kimi K2.6', reviewer: 'Qwen 3.6 Plus' },
   },
   {
     key: 'groq-speed',
@@ -143,10 +143,10 @@ export const WATERFALL_PRESET_LIST: WaterfallPresetMeta[] = [
     category: 'top',
     selection: {
       planner:  { model: 'openai/gpt-oss-120b', provider: 'groq' },
-      executor: { model: 'moonshotai/kimi-k2-instruct-0905', provider: 'groq' },
+      executor: { model: 'accounts/fireworks/models/kimi-k2p6', provider: 'fireworks' },
       reviewer: { model: 'meta-llama/llama-3.3-70b-instruct:free', provider: 'openrouter' },
     },
-    stageLabels: { planner: 'GPT-OSS 120B', executor: 'Kimi K2', reviewer: 'Llama 3.3 70B' },
+    stageLabels: { planner: 'GPT-OSS 120B', executor: 'Kimi K2.6', reviewer: 'Llama 3.3 70B' },
   },
   {
     key: 'kimi-duo',
@@ -158,10 +158,10 @@ export const WATERFALL_PRESET_LIST: WaterfallPresetMeta[] = [
     category: 'top',
     selection: {
       planner:  { model: 'kimi-k2.5:cloud', provider: 'ollama' },
-      executor: { model: 'moonshotai/kimi-k2-instruct-0905', provider: 'groq' },
+      executor: { model: 'accounts/fireworks/models/kimi-k2p6', provider: 'fireworks' },
       reviewer: { model: 'qwen3.6-plus', provider: 'dashscope' },
     },
-    stageLabels: { planner: 'Kimi K2.5', executor: 'Kimi K2', reviewer: 'Qwen 3.6 Plus' },
+    stageLabels: { planner: 'Kimi K2.5', executor: 'Kimi K2.6', reviewer: 'Qwen 3.6 Plus' },
   },
   {
     key: 'deepseek-kimi',
@@ -172,11 +172,11 @@ export const WATERFALL_PRESET_LIST: WaterfallPresetMeta[] = [
     speed: '~5m+',
     category: 'top',
     selection: {
-      planner:  { model: 'deepseek-v3.2:cloud', provider: 'ollama' },
-      executor: { model: 'moonshotai/kimi-k2-instruct-0905', provider: 'groq' },
+      planner:  { model: 'deepseek-v4-pro:cloud', provider: 'ollama' },
+      executor: { model: 'accounts/fireworks/models/kimi-k2p6', provider: 'fireworks' },
       reviewer: { model: 'glm-5.1:cloud', provider: 'ollama' },
     },
-    stageLabels: { planner: 'DeepSeek V3.2', executor: 'Kimi K2', reviewer: 'GLM-5.1' },
+    stageLabels: { planner: 'DeepSeek V4 Pro', executor: 'Kimi K2.6', reviewer: 'GLM-5.1' },
   },
   {
     key: 'ollama-ultima',
@@ -188,10 +188,10 @@ export const WATERFALL_PRESET_LIST: WaterfallPresetMeta[] = [
     category: 'top',
     selection: {
       planner:  { model: 'qwen3.5:cloud', provider: 'ollama' },
-      executor: { model: 'qwen3-coder:480b-cloud', provider: 'ollama' },
+      executor: { model: 'qwen3-coder-next:cloud', provider: 'ollama' },
       reviewer: { model: 'meta-llama/llama-3.3-70b-instruct:free', provider: 'openrouter' },
     },
-    stageLabels: { planner: 'Qwen 3.5', executor: 'Qwen3 Coder 480B', reviewer: 'Llama 3.3 70B' },
+    stageLabels: { planner: 'Qwen 3.5', executor: 'Qwen3 Coder Next', reviewer: 'Llama 3.3 70B' },
   },
 
   // ── Solo tier — single model all stages, avoids cross-provider rate limits ─
@@ -204,9 +204,9 @@ export const WATERFALL_PRESET_LIST: WaterfallPresetMeta[] = [
     speed: '~1-2m',
     category: 'solo',
     selection: {
-      planner:  { model: 'gemini-3-pro-preview', provider: 'gemini' },
-      executor: { model: 'gemini-3-pro-preview', provider: 'gemini' },
-      reviewer: { model: 'gemini-3-pro-preview', provider: 'gemini' },
+      planner:  { model: 'gemini-3.1-pro-preview', provider: 'gemini' },
+      executor: { model: 'gemini-3.1-pro-preview', provider: 'gemini' },
+      reviewer: { model: 'gemini-3.1-pro-preview', provider: 'gemini' },
     },
     stageLabels: { planner: 'Gemini 3 Pro', executor: 'Gemini 3 Pro', reviewer: 'Gemini 3 Pro' },
   },
@@ -256,19 +256,19 @@ export const WATERFALL_PRESET_LIST: WaterfallPresetMeta[] = [
     stageLabels: { planner: 'Qwen 3.6 Plus', executor: 'Qwen 3.6 Plus', reviewer: 'Qwen 3.6 Plus' },
   },
   {
-    key: 'solo-glm',
-    name: 'Solo: GLM-4.7',
-    description: 'All stages on GLM-4.7 via Ollama Cloud — strong all-rounder',
-    tagline: 'GLM-4.7',
+    key: 'solo-glm-5.1',
+    name: 'Solo: GLM-5.1',
+    description: 'All stages on GLM-5.1 via Ollama Cloud — strong all-rounder',
+    tagline: 'GLM-5.1',
     grade: null,
     speed: '~2-3m',
     category: 'solo',
     selection: {
-      planner:  { model: 'glm-4.7:cloud', provider: 'ollama' },
-      executor: { model: 'glm-4.7:cloud', provider: 'ollama' },
-      reviewer: { model: 'glm-4.7:cloud', provider: 'ollama' },
+      planner:  { model: 'glm-5.1:cloud', provider: 'ollama' },
+      executor: { model: 'glm-5.1:cloud', provider: 'ollama' },
+      reviewer: { model: 'glm-5.1:cloud', provider: 'ollama' },
     },
-    stageLabels: { planner: 'GLM-4.7', executor: 'GLM-4.7', reviewer: 'GLM-4.7' },
+    stageLabels: { planner: 'GLM-5.1', executor: 'GLM-5.1', reviewer: 'GLM-5.1' },
   },
   {
     key: 'solo-kimi-k2.5',
@@ -286,19 +286,19 @@ export const WATERFALL_PRESET_LIST: WaterfallPresetMeta[] = [
     stageLabels: { planner: 'Kimi K2.5', executor: 'Kimi K2.5', reviewer: 'Kimi K2.5' },
   },
   {
-    key: 'solo-kimi-k2',
-    name: 'Solo: Kimi K2',
-    description: 'All stages on Kimi K2 via Groq — fast execution-focused model',
-    tagline: 'Kimi K2 via Groq',
+    key: 'solo-kimi-k2.6',
+    name: 'Solo: Kimi K2.6',
+    description: 'All stages on Kimi K2.6 via Fireworks — fast execution-focused model',
+    tagline: 'Kimi K2.6 via Fireworks',
     grade: null,
-    speed: '~30s',
+    speed: '~1m',
     category: 'solo',
     selection: {
-      planner:  { model: 'moonshotai/kimi-k2-instruct-0905', provider: 'groq' },
-      executor: { model: 'moonshotai/kimi-k2-instruct-0905', provider: 'groq' },
-      reviewer: { model: 'moonshotai/kimi-k2-instruct-0905', provider: 'groq' },
+      planner:  { model: 'accounts/fireworks/models/kimi-k2p6', provider: 'fireworks' },
+      executor: { model: 'accounts/fireworks/models/kimi-k2p6', provider: 'fireworks' },
+      reviewer: { model: 'accounts/fireworks/models/kimi-k2p6', provider: 'fireworks' },
     },
-    stageLabels: { planner: 'Kimi K2', executor: 'Kimi K2', reviewer: 'Kimi K2' },
+    stageLabels: { planner: 'Kimi K2.6', executor: 'Kimi K2.6', reviewer: 'Kimi K2.6' },
   },
 
   // ── Demo tier — generous reviewers, useful for demos ─────────────────────

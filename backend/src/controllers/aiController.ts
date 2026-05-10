@@ -144,6 +144,34 @@ export class AIController {
     }
   }
 
+  /**
+   * Streaming chat: same context pipeline as /chat, but flushes token deltas as SSE events.
+   * Event shapes:
+   *   { type: 'token', value: string }
+   *   { type: 'done', model, provider, traceId }
+   *   { type: 'error', message }
+   * Client disconnect aborts the upstream provider call.
+   */
+  static async chatStream(req: Request, res: Response) {
+    const parseResult = chatRequestSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      return res.status(400).json({ error: 'Invalid request body', details: parseResult.error.errors });
+    }
+    const sse = createSSEWriter(req, res);
+    try {
+      for await (const event of aiService.processChatStream(parseResult.data, sse.signal)) {
+        if (sse.signal.aborted) break;
+        sse.send(event);
+      }
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      logger.error(`[AIController] Chat Stream Error: ${err.message}`);
+      sse.send({ type: 'error', message: err.message || 'stream failed' });
+    } finally {
+      sse.end();
+    }
+  }
+
   static async generateImage(req: Request, res: Response) {
     try {
       const imageSchema = z.object({

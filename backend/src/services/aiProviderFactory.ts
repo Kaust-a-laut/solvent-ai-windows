@@ -27,13 +27,13 @@ export const OPENAI_COMPATIBLE_PROVIDERS: Record<string, ProviderConfig> = {
     name: 'deepseek',
     baseUrl: 'https://api.deepseek.com',
     apiKeyEnvVar: 'DEEPSEEK_API_KEY',
-    defaultModel: 'deepseek-chat'
+    defaultModel: 'deepseek-v4-flash'
   },
   openrouter: {
     name: 'openrouter',
     baseUrl: 'https://openrouter.ai/api/v1',
     apiKeyEnvVar: 'OPENROUTER_API_KEY',
-    defaultModel: 'google/gemini-2.0-flash-001:free'
+    defaultModel: 'meta-llama/llama-3.3-70b-instruct:free'
   },
   dashscope: {
     name: 'dashscope',
@@ -45,7 +45,7 @@ export const OPENAI_COMPATIBLE_PROVIDERS: Record<string, ProviderConfig> = {
     name: 'cerebras',
     baseUrl: 'https://api.cerebras.ai/v1',
     apiKeyEnvVar: 'CEREBRAS_API_KEY',
-    defaultModel: 'llama3.1-8b'
+    defaultModel: 'gpt-oss-120b'
   },
   fireworks: {
     name: 'fireworks',

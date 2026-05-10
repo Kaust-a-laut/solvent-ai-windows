@@ -2,42 +2,37 @@ import { logger } from '../utils/logger';
 
 export const MODELS = {
   GEMINI: {
-    PRO_3: 'gemini-3-pro-preview',
-    FLASH_3: 'gemini-3-flash-preview',
+    PRO_3_1: 'gemini-3.1-pro',
+    PRO_3_1_PREVIEW: 'gemini-3.1-pro-preview',
+    FLASH_3: 'gemini-3-flash',
+    FLASH_3_PREVIEW: 'gemini-3-flash-preview',
+    FLASH_LITE_3_1: 'gemini-3.1-flash-lite',
+    FLASH_LITE_3_1_PREVIEW: 'gemini-3.1-flash-lite-preview',
+    // 2.5 family — deprecating June/July 2026; kept transitionally.
     PRO_2_5: 'gemini-2.5-pro',
     FLASH_2_5: 'gemini-2.5-flash',
-    PRO_1_5: 'gemini-1.5-pro',
-    FLASH_2_0: 'gemini-2.0-flash',
-    FLASH_1_5: 'gemini-1.5-flash',
+    FLASH_LITE_2_5: 'gemini-2.5-flash-lite',
   },
   GROQ: {
     LLAMA_3_3_70B: 'llama-3.3-70b-versatile',
     LLAMA_3_1_8B: 'llama-3.1-8b-instant',
-    MIXTRAL_8X7B: 'mixtral-8x7b-32768'
+    GPT_OSS_120B: 'openai/gpt-oss-120b',
+    GPT_OSS_20B: 'openai/gpt-oss-20b',
+    COMPOUND: 'groq/compound',
+    COMPOUND_MINI: 'groq/compound-mini',
   },
   GROQ_MODELS: [
-    // Agentic (compound AI systems)
-    'compound-beta',
-    'compound-beta-mini',
     // Production
     'llama-3.3-70b-versatile',
-    'llama-3.1-70b-versatile',
     'llama-3.1-8b-instant',
-    'llama3-70b-8192',
-    'llama3-8b-8192',
-    'gemma2-9b-it',
-    'mixtral-8x7b-32768',
+    'openai/gpt-oss-120b',
+    'openai/gpt-oss-20b',
+    // Agentic systems
+    'groq/compound',
+    'groq/compound-mini',
     // Preview
     'meta-llama/llama-4-scout-17b-16e-instruct',
-    'meta-llama/llama-4-maverick-17b-128e-instruct',
-    'llama-3.3-70b-specdec',
-    'llama-3.1-70b-specdec',
-    'qwen-qwq-32b',
     'qwen/qwen3-32b',
-    'deepseek-r1-distill-llama-70b',
-    'deepseek-r1-distill-qwen-32b',
-    'openai/gpt-oss-120b',
-    'moonshotai/kimi-k2-instruct-0905',
   ],
   OLLAMA: {
     QWEN_CODER: 'qwen2.5-coder:7b',
@@ -47,24 +42,27 @@ export const MODELS = {
   OLLAMA_CLOUD: [
     'glm-5.1:cloud',
     'glm-5:cloud',
-    'glm-4.7:cloud',
     'kimi-k2.6:cloud',
     'kimi-k2.5:cloud',
-    'kimi-k2-thinking:cloud',
-    'deepseek-v3.1:671b-cloud',
-    'deepseek-v3.2:cloud',
+    'deepseek-v4-pro:cloud',
+    'deepseek-v4-flash:cloud',
     'qwen3.5:cloud',
-    'qwen3-coder:480b-cloud',
+    'qwen3-next:80b-cloud',
+    'qwen3-coder-next:cloud',
     'nemotron-3-super:cloud',
-    'minimax-m2.1:cloud',
+    'nemotron-3-nano:cloud',
+    'minimax-m2.7:cloud',
+    'minimax-m2.5:cloud',
     'cogito-2.1:671b-cloud',
+    'gemma4:cloud',
+    'devstral-2:cloud',
+    'gemini-3-flash-preview:cloud',
   ],
   OPENROUTER: {
+    CLAUDE_SONNET_4_5: 'anthropic/claude-sonnet-4.5',
     CLAUDE_SONNET_4: 'anthropic/claude-sonnet-4',
-    CLAUDE_3_5_SONNET: 'anthropic/claude-3.5-sonnet',
     GPT_4O: 'openai/gpt-4o',
-    MINIMAX_01: 'minimax/minimax-01',
-    QWEN_CODER_32B: 'qwen/qwen-2.5-coder-32b-instruct',
+    QWEN3_CODER: 'qwen/qwen3-coder',
   },
   DASHSCOPE: {
     QWEN3_6_MAX_PREVIEW: 'qwen3.6-max-preview',
@@ -121,9 +119,9 @@ export const MODELS = {
     // DeepSeek via DashScope
     'deepseek-v3.2',
   ],
-  FIREWORKS_DEFAULT: 'accounts/fireworks/models/kimi-k2p5',
-  CEREBRAS_DEFAULT: 'llama-3.3-70b',
-  DEEPSEEK_DEFAULT: 'deepseek-chat',
+  FIREWORKS_DEFAULT: 'accounts/fireworks/models/kimi-k2p6',
+  CEREBRAS_DEFAULT: 'gpt-oss-120b',
+  DEEPSEEK_DEFAULT: 'deepseek-v4-flash',
   /**
    * Ordered fallback chain used by AIService.handleFallbacks when the user's
    * selected provider errors out. Biased toward providers that are actually
@@ -132,41 +130,39 @@ export const MODELS = {
    */
   FALLBACK_CHAIN: [
     { provider: 'groq',       model: 'llama-3.3-70b-versatile' },
-    { provider: 'fireworks',  model: 'accounts/fireworks/models/kimi-k2p5' },
-    { provider: 'cerebras',   model: 'llama-3.3-70b' },
+    { provider: 'fireworks',  model: 'accounts/fireworks/models/kimi-k2p6' },
+    { provider: 'cerebras',   model: 'gpt-oss-120b' },
     { provider: 'dashscope',  model: 'qwen3-coder-plus' },
-    { provider: 'deepseek',   model: 'deepseek-chat' },
-    { provider: 'openrouter', model: 'google/gemini-2.0-flash-001:free' },
+    { provider: 'deepseek',   model: 'deepseek-v4-flash' },
+    { provider: 'openrouter', model: 'meta-llama/llama-3.3-70b-instruct:free' },
     { provider: 'ollama',     model: 'qwen2.5-coder:7b' },
   ] as const,
   OPENROUTER_FREE: [
-    // OpenRouter frontier
-    'openrouter/hunter-alpha',
-    'openrouter/healer-alpha',
-    // Z.ai GLM
-    'z-ai/glm-5.1',
-    // Meta Llama 4
-    'meta-llama/llama-4-maverick:free',
-    'meta-llama/llama-4-scout:free',
+    // OpenAI open-weight (GPT-OSS)
+    'openai/gpt-oss-120b:free',
+    'openai/gpt-oss-20b:free',
+    // Meta Llama
     'meta-llama/llama-3.3-70b-instruct:free',
-    'meta-llama/llama-3.1-8b-instruct:free',
-    // Nvidia
-    'nvidia/nemotron-3-super-120b-a12b:free',
+    'meta-llama/llama-3.2-3b-instruct:free',
     // Qwen
-    'qwen/qwen3.6-plus:free',
-    // Google
-    'google/gemini-2.0-flash-exp:free',
+    'qwen/qwen3-coder:free',
+    'qwen/qwen3-next-80b-a3b-instruct:free',
+    // Nvidia Nemotron
+    'nvidia/nemotron-3-super-120b-a12b:free',
+    'nvidia/nemotron-3-nano-30b-a3b:free',
+    'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
+    'nvidia/nemotron-nano-9b-v2:free',
+    // Google Gemma
+    'google/gemma-4-26b-a4b-it:free',
+    'google/gemma-4-31b-it:free',
     'google/gemma-3-27b-it:free',
     'google/gemma-3-12b-it:free',
-    // Qwen
-    'qwen/qwen-2.5-coder-32b-instruct:free',
-    'qwen/qwen-2.5-72b-instruct:free',
-    'qwen/qwen3-235b-a22b:free',
-    'qwen/qwen3-coder:free',
-    // Others
-    'mistralai/mistral-7b-instruct:free',
-    'microsoft/phi-4-reasoning-plus:free',
-    'nousresearch/deephermes-3-llama-3-8b-preview:free',
+    // Z.ai GLM
+    'z-ai/glm-4.5-air:free',
+    // MiniMax
+    'minimax/minimax-m2.5:free',
+    // NousResearch
+    'nousresearch/hermes-3-llama-3.1-405b:free',
   ]
 };
 
@@ -204,7 +200,7 @@ export const WATERFALL_PRESETS: Record<string, WaterfallPreset> = {
     name: 'Silk Road',
     description: 'GLM-4.7 plans, Qwen 3.6 executes, GLM-5.1 reviews. All open-weight SOTA. Score: 82.',
     selection: {
-      planner:  { model: 'glm-4.7:cloud', provider: 'ollama' },
+      planner:  { model: 'glm-5.1:cloud', provider: 'ollama' },
       executor: { model: 'qwen3.6-plus', provider: 'dashscope' },
       reviewer: { model: 'glm-5.1:cloud', provider: 'ollama' },
     },
@@ -223,16 +219,16 @@ export const WATERFALL_PRESETS: Record<string, WaterfallPreset> = {
     description: 'Kimi K2.5 plans, Kimi K2 executes, Qwen 3.6 reviews. Score: 89.',
     selection: {
       planner:  { model: 'kimi-k2.5:cloud', provider: 'ollama' },
-      executor: { model: 'moonshotai/kimi-k2-instruct-0905', provider: 'groq' },
+      executor: { model: 'accounts/fireworks/models/kimi-k2p6', provider: 'fireworks' },
       reviewer: { model: 'qwen3.6-plus', provider: 'dashscope' },
     },
   },
   'groq-speed': {
     name: 'Groq Speed',
-    description: 'GPT-OSS plans, Kimi K2 executes, Llama reviews. All Groq. Score: 91.',
+    description: 'GPT-OSS plans + executes on Groq, Llama reviews. Ultra-fast all-LPU. Score: 91.',
     selection: {
       planner:  { model: 'openai/gpt-oss-120b', provider: 'groq' },
-      executor: { model: 'moonshotai/kimi-k2-instruct-0905', provider: 'groq' },
+      executor: { model: 'openai/gpt-oss-120b', provider: 'groq' },
       reviewer: { model: 'meta-llama/llama-3.3-70b-instruct:free', provider: 'openrouter' },
     },
   },
@@ -240,8 +236,8 @@ export const WATERFALL_PRESETS: Record<string, WaterfallPreset> = {
     name: 'DeepSeek-Kimi',
     description: 'DeepSeek V3.2 plans (9 decisions), Kimi K2 executes, GLM 5.1 reviews. Score: 85.',
     selection: {
-      planner:  { model: 'deepseek-v3.2:cloud', provider: 'ollama' },
-      executor: { model: 'moonshotai/kimi-k2-instruct-0905', provider: 'groq' },
+      planner:  { model: 'deepseek-v4-pro:cloud', provider: 'ollama' },
+      executor: { model: 'accounts/fireworks/models/kimi-k2p6', provider: 'fireworks' },
       reviewer: { model: 'glm-5.1:cloud', provider: 'ollama' },
     },
   },
@@ -249,7 +245,7 @@ export const WATERFALL_PRESETS: Record<string, WaterfallPreset> = {
     name: 'DeepSeek Coder',
     description: 'Canonical patterns specialist — 87-90 on rate limiters, webhooks, OAuth, CRUD. DeepSeek V3.2 plans thoroughly (10 decisions), Qwen3 Coder+ executes, GLM 5.1 reviews strictly. Weak on exotic composition.',
     selection: {
-      planner:  { model: 'deepseek-v3.2:cloud', provider: 'ollama' },
+      planner:  { model: 'deepseek-v4-pro:cloud', provider: 'ollama' },
       executor: { model: 'qwen3-coder-plus', provider: 'dashscope' },
       reviewer: { model: 'glm-5.1:cloud', provider: 'ollama' },
     },
@@ -284,14 +280,14 @@ export const WATERFALL_PRESETS: Record<string, WaterfallPreset> = {
     selection: {
       planner:  { model: 'openai/gpt-oss-120b', provider: 'groq' },
       executor: { model: 'qwen3-coder-plus', provider: 'dashscope' },
-      reviewer: { model: 'gemini-3-pro-preview', provider: 'gemini' },
+      reviewer: { model: 'gemini-3.1-pro-preview', provider: 'gemini' },
     },
   },
-  'maverick': {
-    name: 'Maverick',
-    description: 'Llama 4 Maverick plans, Gemma reviews. Score: 100 (generous).',
+  'gpt-oss-gemma': {
+    name: 'GPT-OSS + Gemma',
+    description: 'GPT-OSS plans, Qwen3 Coder executes, Gemma reviews. Score: 100 (generous).',
     selection: {
-      planner:  { model: 'meta-llama/llama-4-maverick-17b-128e-instruct:free', provider: 'openrouter' },
+      planner:  { model: 'openai/gpt-oss-120b:free', provider: 'openrouter' },
       executor: { model: 'qwen3-coder-plus', provider: 'dashscope' },
       reviewer: { model: 'google/gemma-3-27b-it:free', provider: 'openrouter' },
     },
@@ -300,8 +296,8 @@ export const WATERFALL_PRESETS: Record<string, WaterfallPreset> = {
     name: 'GLM Speed',
     description: 'GLM-4.7 plans, Kimi K2 executes at Groq speed, GLM-5.1 reviews honestly. Score: 87.',
     selection: {
-      planner:  { model: 'glm-4.7:cloud', provider: 'ollama' },
-      executor: { model: 'moonshotai/kimi-k2-instruct-0905', provider: 'groq' },
+      planner:  { model: 'glm-5.1:cloud', provider: 'ollama' },
+      executor: { model: 'accounts/fireworks/models/kimi-k2p6', provider: 'fireworks' },
       reviewer: { model: 'glm-5.1:cloud', provider: 'ollama' },
     },
   },
@@ -309,8 +305,8 @@ export const WATERFALL_PRESETS: Record<string, WaterfallPreset> = {
     name: 'GLM-Kimi',
     description: 'GLM-4.7 plans, Kimi K2 executes, Qwen 3.6 reviews. Score: 93.',
     selection: {
-      planner:  { model: 'glm-4.7:cloud', provider: 'ollama' },
-      executor: { model: 'moonshotai/kimi-k2-instruct-0905', provider: 'groq' },
+      planner:  { model: 'glm-5.1:cloud', provider: 'ollama' },
+      executor: { model: 'accounts/fireworks/models/kimi-k2p6', provider: 'fireworks' },
       reviewer: { model: 'qwen3.6-plus', provider: 'dashscope' },
     },
   },
@@ -318,8 +314,8 @@ export const WATERFALL_PRESETS: Record<string, WaterfallPreset> = {
     name: 'GLM-Nemotron',
     description: 'Reliable mid-tier — consistent 75-89 across all prompt types, balanced speed/quality, ~2-6 min. GLM-4.7 plans, Kimi K2 executes, Nemotron 3 Super reviews.',
     selection: {
-      planner:  { model: 'glm-4.7:cloud', provider: 'ollama' },
-      executor: { model: 'moonshotai/kimi-k2-instruct-0905', provider: 'groq' },
+      planner:  { model: 'glm-5.1:cloud', provider: 'ollama' },
+      executor: { model: 'accounts/fireworks/models/kimi-k2p6', provider: 'fireworks' },
       reviewer: { model: 'nemotron-3-super:cloud', provider: 'ollama' },
     },
   },
@@ -328,27 +324,27 @@ export const WATERFALL_PRESETS: Record<string, WaterfallPreset> = {
     description: 'Qwen 3.5 plans, Qwen3 Coder 480B executes. Maximum intelligence.',
     selection: {
       planner:  { model: 'qwen3.5:cloud', provider: 'ollama' },
-      executor: { model: 'qwen3-coder:480b-cloud', provider: 'ollama' },
+      executor: { model: 'qwen3-coder-next:cloud', provider: 'ollama' },
       reviewer: { model: 'meta-llama/llama-3.3-70b-instruct:free', provider: 'openrouter' },
     },
   },
   'deepseek-ultra': {
     name: 'DeepSeek Ultra',
-    description: 'DeepSeek V3.1 (671B) plans, Qwen3 Coder 480B executes.',
+    description: 'DeepSeek V4 Pro plans, Qwen3 Coder Next executes.',
     selection: {
-      planner:  { model: 'deepseek-v3.1:671b-cloud', provider: 'ollama' },
-      executor: { model: 'qwen3-coder:480b-cloud', provider: 'ollama' },
+      planner:  { model: 'deepseek-v4-pro:cloud', provider: 'ollama' },
+      executor: { model: 'qwen3-coder-next:cloud', provider: 'ollama' },
       reviewer: { model: 'meta-llama/llama-3.3-70b-instruct:free', provider: 'openrouter' },
     },
   },
   // --- Solo presets — single model all stages, avoids cross-provider rate limits ---
   'solo-gemini-pro': {
-    name: 'Solo: Gemini 3 Pro',
-    description: 'All stages on Gemini 3 Pro.',
+    name: 'Solo: Gemini 3.1 Pro',
+    description: 'All stages on Gemini 3.1 Pro Preview.',
     selection: {
-      planner:  { model: 'gemini-3-pro-preview', provider: 'gemini' },
-      executor: { model: 'gemini-3-pro-preview', provider: 'gemini' },
-      reviewer: { model: 'gemini-3-pro-preview', provider: 'gemini' },
+      planner:  { model: 'gemini-3.1-pro-preview', provider: 'gemini' },
+      executor: { model: 'gemini-3.1-pro-preview', provider: 'gemini' },
+      reviewer: { model: 'gemini-3.1-pro-preview', provider: 'gemini' },
     },
   },
   'solo-gemini-flash': {
@@ -378,13 +374,13 @@ export const WATERFALL_PRESETS: Record<string, WaterfallPreset> = {
       reviewer: { model: 'qwen3.6-plus', provider: 'dashscope' },
     },
   },
-  'solo-glm': {
-    name: 'Solo: GLM-4.7',
-    description: 'All stages on GLM-4.7 via Ollama Cloud.',
+  'solo-glm-5.1': {
+    name: 'Solo: GLM-5.1',
+    description: 'All stages on GLM-5.1 via Ollama Cloud.',
     selection: {
-      planner:  { model: 'glm-4.7:cloud', provider: 'ollama' },
-      executor: { model: 'glm-4.7:cloud', provider: 'ollama' },
-      reviewer: { model: 'glm-4.7:cloud', provider: 'ollama' },
+      planner:  { model: 'glm-5.1:cloud', provider: 'ollama' },
+      executor: { model: 'glm-5.1:cloud', provider: 'ollama' },
+      reviewer: { model: 'glm-5.1:cloud', provider: 'ollama' },
     },
   },
   'solo-kimi-k2.5': {
@@ -396,13 +392,13 @@ export const WATERFALL_PRESETS: Record<string, WaterfallPreset> = {
       reviewer: { model: 'kimi-k2.5:cloud', provider: 'ollama' },
     },
   },
-  'solo-kimi-k2': {
-    name: 'Solo: Kimi K2',
-    description: 'All stages on Kimi K2 via Groq.',
+  'solo-kimi-k2.6': {
+    name: 'Solo: Kimi K2.6',
+    description: 'All stages on Kimi K2.6 via Fireworks.',
     selection: {
-      planner:  { model: 'moonshotai/kimi-k2-instruct-0905', provider: 'groq' },
-      executor: { model: 'moonshotai/kimi-k2-instruct-0905', provider: 'groq' },
-      reviewer: { model: 'moonshotai/kimi-k2-instruct-0905', provider: 'groq' },
+      planner:  { model: 'accounts/fireworks/models/kimi-k2p6', provider: 'fireworks' },
+      executor: { model: 'accounts/fireworks/models/kimi-k2p6', provider: 'fireworks' },
+      reviewer: { model: 'accounts/fireworks/models/kimi-k2p6', provider: 'fireworks' },
     },
   },
 };
@@ -420,7 +416,7 @@ export const WATERFALL_CONFIG: Record<string, WaterfallPhaseConfig> = {
   },
   // Executor: plan → production-ready code (needs best code generation)
   PHASE_2_EXECUTOR: {
-    OPTION_A: { model: 'qwen3-coder:480b-cloud', provider: 'ollama',    label: 'Qwen3 Coder 480B', score: 'NEW'           },
+    OPTION_A: { model: 'qwen3-coder-next:cloud', provider: 'ollama',    label: 'Qwen3 Coder Next', score: 'NEW'           },
     OPTION_B: { model: 'qwen3-coder-plus',        provider: 'dashscope', label: 'Qwen3 Coder+',    score: 'SWE-bench 71%' },
     LOCAL: 'deepseek-r1:latest'
   },
@@ -434,14 +430,23 @@ export const WATERFALL_CONFIG: Record<string, WaterfallPhaseConfig> = {
 
 export const CONTEXT_LIMITS: Record<string, number> = {
   // Gemini: Massive Context
-  'gemini-1.5-pro': 2000000, 
-  'gemini-2.0-flash': 1000000,
-  'gemini-1.5-flash': 1000000,
-  
+  'gemini-3.1-pro': 1000000,
+  'gemini-3.1-pro-preview': 1000000,
+  'gemini-3-flash': 1000000,
+  'gemini-3-flash-preview': 1000000,
+  'gemini-3.1-flash-lite': 1000000,
+  'gemini-3.1-flash-lite-preview': 1000000,
+  'gemini-2.5-pro': 2000000,
+  'gemini-2.5-flash': 1000000,
+  'gemini-2.5-flash-lite': 1000000,
+
   // Groq: High Context
   'llama-3.3-70b-versatile': 128000,
-  'mixtral-8x7b-32768': 32768,
   'llama-3.1-8b-instant': 128000,
+  'openai/gpt-oss-120b': 131072,
+  'openai/gpt-oss-20b': 131072,
+  'groq/compound': 128000,
+  'groq/compound-mini': 128000,
 
   // Local/Ollama: Constrained (conservative defaults)
   'qwen2.5-coder:7b': 32768,
@@ -450,19 +455,23 @@ export const CONTEXT_LIMITS: Record<string, number> = {
 
   // Ollama Cloud
   'qwen3.5:cloud': 131072,
-  'qwen3-coder:480b-cloud': 131072,
+  'qwen3-next:80b-cloud': 131072,
+  'qwen3-coder-next:cloud': 131072,
   'kimi-k2.6:cloud': 131072,
-  'kimi-k2-thinking:cloud': 131072,
   'kimi-k2.5:cloud': 131072,
-  'deepseek-v3.1:671b-cloud': 163840,
-  'deepseek-v3.2:cloud': 163840,
+  'deepseek-v4-flash:cloud': 1000000,
+  'deepseek-v4-pro:cloud': 1000000,
   'glm-5:cloud': 131072,
   'glm-5.1:cloud': 198000,
-  'z-ai/glm-5.1': 202752,
-  'glm-4.7:cloud': 131072,
+  'z-ai/glm-4.5-air': 131072,
   'nemotron-3-super:cloud': 131072,
-  'minimax-m2.1:cloud': 131072,
+  'nemotron-3-nano:cloud': 131072,
+  'minimax-m2.5:cloud': 131072,
+  'minimax-m2.7:cloud': 131072,
   'cogito-2.1:671b-cloud': 131072,
+  'gemma4:cloud': 131072,
+  'devstral-2:cloud': 131072,
+  'gemini-3-flash-preview:cloud': 1000000,
 
   // DashScope (Qwen)
   'qwen3.6-max-preview': 131072,
@@ -498,27 +507,31 @@ export const CONTEXT_LIMITS: Record<string, number> = {
   'deepseek-v3.2': 131072,
 
   // Fireworks AI
+  'accounts/fireworks/models/kimi-k2p6': 262144,
   'accounts/fireworks/models/kimi-k2p5': 262144,
+  'accounts/fireworks/models/glm-5p1': 202800,
   'accounts/fireworks/models/glm-5': 202800,
-  'accounts/fireworks/models/glm-4p7': 202800,
-  'accounts/fireworks/models/deepseek-v3': 131072,
+  'accounts/fireworks/models/deepseek-v3p2': 131072,
+  'accounts/fireworks/models/deepseek-v3p1': 131072,
+  'accounts/deepseek-ai/models/deepseek-v4-pro': 1000000,
   'accounts/fireworks/models/gpt-oss-120b': 131072,
   'accounts/fireworks/models/gpt-oss-20b': 131072,
-  'accounts/fireworks/models/minimax-m2': 196608,
+  'accounts/fireworks/models/minimax-m2p7': 196608,
+  'accounts/fireworks/models/minimax-m2p5': 196608,
   'accounts/fireworks/models/qwen3p6-plus': 131072,
-  'accounts/fireworks/models/llama4-maverick-instruct-basic': 131072,
-  'accounts/fireworks/models/llama4-scout-instruct-basic': 131072,
+  'accounts/fireworks/models/qwen3-235b-a22b': 131072,
+  'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct': 262144,
   'accounts/fireworks/models/llama-v3p3-70b-instruct': 131072,
-  'accounts/fireworks/models/qwen2p5-72b-instruct': 131072,
-  'accounts/fireworks/models/mixtral-8x22b-instruct': 65536,
 
-  // OpenRouter frontier
-  'openrouter/hunter-alpha': 1048576,
-  'openrouter/healer-alpha': 262144,
+  // Cerebras
+  'gpt-oss-120b': 131072,
+  'zai-glm-4.7': 131072,
 
-  // DeepSeek
-  'deepseek/deepseek-r1:free': 163840,
-  'deepseek/deepseek-chat-v3-0324:free': 163840,
+  // DeepSeek (direct API)
+  'deepseek-v4-flash': 1000000,
+  'deepseek-v4-pro': 1000000,
+  'deepseek-chat': 1000000,
+  'deepseek-reasoner': 1000000,
 
   // Default fallback
   'default': 8192
@@ -544,10 +557,7 @@ export const getModelContextLimit = (modelName: string): number => {
  */
 export const REQUEST_TOKEN_LIMITS: Record<string, number> = {
   'qwen/qwen3-32b':                        6000,
-  'deepseek-r1-distill-qwen-32b':          6000,
-  'qwen-qwq-32b':                          6000,
   'meta-llama/llama-4-scout-17b-16e-instruct': 8000,
-  'meta-llama/llama-4-maverick-17b-128e-instruct': 8000,
 };
 
 /**

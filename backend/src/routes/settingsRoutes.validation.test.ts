@@ -67,7 +67,7 @@ describe('settings route validation', () => {
   it('redacts apiKey/baseUrl on the auth-exempt GET response', async () => {
     vi.mocked(settingsService.getPublicSettings).mockResolvedValue({
       providers: {
-        gemini: { enabled: true, priority: 1, defaultModel: 'gemini-1.5-flash', hasApiKey: true, hasBaseUrl: false },
+        gemini: { enabled: true, priority: 1, defaultModel: 'gemini-3-flash-preview', hasApiKey: true, hasBaseUrl: false },
         groq: { enabled: false, priority: 2, hasApiKey: false, hasBaseUrl: false },
       },
       defaultProvider: 'gemini',

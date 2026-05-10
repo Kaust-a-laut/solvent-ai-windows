@@ -4,7 +4,7 @@ import { parseGraphData } from '../lib/graph-parser';
 import type { SearchResultSet, PageContent } from '../store/types';
 
 const THINKING_MODEL_LOCAL = 'deepseek-r1:8b';
-const THINKING_MODEL_CLOUD = 'deepseek-r1-distill-llama-70b';
+const THINKING_MODEL_CLOUD = 'deepseek-v4-pro';
 
 import { NATIVE_THINKING_MODELS } from '../lib/thinkingModels';
 export { NATIVE_THINKING_MODELS };
@@ -247,6 +247,128 @@ export class ChatService {
       provenance: data.provenance,
       traceId: data.traceId
     };
+  }
+
+  /**
+   * Streaming chat. Calls /api/chat/stream and surfaces token deltas via callbacks.
+   * Resolves with the final aggregated text and metadata once the stream completes.
+   * Throws if the stream errors or the response is not OK.
+   */
+  static async streamMessage(
+    params: ChatParams,
+    content: string,
+    handlers: {
+      onToken: (delta: string) => void;
+      onDone?: (info: { model: string; provider: string; traceId: string }) => void;
+      onError?: (message: string) => void;
+    },
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const {
+      messages, currentMode, modeConfigs, selectedCloudModel,
+      selectedLocalModel, selectedCloudProvider, globalProvider,
+      temperature, maxTokens, deviceInfo, notepadContent, apiKeys,
+      thinkingModeEnabled, openFiles, browserContext, activeFile,
+    } = params;
+
+    const cfg = modeConfigs[currentMode] || { provider: 'auto', model: selectedCloudModel };
+    let provider = cfg.provider;
+    let model = cfg.model;
+    if (provider === 'auto') {
+      if (globalProvider === 'local') { provider = 'ollama'; model = selectedLocalModel; }
+      else { provider = selectedCloudProvider || 'gemini'; model = selectedCloudModel; }
+    } else if (globalProvider === 'local' && provider !== 'ollama') {
+      provider = 'ollama'; model = selectedLocalModel;
+    }
+
+    const userMessage: ChatMessage = { role: 'user', content };
+    const body = {
+      provider, model,
+      messages: [...messages, userMessage],
+      mode: currentMode,
+      temperature,
+      maxTokens,
+      deviceInfo,
+      notepadContent,
+      openFiles,
+      browserContext,
+      apiKeys,
+      thinkingModeEnabled,
+      activeFile: activeFile || undefined,
+      sessionId: params.sessionId || undefined,
+    };
+
+    const response = await fetch(`${API_BASE_URL}/chat/stream`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+      body: JSON.stringify(body),
+      signal,
+    });
+
+    if (!response.ok || !response.body) {
+      const text = await response.text().catch(() => '');
+      throw new Error(`Stream failed (${response.status}): ${text || 'no body'}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    let collected = '';
+
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        let sep: number;
+        while ((sep = buffer.indexOf('\n\n')) !== -1) {
+          const block = buffer.slice(0, sep);
+          buffer = buffer.slice(sep + 2);
+          for (const line of block.split('\n')) {
+            if (!line.startsWith('data:')) continue;
+            const payload = line.slice(5).trim();
+            if (!payload) continue;
+            try {
+              const evt = JSON.parse(payload);
+              if (evt.type === 'token' && typeof evt.value === 'string') {
+                collected += evt.value;
+                handlers.onToken(evt.value);
+              } else if (evt.type === 'done') {
+                handlers.onDone?.({ model: evt.model, provider: evt.provider, traceId: evt.traceId });
+              } else if (evt.type === 'error') {
+                handlers.onError?.(evt.message || 'stream error');
+                throw new Error(evt.message || 'stream error');
+              }
+            } catch (e) {
+              // Ignore split-JSON noise; only re-throw when we authored the error above.
+              if ((e as Error).message?.startsWith('stream error') || (e as Error).message?.startsWith('Stream failed')) throw e;
+            }
+          }
+        }
+      }
+    } finally {
+      try { reader.releaseLock(); } catch { /* already released */ }
+    }
+
+    return collected;
+  }
+
+  /**
+   * Fetch Open Graph + meta preview for a URL via the backend SSRF-safe fetcher.
+   * Throws on transport errors; returns preview data otherwise (any field may be undefined).
+   */
+  static async fetchLinkPreview(url: string): Promise<{
+    title?: string; description?: string; image?: string; siteName?: string; favicon?: string;
+  }> {
+    const data = await fetchWithRetry(`${API_BASE_URL}/notepad/link-preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+      retries: 1,
+    }) as { error?: string; title?: string; description?: string; image?: string; siteName?: string; favicon?: string };
+    if (data.error) throw new Error(data.error);
+    return data;
   }
 
   static async generateImage(prompt: string, provider?: string, apiKeys?: Record<string, string>, options: ImageGenerationOptions = {}) {

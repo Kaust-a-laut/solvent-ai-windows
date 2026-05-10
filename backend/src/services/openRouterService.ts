@@ -5,7 +5,7 @@ export class OpenRouterService extends BaseOpenAIService {
   readonly name = 'openrouter';
   protected baseUrl = 'https://openrouter.ai/api/v1';
   protected apiKey = config.OPENROUTER_API_KEY || '';
-  public defaultModel = 'google/gemini-2.0-flash-001:free';
+  public defaultModel = 'meta-llama/llama-3.3-70b-instruct:free';
 
   protected getExtraHeaders() {
     return {

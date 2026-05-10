@@ -312,49 +312,62 @@ const SoloPill = ({
 
 export const CUSTOM_MODELS: { label: string; value: string; provider: string; group: string }[] = [
   // Groq
-  { label: 'GPT-OSS 120B',   value: 'openai/gpt-oss-120b',               provider: 'groq',       group: 'Groq' },
-  { label: 'Qwen3 32B',      value: 'qwen/qwen3-32b',                    provider: 'groq',       group: 'Groq' },
-  { label: 'Kimi K2',        value: 'moonshotai/kimi-k2-instruct-0905',  provider: 'groq',       group: 'Groq' },
-  { label: 'Llama 3.3 70B',  value: 'llama-3.3-70b-versatile',           provider: 'groq',       group: 'Groq' },
-  { label: 'Llama 4 Maverick', value: 'meta-llama/llama-4-maverick-17b-128e-instruct', provider: 'groq', group: 'Groq' },
-  // OpenRouter
-  { label: 'Llama 3.3 70B',   value: 'meta-llama/llama-3.3-70b-instruct:free', provider: 'openrouter', group: 'OpenRouter' },
-  { label: 'Hermes 3 405B',  value: 'nousresearch/hermes-3-llama-3.1-405b:free', provider: 'openrouter', group: 'OpenRouter' },
-  { label: 'Qwen3.6 Plus',   value: 'qwen/qwen3.6-plus:free',            provider: 'openrouter', group: 'OpenRouter' },
-  { label: 'MiMo V2 Omni',   value: 'xiaomi/mimo-v2-omni',               provider: 'openrouter', group: 'OpenRouter' },
-  { label: 'Healer Alpha',   value: 'deepinfra/healerdoctor-healer-alpha', provider: 'openrouter', group: 'OpenRouter' },
-  { label: 'Hunter Alpha',   value: 'openrouter/hunter-alpha',            provider: 'openrouter', group: 'OpenRouter' },
-  { label: 'GLM 4.5 Air',    value: 'z-ai/glm-4.5-air:free',             provider: 'openrouter', group: 'OpenRouter' },
-  { label: 'GLM-5.1',        value: 'z-ai/glm-5.1',                      provider: 'openrouter', group: 'OpenRouter' },
+  { label: 'GPT-OSS 120B',     value: 'openai/gpt-oss-120b',     provider: 'groq', group: 'Groq' },
+  { label: 'GPT-OSS 20B',      value: 'openai/gpt-oss-20b',      provider: 'groq', group: 'Groq' },
+  { label: 'Qwen3 32B',        value: 'qwen/qwen3-32b',          provider: 'groq', group: 'Groq' },
+  { label: 'Llama 3.3 70B',    value: 'llama-3.3-70b-versatile', provider: 'groq', group: 'Groq' },
+  { label: 'Groq Compound',    value: 'groq/compound',           provider: 'groq', group: 'Groq' },
+  { label: 'Compound Mini',    value: 'groq/compound-mini',      provider: 'groq', group: 'Groq' },
+  { label: 'Llama 4 Scout',    value: 'meta-llama/llama-4-scout-17b-16e-instruct', provider: 'groq', group: 'Groq' },
+  // OpenRouter free
+  { label: 'Llama 3.3 70B',    value: 'meta-llama/llama-3.3-70b-instruct:free',     provider: 'openrouter', group: 'OpenRouter' },
+  { label: 'GPT-OSS 120B',     value: 'openai/gpt-oss-120b:free',                   provider: 'openrouter', group: 'OpenRouter' },
+  { label: 'GPT-OSS 20B',      value: 'openai/gpt-oss-20b:free',                    provider: 'openrouter', group: 'OpenRouter' },
+  { label: 'Qwen3 Coder',      value: 'qwen/qwen3-coder:free',                      provider: 'openrouter', group: 'OpenRouter' },
+  { label: 'Qwen3 Next 80B',   value: 'qwen/qwen3-next-80b-a3b-instruct:free',      provider: 'openrouter', group: 'OpenRouter' },
+  { label: 'Hermes 3 405B',    value: 'nousresearch/hermes-3-llama-3.1-405b:free',  provider: 'openrouter', group: 'OpenRouter' },
+  { label: 'Nemotron 3 Super', value: 'nvidia/nemotron-3-super-120b-a12b:free',     provider: 'openrouter', group: 'OpenRouter' },
+  { label: 'GLM 4.5 Air',      value: 'z-ai/glm-4.5-air:free',                      provider: 'openrouter', group: 'OpenRouter' },
   // DashScope
-  { label: 'Qwen 3.6 Plus',  value: 'qwen3.6-plus',                     provider: 'dashscope',  group: 'DashScope' },
-  { label: 'Qwen3 Coder+',   value: 'qwen3-coder-plus',                  provider: 'dashscope',  group: 'DashScope' },
-  { label: 'Qwen3 Max',      value: 'qwen3-max',                         provider: 'dashscope',  group: 'DashScope' },
+  { label: 'Qwen 3.6 Plus',    value: 'qwen3.6-plus',     provider: 'dashscope', group: 'DashScope' },
+  { label: 'Qwen3 Coder+',     value: 'qwen3-coder-plus', provider: 'dashscope', group: 'DashScope' },
+  { label: 'Qwen3 Max',        value: 'qwen3-max',        provider: 'dashscope', group: 'DashScope' },
   // Cerebras
-  { label: 'Qwen3 235B',     value: 'qwen-3-235b-a22b-instruct-2507',    provider: 'cerebras',   group: 'Cerebras' },
-  { label: 'Llama 3.1 8B',   value: 'llama3.1-8b',                       provider: 'cerebras',   group: 'Cerebras' },
+  { label: 'GPT-OSS 120B',     value: 'gpt-oss-120b',  provider: 'cerebras', group: 'Cerebras' },
+  { label: 'Z.ai GLM 4.7',     value: 'zai-glm-4.7',   provider: 'cerebras', group: 'Cerebras' },
+  // DeepSeek (direct)
+  { label: 'DeepSeek V4 Flash', value: 'deepseek-v4-flash', provider: 'deepseek', group: 'DeepSeek' },
+  { label: 'DeepSeek V4 Pro',   value: 'deepseek-v4-pro',   provider: 'deepseek', group: 'DeepSeek' },
   // Fireworks
-  { label: 'Kimi K2.5',        value: 'accounts/fireworks/models/kimi-k2p5',                     provider: 'fireworks', group: 'Fireworks' },
-  { label: 'GLM-5',            value: 'accounts/fireworks/models/glm-5',                         provider: 'fireworks', group: 'Fireworks' },
-  { label: 'GLM-4.7',          value: 'accounts/fireworks/models/glm-4p7',                       provider: 'fireworks', group: 'Fireworks' },
-  { label: 'DeepSeek V3',      value: 'accounts/fireworks/models/deepseek-v3',                   provider: 'fireworks', group: 'Fireworks' },
-  { label: 'GPT-OSS 120B',     value: 'accounts/fireworks/models/gpt-oss-120b',                  provider: 'fireworks', group: 'Fireworks' },
-  { label: 'GPT-OSS 20B',      value: 'accounts/fireworks/models/gpt-oss-20b',                   provider: 'fireworks', group: 'Fireworks' },
-  { label: 'MiniMax M2',       value: 'accounts/fireworks/models/minimax-m2',                    provider: 'fireworks', group: 'Fireworks' },
-  { label: 'Qwen 3.6 Plus',    value: 'accounts/fireworks/models/qwen3p6-plus',                  provider: 'fireworks', group: 'Fireworks' },
-  { label: 'Llama 4 Maverick', value: 'accounts/fireworks/models/llama4-maverick-instruct-basic', provider: 'fireworks', group: 'Fireworks' },
-  { label: 'Llama 3.3 70B',    value: 'accounts/fireworks/models/llama-v3p3-70b-instruct',       provider: 'fireworks', group: 'Fireworks' },
+  { label: 'Kimi K2.6',         value: 'accounts/fireworks/models/kimi-k2p6',                       provider: 'fireworks', group: 'Fireworks' },
+  { label: 'Kimi K2.5',         value: 'accounts/fireworks/models/kimi-k2p5',                       provider: 'fireworks', group: 'Fireworks' },
+  { label: 'GLM-5.1',           value: 'accounts/fireworks/models/glm-5p1',                         provider: 'fireworks', group: 'Fireworks' },
+  { label: 'GLM-5',             value: 'accounts/fireworks/models/glm-5',                           provider: 'fireworks', group: 'Fireworks' },
+  { label: 'DeepSeek V3.2',     value: 'accounts/fireworks/models/deepseek-v3p2',                   provider: 'fireworks', group: 'Fireworks' },
+  { label: 'DeepSeek V4 Pro',   value: 'accounts/deepseek-ai/models/deepseek-v4-pro',               provider: 'fireworks', group: 'Fireworks' },
+  { label: 'GPT-OSS 120B',      value: 'accounts/fireworks/models/gpt-oss-120b',                    provider: 'fireworks', group: 'Fireworks' },
+  { label: 'GPT-OSS 20B',       value: 'accounts/fireworks/models/gpt-oss-20b',                     provider: 'fireworks', group: 'Fireworks' },
+  { label: 'MiniMax M2.7',      value: 'accounts/fireworks/models/minimax-m2p7',                    provider: 'fireworks', group: 'Fireworks' },
+  { label: 'Qwen 3.6 Plus',     value: 'accounts/fireworks/models/qwen3p6-plus',                    provider: 'fireworks', group: 'Fireworks' },
+  { label: 'Qwen3 Coder 480B',  value: 'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct',  provider: 'fireworks', group: 'Fireworks' },
+  { label: 'Qwen3 235B',        value: 'accounts/fireworks/models/qwen3-235b-a22b',                 provider: 'fireworks', group: 'Fireworks' },
+  { label: 'Llama 3.3 70B',     value: 'accounts/fireworks/models/llama-v3p3-70b-instruct',         provider: 'fireworks', group: 'Fireworks' },
   // Ollama Cloud
-  { label: 'GLM-4.7',        value: 'glm-4.7:cloud',                     provider: 'ollama',     group: 'Ollama Cloud' },
-  { label: 'GLM-5',          value: 'glm-5:cloud',                       provider: 'ollama',     group: 'Ollama Cloud' },
-  { label: 'GLM-5.1',        value: 'glm-5.1:cloud',                     provider: 'ollama',     group: 'Ollama Cloud' },
-  { label: 'Kimi K2.5',      value: 'kimi-k2.5:cloud',                   provider: 'ollama',     group: 'Ollama Cloud' },
-  { label: 'DeepSeek V3.2',  value: 'deepseek-v3.2:cloud',               provider: 'ollama',     group: 'Ollama Cloud' },
-  { label: 'MiniMax M2',     value: 'minimax-m2.1:cloud',                provider: 'ollama',     group: 'Ollama Cloud' },
-  { label: 'Nemotron 3S',    value: 'nemotron-3-super:cloud',             provider: 'ollama',     group: 'Ollama Cloud' },
-  { label: 'Kimi Thinking',  value: 'kimi-k2-thinking:cloud',            provider: 'ollama',     group: 'Ollama Cloud' },
-  { label: 'Qwen 3.5',       value: 'qwen3.5:cloud',                     provider: 'ollama',     group: 'Ollama Cloud' },
-  { label: 'Qwen3 Coder 480B', value: 'qwen3-coder:480b-cloud',          provider: 'ollama',     group: 'Ollama Cloud' },
+  { label: 'GLM-5.1',          value: 'glm-5.1:cloud',              provider: 'ollama', group: 'Ollama Cloud' },
+  { label: 'GLM-5',            value: 'glm-5:cloud',                provider: 'ollama', group: 'Ollama Cloud' },
+  { label: 'Kimi K2.6',        value: 'kimi-k2.6:cloud',            provider: 'ollama', group: 'Ollama Cloud' },
+  { label: 'Kimi K2.5',        value: 'kimi-k2.5:cloud',            provider: 'ollama', group: 'Ollama Cloud' },
+  { label: 'DeepSeek V4 Pro',  value: 'deepseek-v4-pro:cloud',      provider: 'ollama', group: 'Ollama Cloud' },
+  { label: 'DeepSeek V4 Flash', value: 'deepseek-v4-flash:cloud',   provider: 'ollama', group: 'Ollama Cloud' },
+  { label: 'MiniMax M2.7',     value: 'minimax-m2.7:cloud',         provider: 'ollama', group: 'Ollama Cloud' },
+  { label: 'MiniMax M2.5',     value: 'minimax-m2.5:cloud',         provider: 'ollama', group: 'Ollama Cloud' },
+  { label: 'Nemotron 3 Super', value: 'nemotron-3-super:cloud',     provider: 'ollama', group: 'Ollama Cloud' },
+  { label: 'Nemotron 3 Nano',  value: 'nemotron-3-nano:cloud',      provider: 'ollama', group: 'Ollama Cloud' },
+  { label: 'Qwen 3.5',         value: 'qwen3.5:cloud',              provider: 'ollama', group: 'Ollama Cloud' },
+  { label: 'Qwen3 Next 80B',   value: 'qwen3-next:80b-cloud',       provider: 'ollama', group: 'Ollama Cloud' },
+  { label: 'Qwen3 Coder Next', value: 'qwen3-coder-next:cloud',     provider: 'ollama', group: 'Ollama Cloud' },
+  { label: 'Gemma 4',          value: 'gemma4:cloud',               provider: 'ollama', group: 'Ollama Cloud' },
+  { label: 'Gemini 3 Flash',   value: 'gemini-3-flash-preview:cloud', provider: 'ollama', group: 'Ollama Cloud' },
 ];
 
 const groups = [...new Set(CUSTOM_MODELS.map(m => m.group))];
@@ -380,6 +393,15 @@ const CROSS_PROVIDER_MODELS: CrossProviderGroup[] = [
     variants: [
       { provider: 'groq', model: 'openai/gpt-oss-120b', providerLabel: 'Groq' },
       { provider: 'fireworks', model: 'accounts/fireworks/models/gpt-oss-120b', providerLabel: 'Fireworks' },
+      { provider: 'cerebras', model: 'gpt-oss-120b', providerLabel: 'Cerebras' },
+      { provider: 'openrouter', model: 'openai/gpt-oss-120b:free', providerLabel: 'OpenRouter' },
+    ],
+  },
+  {
+    name: 'Kimi K2.6',
+    variants: [
+      { provider: 'ollama', model: 'kimi-k2.6:cloud', providerLabel: 'Ollama' },
+      { provider: 'fireworks', model: 'accounts/fireworks/models/kimi-k2p6', providerLabel: 'Fireworks' },
     ],
   },
   {
@@ -387,13 +409,6 @@ const CROSS_PROVIDER_MODELS: CrossProviderGroup[] = [
     variants: [
       { provider: 'ollama', model: 'kimi-k2.5:cloud', providerLabel: 'Ollama' },
       { provider: 'fireworks', model: 'accounts/fireworks/models/kimi-k2p5', providerLabel: 'Fireworks' },
-    ],
-  },
-  {
-    name: 'GLM-4.7',
-    variants: [
-      { provider: 'ollama', model: 'glm-4.7:cloud', providerLabel: 'Ollama' },
-      { provider: 'fireworks', model: 'accounts/fireworks/models/glm-4p7', providerLabel: 'Fireworks' },
     ],
   },
   {
@@ -407,7 +422,7 @@ const CROSS_PROVIDER_MODELS: CrossProviderGroup[] = [
     name: 'GLM-5.1',
     variants: [
       { provider: 'ollama', model: 'glm-5.1:cloud', providerLabel: 'Ollama' },
-      { provider: 'openrouter', model: 'z-ai/glm-5.1', providerLabel: 'OpenRouter' },
+      { provider: 'fireworks', model: 'accounts/fireworks/models/glm-5p1', providerLabel: 'Fireworks' },
     ],
   },
   {
@@ -415,14 +430,14 @@ const CROSS_PROVIDER_MODELS: CrossProviderGroup[] = [
     variants: [
       { provider: 'dashscope', model: 'qwen3.6-plus', providerLabel: 'DashScope' },
       { provider: 'fireworks', model: 'accounts/fireworks/models/qwen3p6-plus', providerLabel: 'Fireworks' },
-      { provider: 'openrouter', model: 'qwen/qwen3.6-plus:free', providerLabel: 'OpenRouter' },
     ],
   },
   {
-    name: 'DeepSeek V3',
+    name: 'DeepSeek V4 Pro',
     variants: [
-      { provider: 'ollama', model: 'deepseek-v3.2:cloud', providerLabel: 'Ollama' },
-      { provider: 'fireworks', model: 'accounts/fireworks/models/deepseek-v3', providerLabel: 'Fireworks' },
+      { provider: 'ollama', model: 'deepseek-v4-pro:cloud', providerLabel: 'Ollama' },
+      { provider: 'fireworks', model: 'accounts/deepseek-ai/models/deepseek-v4-pro', providerLabel: 'Fireworks' },
+      { provider: 'deepseek', model: 'deepseek-v4-pro', providerLabel: 'DeepSeek' },
     ],
   },
   {
@@ -434,17 +449,19 @@ const CROSS_PROVIDER_MODELS: CrossProviderGroup[] = [
     ],
   },
   {
-    name: 'Llama 4 Maverick',
+    name: 'Qwen3 Coder',
     variants: [
-      { provider: 'groq', model: 'meta-llama/llama-4-maverick-17b-128e-instruct', providerLabel: 'Groq' },
-      { provider: 'fireworks', model: 'accounts/fireworks/models/llama4-maverick-instruct-basic', providerLabel: 'Fireworks' },
+      { provider: 'dashscope', model: 'qwen3-coder-plus', providerLabel: 'DashScope' },
+      { provider: 'fireworks', model: 'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct', providerLabel: 'Fireworks' },
+      { provider: 'ollama', model: 'qwen3-coder-next:cloud', providerLabel: 'Ollama' },
+      { provider: 'openrouter', model: 'qwen/qwen3-coder:free', providerLabel: 'OpenRouter' },
     ],
   },
   {
-    name: 'MiniMax M2',
+    name: 'MiniMax M2.7',
     variants: [
-      { provider: 'ollama', model: 'minimax-m2.1:cloud', providerLabel: 'Ollama' },
-      { provider: 'fireworks', model: 'accounts/fireworks/models/minimax-m2', providerLabel: 'Fireworks' },
+      { provider: 'ollama', model: 'minimax-m2.7:cloud', providerLabel: 'Ollama' },
+      { provider: 'fireworks', model: 'accounts/fireworks/models/minimax-m2p7', providerLabel: 'Fireworks' },
     ],
   },
 ];

@@ -11,7 +11,7 @@ export class CerebrasProviderPlugin extends BaseOpenAIService implements IProvid
   id = 'cerebras';
   description = 'Cerebras wafer-scale inference — ultra-fast OpenAI-compatible API';
   version = '1.0.0';
-  defaultModel = 'llama3.1-8b';
+  defaultModel = 'gpt-oss-120b';
   capabilities = {
     supportsVision: false,
     supportsStreaming: true,

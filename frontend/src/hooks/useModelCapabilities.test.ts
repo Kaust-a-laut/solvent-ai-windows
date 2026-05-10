@@ -6,7 +6,7 @@ import { useModelCapabilities } from './useModelCapabilities';
 describe('useModelCapabilities', () => {
   beforeEach(() => {
     useAppStore.setState({
-      selectedCloudModel: 'compound-beta',
+      selectedCloudModel: 'groq/compound',
       selectedCloudProvider: 'groq',
     });
   });
@@ -29,8 +29,8 @@ describe('useModelCapabilities', () => {
     expect(result.current.canUseClickToEdit).toBe(true);
   });
 
-  it('returns code-only for Llama 4 Maverick', () => {
-    useAppStore.setState({ selectedCloudModel: 'accounts/fireworks/models/llama4-maverick-instruct-basic', selectedCloudProvider: 'fireworks' });
+  it('returns code-only for Qwen3 Coder 480B', () => {
+    useAppStore.setState({ selectedCloudModel: 'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct', selectedCloudProvider: 'fireworks' });
     const { result } = renderHook(() => useModelCapabilities());
     expect(result.current.tier).toBe('code-only');
     expect(result.current.canUseRuntimeTools).toBe(false);

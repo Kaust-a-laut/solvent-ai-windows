@@ -26,6 +26,7 @@ const CodingArea = lazy(() => import('./CodingArea').then(m => ({ default: m.Cod
 const BrowserArea = lazy(() => import('./BrowserArea').then(m => ({ default: m.BrowserArea })));
 const SolventSeeArea = lazy(() => import('./SolventSeeArea').then(m => ({ default: m.SolventSeeArea })));
 const ModelPlaygroundArea = lazy(() => import('./ModelPlaygroundArea').then(m => ({ default: m.ModelPlaygroundArea })));
+const NotepadArea = lazy(() => import('./notepad/NotepadArea').then(m => ({ default: m.NotepadArea })));
 
 const LoadingFallback = () => (
   <div className="flex-1 flex flex-col items-center justify-center gap-4">
@@ -126,6 +127,7 @@ export const ChatArea = () => {
       vision: <SolventSeeArea />,
       coding: <CodingArea />,
       browser: <BrowserArea />,
+      notepad: <NotepadArea />,
       chat: <ChatView />
     };
 

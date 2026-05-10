@@ -264,8 +264,8 @@ export class MemoryConsolidationService {
     }`;
 
     const providers = [
-      { name: 'gemini', model: 'gemini-2.5-pro' },
-      { name: 'gemini', model: 'gemini-2.0-flash' },
+      { name: 'gemini', model: 'gemini-3.1-pro-preview' },
+      { name: 'gemini', model: 'gemini-3-flash-preview' },
       { name: 'groq', model: 'llama-3.3-70b-versatile' },
       { name: 'ollama', model: 'qwen2.5-coder:7b' }
     ];

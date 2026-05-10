@@ -10,6 +10,8 @@ node_modules/
 dist/
 build/
 frontend/dist/
+electron/main.js
+electron/preload.js
 
 # Runtime data (Solvent agent state)
 .solvent_audit.jsonl

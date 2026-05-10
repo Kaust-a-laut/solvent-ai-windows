@@ -8,6 +8,7 @@ import { createWaterfallSlice } from './waterfallSlice';
 import { createCodingSlice } from './codingSlice';
 import { createCollaborateSlice } from './collaborateSlice';
 import { createPerformanceSlice } from './performanceSlice';
+import { createNotepadSlice } from './notepadSlice';
 
 export const useAppStore = create<AppState>()((...a) => ({
   ...createChatSlice(...a),
@@ -18,6 +19,7 @@ export const useAppStore = create<AppState>()((...a) => ({
   ...createCodingSlice(...a),
   ...createCollaborateSlice(...a),
   ...createPerformanceSlice(...a),
+  ...createNotepadSlice(...a),
 }));
 
 export * from './types';

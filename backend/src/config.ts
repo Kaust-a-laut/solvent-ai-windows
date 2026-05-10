@@ -91,7 +91,7 @@ export const APP_CONSTANTS = {
     MAX_STEPS: config.WATERFALL_MAX_STEPS,
   },
   MODELS: {
-    VISION_DEFAULT: 'gemini-1.5-flash',
+    VISION_DEFAULT: 'gemini-3-flash-preview',
     CODING_DEFAULT: 'llama-3.3-70b-versatile'
   }
 };

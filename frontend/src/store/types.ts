@@ -6,6 +6,7 @@ import { WaterfallSlice } from './waterfallSlice';
 import { CodingSlice, ProjectInfo } from './codingSlice';
 import { CollaborateSlice } from './collaborateSlice';
 import { PerformanceSlice } from './performanceSlice';
+import { NotepadSlice } from './notepadSlice';
 
 export type { ProjectInfo };
 
@@ -171,4 +172,4 @@ export interface IntelQAEntry {
   timestamp: number;
 }
 
-export type AppState = ChatSlice & SettingsSlice & GraphSlice & ActionSlice & WaterfallSlice & CodingSlice & CollaborateSlice & PerformanceSlice;
+export type AppState = ChatSlice & SettingsSlice & GraphSlice & ActionSlice & WaterfallSlice & CodingSlice & CollaborateSlice & PerformanceSlice & NotepadSlice;

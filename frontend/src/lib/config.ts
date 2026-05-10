@@ -23,9 +23,9 @@ export const APP_CONFIG = {
   models: {
     cloud: {
       primary: 'llama-3.3-70b-versatile',
-      fallback: 'gemini-1.5-flash',
+      fallback: 'gemini-3-flash-preview',
       reasoning: 'llama-3.3-70b-versatile',
-      vision: 'gemini-1.5-flash'
+      vision: 'gemini-3-flash-preview'
     },
     local: {
       primary: 'qwen2.5:3b',
@@ -40,10 +40,10 @@ export const APP_CONFIG = {
   },
   modeConfigs: {
     chat: { provider: 'auto', model: 'llama-3.3-70b-versatile' },
-    vision: { provider: 'gemini', model: 'gemini-1.5-flash' },
+    vision: { provider: 'gemini', model: 'gemini-3-flash-preview' },
     coding: { provider: 'auto', model: 'llama-3.3-70b-versatile' },
     deep_thought: { provider: 'auto', model: 'llama-3.3-70b-versatile' },
-    browser: { provider: 'gemini', model: 'gemini-1.5-flash' },
+    browser: { provider: 'gemini', model: 'gemini-3-flash-preview' },
     waterfall: { provider: 'auto', model: 'llama-3.3-70b-versatile' },
     model_playground: { provider: 'auto', model: 'llama-3.3-70b-versatile' },
   },

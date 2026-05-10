@@ -5,13 +5,24 @@ contextBridge.exposeInMainWorld('electron', {
   minimize: () => ipcRenderer.send('window-minimize'),
   maximize: () => ipcRenderer.send('window-maximize'),
   close: () => ipcRenderer.send('window-close'),
-  // Notepad Agentic Sync
+  // Notepad Agentic Sync (legacy single-string scratchpad)
   saveNotepad: (content: string) => ipcRenderer.send('sync-notepad-to-disk', content),
   getNotepad: () => ipcRenderer.invoke('get-notepad'),
   onNotepadUpdated: (callback: (content: string) => void) => {
     const listener = (_event: any, content: string) => callback(content);
     ipcRenderer.on('ai-updated-notepad', listener);
     return () => ipcRenderer.removeListener('ai-updated-notepad', listener);
+  },
+  // Notepad Canvas (multi-doc)
+  notepad: {
+    list: () => ipcRenderer.invoke('notepad:list'),
+    create: (title: string) => ipcRenderer.invoke('notepad:create', title),
+    load: (id: string) => ipcRenderer.invoke('notepad:load', id),
+    save: (id: string, doc: any) => ipcRenderer.invoke('notepad:save', id, doc),
+    rename: (id: string, title: string) => ipcRenderer.invoke('notepad:rename', id, title),
+    delete: (id: string) => ipcRenderer.invoke('notepad:delete', id),
+    saveImage: (docId: string, base64: string, ext: string) =>
+      ipcRenderer.invoke('notepad:saveImage', docId, base64, ext),
   },
   onSystemTelemetry: (callback: (stats: any) => void) => {
     const listener = (_event: any, stats: any) => callback(stats);

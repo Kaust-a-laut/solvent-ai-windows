@@ -71,6 +71,12 @@ export interface IProviderPlugin extends IPlugin {
     options: CompletionOptions
   ): AsyncGenerator<string>;
 
+  /** Generate a streaming chat completion (token deltas only). Used by /api/chat/stream. */
+  generateChatStream?(
+    messages: ChatMessage[],
+    options: CompletionOptions
+  ): AsyncGenerator<string>;
+
   /** Generate embeddings */
   embed?(
     text: string

@@ -58,7 +58,7 @@ describe('AIService', () => {
   it('should list available models correctly', async () => {
     const mockProviders = [
       { id: 'ollama', name: 'Ollama', defaultModel: 'llama3', isReady: () => true },
-      { id: 'gemini', name: 'Gemini', defaultModel: 'gemini-2.0-flash', isReady: () => true }
+      { id: 'gemini', name: 'Gemini', defaultModel: 'gemini-3-flash-preview', isReady: () => true }
     ];
     (AIProviderFactory.getAllProviders as any).mockResolvedValue(mockProviders);
 
@@ -66,7 +66,7 @@ describe('AIService', () => {
     
     expect(models).toHaveProperty('ollama');
     expect(models).toHaveProperty('gemini');
-    expect(models.gemini).toContain('gemini-2.0-flash');
+    expect(models.gemini).toContain('gemini-3-flash-preview');
   });
 
   it('should detect image generation intent', async () => {
@@ -81,7 +81,7 @@ describe('AIService', () => {
       messages: [{ role: 'user', content: 'generate an image of a cat' }],
       mode: 'vision',
       provider: 'gemini',
-      model: 'gemini-1.5-flash',
+      model: 'gemini-3-flash-preview',
       imageProvider: 'pollinations'
     };
 

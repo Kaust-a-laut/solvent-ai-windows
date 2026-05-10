@@ -1,7 +1,8 @@
 import React, { useMemo } from 'react';
-import { PenLine } from 'lucide-react';
+import { PenLine, ExternalLink } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { VIEW_TRANSITION } from './types';
+import { useAppStore } from '../../store/useAppStore';
 
 export interface PipNotesViewProps {
   notepadContent: string;
@@ -14,6 +15,31 @@ export const PipNotesView: React.FC<PipNotesViewProps> = ({ notepadContent, onCo
     return trimmed ? trimmed.split(/\s+/).length : 0;
   }, [notepadContent]);
 
+  const openInNotepad = async () => {
+    const store = useAppStore.getState();
+    if (notepadContent.trim()) {
+      const doc = await store.notepadCreate(`Scratch — ${new Date().toLocaleString()}`);
+      if (doc) {
+        store.notepadUpdateActive((d) => ({
+          ...d,
+          nodes: [
+            ...d.nodes,
+            {
+              id: `n_${Date.now().toString(36)}`,
+              type: 'text',
+              position: { x: 80, y: 80 },
+              data: { text: notepadContent },
+              width: 360,
+              height: 240,
+            },
+          ],
+        }));
+      }
+    }
+    store.setCurrentMode('notepad');
+    store.setIsCommandCenterOpen(false);
+  };
+
   return (
     <motion.div
       key="notes"
@@ -22,14 +48,24 @@ export const PipNotesView: React.FC<PipNotesViewProps> = ({ notepadContent, onCo
     >
       <div className="flex items-center justify-between px-0.5 shrink-0">
         <span className="cc-section-heading">Notes</span>
-        {notepadContent && (
+        <div className="flex items-center gap-3">
           <button
-            onClick={() => { onContentChange(''); window.electron?.saveNotepad(''); }}
-            className="text-[9px] font-medium uppercase tracking-wider text-slate-600 hover:text-rose-400 transition-colors"
+            onClick={openInNotepad}
+            className="flex items-center gap-1 text-[9px] font-medium uppercase tracking-wider text-slate-500 hover:text-jb-purple transition-colors"
+            title="Open scratch text as a node in the Notepad canvas"
           >
-            Clear
+            <ExternalLink size={9} />
+            Open in Notepad
           </button>
-        )}
+          {notepadContent && (
+            <button
+              onClick={() => { onContentChange(''); window.electron?.saveNotepad(''); }}
+              className="text-[9px] font-medium uppercase tracking-wider text-slate-600 hover:text-rose-400 transition-colors"
+            >
+              Clear
+            </button>
+          )}
+        </div>
       </div>
       <div className="flex-1 relative min-h-0">
         <textarea

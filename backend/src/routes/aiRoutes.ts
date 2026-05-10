@@ -24,6 +24,24 @@ const storageService = new ConversationStorageService();
 
 // ── Core Chat ──────────────────────────────────────────────────────────────
 router.post('/chat', AIController.chat);
+router.post('/chat/stream', AIController.chatStream);
+
+// ── Notepad Link Preview (OG metadata) ────────────────────────────────────
+const linkPreviewSchema = z.object({ url: z.string().url() });
+router.post('/notepad/link-preview', async (req, res) => {
+  const parsed = linkPreviewSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: 'Invalid url' });
+  }
+  try {
+    const { fetchLinkPreview } = await import('../services/linkPreviewService');
+    const preview = await fetchLinkPreview(parsed.data.url);
+    res.json(preview);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(502).json({ error: msg });
+  }
+});
 
 // ── Intent Detection (single authoritative implementation) ─────────────────
 // The frontend calls this to determine routing before sending a message.

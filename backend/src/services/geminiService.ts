@@ -139,7 +139,7 @@ export class GeminiService implements AIProvider {
     const { model: modelName, temperature = 0.7, maxTokens = 2048, apiKey } = options || {};
     const genAI = this.getGenAI(apiKey);
     const model = genAI.getGenerativeModel({
-      model: modelName || 'gemini-2.0-flash',
+      model: modelName || 'gemini-3-flash-preview',
       generationConfig: {
         temperature,
         maxOutputTokens: maxTokens,

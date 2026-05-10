@@ -19,7 +19,7 @@ export interface ModelSelection {
   model: string;
 }
 
-const DEFAULT_PROPONENT: ModelSelection = { provider: 'gemini', model: 'gemini-3-pro-preview' };
+const DEFAULT_PROPONENT: ModelSelection = { provider: 'gemini', model: 'gemini-3.1-pro-preview' };
 const DEFAULT_CRITIC: ModelSelection = { provider: 'groq', model: 'llama-3.3-70b-versatile' };
 
 export class DebateService {

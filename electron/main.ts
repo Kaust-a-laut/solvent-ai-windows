@@ -208,6 +208,126 @@ async function createWindow() {
 
   ipcMain.handle('get-notepad', () => notepadBuffer);
 
+  // --- Notepad Canvas (multi-doc, structured) ---
+  const NOTEPAD_DIR = path.join(app.getPath('userData'), 'notepad');
+  const NOTEPAD_DOCS_DIR = path.join(NOTEPAD_DIR, 'docs');
+  const NOTEPAD_IMAGES_DIR = path.join(NOTEPAD_DIR, 'images');
+  const NOTEPAD_INDEX_FILE = path.join(NOTEPAD_DIR, 'index.json');
+
+  const ensureNotepadDirs = () => {
+    for (const dir of [NOTEPAD_DIR, NOTEPAD_DOCS_DIR, NOTEPAD_IMAGES_DIR]) {
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    }
+    if (!fs.existsSync(NOTEPAD_INDEX_FILE)) {
+      fs.writeFileSync(NOTEPAD_INDEX_FILE, JSON.stringify({ docs: [] }, null, 2));
+    }
+  };
+
+  const readNotepadIndex = (): { docs: Array<{ id: string; title: string; createdAt: number; updatedAt: number }> } => {
+    ensureNotepadDirs();
+    try {
+      return JSON.parse(fs.readFileSync(NOTEPAD_INDEX_FILE, 'utf-8'));
+    } catch {
+      return { docs: [] };
+    }
+  };
+
+  const writeNotepadIndex = (idx: { docs: Array<{ id: string; title: string; createdAt: number; updatedAt: number }> }) => {
+    ensureNotepadDirs();
+    fs.writeFileSync(NOTEPAD_INDEX_FILE, JSON.stringify(idx, null, 2));
+  };
+
+  const safeId = (id: string) => /^[a-zA-Z0-9_-]+$/.test(id);
+
+  ipcMain.handle('notepad:list', () => readNotepadIndex().docs);
+
+  ipcMain.handle('notepad:create', (_event, title: string) => {
+    ensureNotepadDirs();
+    const id = `nb_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    const now = Date.now();
+    const doc = {
+      id,
+      title: title || 'Untitled Canvas',
+      createdAt: now,
+      updatedAt: now,
+      nodes: [],
+      edges: [],
+      viewport: { x: 0, y: 0, zoom: 1 },
+      chatThread: []
+    };
+    fs.writeFileSync(path.join(NOTEPAD_DOCS_DIR, `${id}.json`), JSON.stringify(doc, null, 2));
+    const idx = readNotepadIndex();
+    idx.docs.unshift({ id, title: doc.title, createdAt: now, updatedAt: now });
+    writeNotepadIndex(idx);
+    return doc;
+  });
+
+  ipcMain.handle('notepad:load', (_event, id: string) => {
+    if (!safeId(id)) throw new Error('invalid id');
+    const file = path.join(NOTEPAD_DOCS_DIR, `${id}.json`);
+    if (!fs.existsSync(file)) return null;
+    return JSON.parse(fs.readFileSync(file, 'utf-8'));
+  });
+
+  ipcMain.handle('notepad:save', (_event, id: string, doc: any) => {
+    if (!safeId(id)) throw new Error('invalid id');
+    ensureNotepadDirs();
+    const now = Date.now();
+    const merged = { ...doc, id, updatedAt: now };
+    fs.writeFileSync(path.join(NOTEPAD_DOCS_DIR, `${id}.json`), JSON.stringify(merged, null, 2));
+    const idx = readNotepadIndex();
+    const existing = idx.docs.find(d => d.id === id);
+    if (existing) {
+      existing.title = merged.title || existing.title;
+      existing.updatedAt = now;
+    } else {
+      idx.docs.unshift({ id, title: merged.title || 'Untitled Canvas', createdAt: merged.createdAt || now, updatedAt: now });
+    }
+    writeNotepadIndex(idx);
+    return { ok: true, updatedAt: now };
+  });
+
+  ipcMain.handle('notepad:rename', (_event, id: string, title: string) => {
+    if (!safeId(id)) throw new Error('invalid id');
+    const file = path.join(NOTEPAD_DOCS_DIR, `${id}.json`);
+    if (!fs.existsSync(file)) return { ok: false };
+    const doc = JSON.parse(fs.readFileSync(file, 'utf-8'));
+    doc.title = title;
+    doc.updatedAt = Date.now();
+    fs.writeFileSync(file, JSON.stringify(doc, null, 2));
+    const idx = readNotepadIndex();
+    const e = idx.docs.find(d => d.id === id);
+    if (e) { e.title = title; e.updatedAt = doc.updatedAt; }
+    writeNotepadIndex(idx);
+    return { ok: true };
+  });
+
+  ipcMain.handle('notepad:delete', (_event, id: string) => {
+    if (!safeId(id)) throw new Error('invalid id');
+    const file = path.join(NOTEPAD_DOCS_DIR, `${id}.json`);
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+    const imgDir = path.join(NOTEPAD_IMAGES_DIR, id);
+    if (fs.existsSync(imgDir)) {
+      try { fs.rmSync(imgDir, { recursive: true, force: true }); } catch (e) { console.error(e); }
+    }
+    const idx = readNotepadIndex();
+    idx.docs = idx.docs.filter(d => d.id !== id);
+    writeNotepadIndex(idx);
+    return { ok: true };
+  });
+
+  ipcMain.handle('notepad:saveImage', (_event, docId: string, base64: string, ext: string) => {
+    if (!safeId(docId)) throw new Error('invalid doc id');
+    const cleanExt = (ext || 'png').replace(/[^a-zA-Z0-9]/g, '').slice(0, 5) || 'png';
+    const docImgDir = path.join(NOTEPAD_IMAGES_DIR, docId);
+    if (!fs.existsSync(docImgDir)) fs.mkdirSync(docImgDir, { recursive: true });
+    const imgId = `img_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}.${cleanExt}`;
+    const filePath = path.join(docImgDir, imgId);
+    const buf = Buffer.from(base64.replace(/^data:image\/[a-z]+;base64,/, ''), 'base64');
+    fs.writeFileSync(filePath, buf);
+    return { url: `file://${filePath.replace(/\\/g, '/')}`, path: filePath };
+  });
+
   // Tier-aware telemetry with staggered system calls
   let telemetryInterval = 10_000;
   let telemetryTick = 0;

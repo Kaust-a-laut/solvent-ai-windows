@@ -63,7 +63,7 @@ const CODE_REQUEST_REGEX = /code|build|implement|create|react|html|css|component
  * operationally (rate limits make it unreliable) — we don't want to spend
  * minutes cycling through flavors. Real workload runs on Fireworks/Groq/etc.
  */
-const GEMINI_MODEL_CHAIN = ['gemini-3-pro-preview', 'gemini-3-flash-preview'];
+const GEMINI_MODEL_CHAIN = ['gemini-3.1-pro-preview', 'gemini-3-flash-preview'];
 
 // --- Types ---
 
@@ -253,6 +253,100 @@ export class AIService {
         error: err.message
       });
       throw error;
+    }
+  }
+
+  /**
+   * Streaming chat: same context enrichment as processChat, but yields token deltas.
+   * Falls back to non-streaming completion (single yield) if the provider lacks
+   * generateChatStream. Tool calls and image generation are NOT supported on this path —
+   * the frontend should route image-intent prompts through the non-streaming endpoint.
+   */
+  async *processChatStream(data: ChatRequestData, signal?: AbortSignal): AsyncGenerator<{ type: 'token'; value: string } | { type: 'done'; model: string; provider: string; traceId: string }> {
+    const startTime = Date.now();
+    const { provider, model, mode, temperature, maxTokens, apiKeys, thinkingModeEnabled } = data;
+
+    const corrAdj = this.sessionMinScoreAdj.get(data.sessionId || 'unknown') || 0;
+    if (corrAdj > 0) data.minScoreAdjustment = corrAdj;
+
+    const { messages: enrichedMessages } = await this.enrichContext(data);
+    const normalizedMessages = normalizeMessages(enrichedMessages);
+
+    const sessionId = data.sessionId || 'unknown';
+    const prevTraceId = this.lastTraceBySession.get(sessionId);
+    if (prevTraceId) {
+      traceLogger.updateOutcome(prevTraceId, 'accepted').catch(() => {});
+    }
+    const traceId = uuidv4();
+    this.lastTraceBySession.set(sessionId, traceId);
+    this.traceToSession.set(traceId, sessionId);
+
+    const contextBudget = getContextBudget(model, maxTokens || 2048);
+    const { messages: windowedMessages } = await fitConversation(normalizedMessages, contextBudget.history);
+    const finalMessages = this.injectThinkingMode(windowedMessages, thinkingModeEnabled);
+
+    let collected = '';
+    let resolvedProvider = provider;
+    let resolvedModel = model;
+
+    try {
+      const selectedProvider = await AIProviderFactory.getProvider(provider);
+      if (typeof selectedProvider.generateChatStream === 'function') {
+        const iter = selectedProvider.generateChatStream(finalMessages, {
+          model,
+          temperature,
+          maxTokens,
+          apiKey: apiKeys?.[provider],
+          signal,
+          shouldSearch: false,
+        });
+        for await (const chunk of iter) {
+          if (signal?.aborted) break;
+          collected += chunk;
+          yield { type: 'token', value: chunk };
+        }
+        await circuitBreaker.recordSuccess(provider).catch(() => {});
+      } else {
+        // Provider doesn't stream — fall back to single-shot completion delivered as one chunk
+        logger.info(`[AIService] Provider ${provider} has no streaming; falling back to non-streaming completion`);
+        const response = await providerSemaphore.run(() => selectedProvider.complete(finalMessages, {
+          model,
+          temperature,
+          maxTokens,
+          apiKey: apiKeys?.[provider],
+        }));
+        collected = response;
+        yield { type: 'token', value: response };
+      }
+    } catch (err) {
+      const e = err instanceof Error ? err : new Error(String(err));
+      await circuitBreaker.recordFailure(provider).catch(() => {});
+      logger.warn(`[AIService] Stream from ${provider} failed: ${e.message} — running non-streaming fallback chain`);
+      // Static fallback chain — emit the result as a single chunk (no streaming on fallback)
+      const fallback = await this.handleFallbacks(finalMessages, mode, undefined, temperature, maxTokens, e, apiKeys, provider);
+      collected = fallback.response;
+      resolvedModel = fallback.model;
+      resolvedProvider = fallback.info?.replace(' fallback', '') || provider;
+      yield { type: 'token', value: fallback.response };
+    }
+
+    yield { type: 'done', model: resolvedModel, provider: resolvedProvider, traceId };
+
+    // Telemetry + memory consolidation (fire-and-forget, doesn't block the consumer)
+    telemetryService.logTransaction({
+      id: uuidv4(),
+      type: 'chat',
+      model: resolvedModel,
+      provider: resolvedProvider,
+      latencyMs: Date.now() - startTime,
+      tokensOut: Math.ceil(collected.length / 4),
+      status: 'success',
+    }).catch(() => {});
+
+    if (mode && collected) {
+      const allMessages = [...finalMessages, { role: 'assistant' as const, content: collected }];
+      memoryConsolidationService.scheduleConsolidation(mode, allMessages);
+      memoryConsolidationService.scheduleKnowledgeExtraction(collected);
     }
   }
 
