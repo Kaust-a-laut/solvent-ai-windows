@@ -13,6 +13,8 @@ import nodePath from 'path';
 import { PROJECT_ROOT, getEffectiveProjectRoot } from '../utils/fileSystem';
 import { agentScratchpadService } from './agentScratchpad';
 import { delegationService, parseDelegationTags } from './delegationService';
+import { getErrorMessage } from '../utils/errorMessage';
+import { providerHttpAgent, providerHttpsAgent } from '../utils/httpAgents';
 
 /**
  * Simple XML tool call parser using string operations to avoid regex issues.
@@ -106,6 +108,16 @@ export function isProblematicToolResult(result: unknown): boolean {
 
 const TRUTHFULNESS_NOTE =
   '[System note: One or more tools in this turn did not fully complete — some results were deferred for user approval or returned errors. Reconcile your final response with the tool activity feed instead of claiming unconditional success.]\n\n';
+
+/**
+ * Returned to the model when its tool-call `arguments` field can't be parsed
+ * as JSON. Almost always caused by max_tokens truncating mid-emit; the
+ * recovery hint nudges the model toward smaller tool inputs (e.g. ide_show_diff
+ * or chunked write_file calls) rather than retrying the same oversized call.
+ */
+export function buildToolArgsTruncatedMessage(parseError: string): string {
+  return `Tool arguments could not be parsed as JSON (${parseError}). This usually means the model's response was truncated because max_tokens was exceeded. Retry with smaller content — e.g. use ide_show_diff for file edits so the change is reviewed, or break the write into multiple smaller write_file calls.`;
+}
 
 export function prependTruthfulnessNote(finalText: string, hadProblems: boolean): string {
   if (!hadProblems) return finalText;
@@ -265,12 +277,28 @@ function detectProjectRootFromFiles(changedFiles: string[]): string {
 async function getTscErrors(cwd: string): Promise<string[]> {
   return new Promise((resolve) => {
     let out = '';
+    let settled = false;
     const proc = nodeSpawn('npx', ['tsc', '--noEmit', '--pretty', 'false'], { cwd, shell: process.platform === 'win32' });
-    const timer = setTimeout(() => { proc.kill(); resolve([]); }, 15_000);
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      proc.kill();
+      resolve([]);
+    }, 15_000);
     proc.stdout.on('data', (d: Buffer) => { out += d.toString(); });
     proc.stderr.on('data', (d: Buffer) => { out += d.toString(); });
-    proc.on('close', () => { clearTimeout(timer); resolve(out.split('\n').filter(Boolean)); });
-    proc.on('error', () => { clearTimeout(timer); resolve([]); });
+    proc.on('close', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(out.split('\n').filter(Boolean));
+    });
+    proc.on('error', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve([]);
+    });
   });
 }
 
@@ -289,19 +317,27 @@ async function autoVerify(
   }
 
   return new Promise((resolve) => {
+    let settled = false;
     const proc = nodeSpawn(
       'npx',
       ['tsc', '--noEmit', '--pretty', 'false'],
       { cwd: projectRoot, shell: process.platform === 'win32' }
     );
 
-    const timer = setTimeout(() => { proc.kill(); resolve(null); }, 30_000);
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      proc.kill();
+      resolve(null);
+    }, 30_000);
 
     let output = '';
     proc.stdout.on('data', (d: Buffer) => { output += d.toString(); });
     proc.stderr.on('data', (d: Buffer) => { output += d.toString(); });
 
     proc.on('close', (code) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       if (code === 0) { resolve(null); return; }
 
@@ -329,7 +365,12 @@ async function autoVerify(
       resolve(relevant.slice(0, 10).join('\n') || null);
     });
 
-    proc.on('error', () => { clearTimeout(timer); resolve(null); }); // tsc unavailable — skip silently
+    proc.on('error', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(null);
+    }); // tsc unavailable — skip silently
   });
 }
 
@@ -495,6 +536,8 @@ export abstract class BaseOpenAIService implements AIProvider {
               ...(this.getExtraHeaders?.() || {})
             },
             timeout: config.AI_PROVIDER_TIMEOUT_MS ?? 120_000,
+            httpAgent: providerHttpAgent,
+            httpsAgent: providerHttpsAgent,
             signal: options.signal
           }
         );
@@ -519,7 +562,7 @@ export abstract class BaseOpenAIService implements AIProvider {
         for (const { toolCall, name, args, parseError } of parsed) {
           if (parseError) {
             hadProblems = true;
-            const msg = `Tool arguments could not be parsed as JSON (${parseError}). Likely truncated by max_tokens; retry with smaller content or use ide_show_diff for file edits.`;
+            const msg = buildToolArgsTruncatedMessage(parseError);
             logger.error(`[${this.name}] Tool args parse error (${name}): ${parseError}`);
             currentMessages.push({
               role: 'tool',
@@ -580,8 +623,7 @@ export abstract class BaseOpenAIService implements AIProvider {
 
       throw new Error(`${this.name} agent exceeded maximum tool-calling iterations.`);
     } catch (error: unknown) {
-      const err = error as { response?: { data?: { error?: { message?: string } } }; message?: string };
-      const errorMsg = err.response?.data?.error?.message || err.message;
+      const errorMsg = getErrorMessage(error);
       const ctx = summarizeRequest(currentMessages);
       logger.error(`[${this.name}] Request Failed at iter=${iteration}/${maxIterations} msgs=${ctx.msgs} payload=${ctx.kb}KB: ${errorMsg}`);
       logLargestMessages(this.name, currentMessages, ctx.kb);
@@ -623,13 +665,13 @@ export abstract class BaseOpenAIService implements AIProvider {
           },
           timeout: config.AI_PROVIDER_TIMEOUT_MS ?? 120_000,
           responseType: 'stream',
+          httpAgent: providerHttpAgent,
+          httpsAgent: providerHttpsAgent,
           signal: options.signal,
         }
       );
     } catch (err) {
-      const e = err as { response?: { data?: { error?: { message?: string } } }; message?: string };
-      const msg = e.response?.data?.error?.message || e.message || 'unknown';
-      throw new Error(`${this.name} stream request failed: ${msg}`);
+      throw new Error(`${this.name} stream request failed: ${getErrorMessage(err)}`);
     }
 
     const stream = response.data as import('stream').Readable;
@@ -785,6 +827,8 @@ export abstract class BaseOpenAIService implements AIProvider {
             },
             responseType: 'stream',
             timeout: config.AI_PROVIDER_TIMEOUT_MS ?? 120_000,
+            httpAgent: providerHttpAgent,
+            httpsAgent: providerHttpsAgent,
             signal: options.signal,
           }
         );
@@ -1063,7 +1107,7 @@ export abstract class BaseOpenAIService implements AIProvider {
           if (parseError) {
             hadProblems = true;
             consecutiveFailures++;
-            const msg = `Tool arguments could not be parsed as JSON (${parseError}). This usually means the model's response was truncated because max_tokens was exceeded. Retry with smaller content — e.g. use ide_show_diff for file edits so the change is reviewed, or break the write into multiple smaller write_file calls.`;
+            const msg = buildToolArgsTruncatedMessage(parseError);
             logger.error(`[${this.name}] Tool args parse error (${name}): ${parseError}`);
             onEvent({ type: 'tool_error', tool: name, error: msg, iteration, callId });
             currentMessages.push({
@@ -1206,8 +1250,7 @@ export abstract class BaseOpenAIService implements AIProvider {
 
       throw new Error(`${this.name} agent exceeded maximum tool-calling iterations.`);
     } catch (error: unknown) {
-      const err = error as { response?: { data?: { error?: { message?: string } } }; message?: string };
-      const errorMsg = err.response?.data?.error?.message || err.message;
+      const errorMsg = getErrorMessage(error);
       const ctx = summarizeRequest(currentMessages);
       logger.error(`[${this.name}] Request Failed at iter=${iteration}/${maxIterations} msgs=${ctx.msgs} payload=${ctx.kb}KB: ${errorMsg}`);
       logLargestMessages(this.name, currentMessages, ctx.kb);

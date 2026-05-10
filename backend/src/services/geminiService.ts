@@ -66,7 +66,28 @@ export class GeminiService implements AIProvider {
 
       // Handle Tool Calls (Recursive)
       while (call && call.functionCall) {
-        const toolResult = await toolService.executeTool(call.functionCall.name, call.functionCall.args as Record<string, unknown>);
+        const rawArgs = call.functionCall.args;
+        const isPlainArgsObject =
+          rawArgs != null &&
+          typeof rawArgs === 'object' &&
+          !Array.isArray(rawArgs);
+
+        let toolResult: unknown;
+        if (!isPlainArgsObject) {
+          // Gemini occasionally hands back malformed function-call args. Surface
+          // a structured error to the next turn so the model can self-correct
+          // instead of forwarding garbage into toolService.executeTool, which
+          // assumes a Record<string, unknown>.
+          logger.warn(`[GeminiService] Invalid functionCall.args for ${call.functionCall.name}: ${typeof rawArgs}`);
+          toolResult = {
+            error: `Tool arguments must be a JSON object. Received ${Array.isArray(rawArgs) ? 'array' : typeof rawArgs}.`
+          };
+        } else {
+          toolResult = await toolService.executeTool(
+            call.functionCall.name,
+            rawArgs as Record<string, unknown>
+          );
+        }
 
         const fnResponse = {
           functionResponse: {
@@ -76,9 +97,16 @@ export class GeminiService implements AIProvider {
         };
 
         // If it was a UI capture, inject the image into the next turn for visual reasoning
+        const captureBase64 =
+          call.functionCall.name === 'capture_ui' &&
+          toolResult != null &&
+          typeof toolResult === 'object' &&
+          typeof (toolResult as { base64?: unknown }).base64 === 'string'
+            ? (toolResult as { base64: string }).base64
+            : undefined;
         let messageParts: Parameters<typeof chat.sendMessage>[0];
-        if (call.functionCall.name === 'capture_ui' && toolResult.base64) {
-          const imageInfo = extractImageFromDataUrl(toolResult.base64);
+        if (captureBase64) {
+          const imageInfo = extractImageFromDataUrl(captureBase64);
           if (imageInfo) {
             messageParts = [
               fnResponse,

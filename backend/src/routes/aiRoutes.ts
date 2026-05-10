@@ -12,6 +12,7 @@ import { ConversationStorageService } from '../services/conversationStorageServi
 import { handleRouteError } from '../utils/routeErrors';
 import { logger } from '../utils/logger';
 import { PathSecurityError, resolveSecureChildPath } from '../utils/pathSecurity';
+import { fetchLinkPreview } from '../services/linkPreviewService';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -34,7 +35,6 @@ router.post('/notepad/link-preview', async (req, res) => {
     return res.status(400).json({ error: 'Invalid url' });
   }
   try {
-    const { fetchLinkPreview } = await import('../services/linkPreviewService');
     const preview = await fetchLinkPreview(parsed.data.url);
     res.json(preview);
   } catch (err) {
