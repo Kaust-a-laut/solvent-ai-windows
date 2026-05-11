@@ -16,12 +16,91 @@ describe('SqliteService schema migration', () => {
 
   it('creates a fresh schema and stores memory', () => {
     const service = new SqliteService(dbPath);
-    service.insertMemory('fresh-1', [0.1, 0.2], { type: 'test', tags: ['fresh'] });
+    // Float32-exact values so the BLOB round-trip is bitwise identical.
+    service.insertMemory('fresh-1', [0.5, 0.25], { type: 'test', tags: ['fresh'] });
     expect(service.getMemory('fresh-1')).toMatchObject({
       id: 'fresh-1',
-      vector: [0.1, 0.2],
+      vector: [0.5, 0.25],
       metadata: { type: 'test', tags: ['fresh'] },
     });
+    service.db.close();
+  });
+
+  it('stores vectors as BLOB and round-trips through Float32', () => {
+    const service = new SqliteService(dbPath);
+    const vec = [0.5, 0.25, -0.125, 0]; // f32-exact
+    service.insertMemory('blob-1', vec, { type: 'blob' });
+
+    // Read raw row — vector_blob must be populated, vector TEXT must be the
+    // placeholder. This pins the on-disk layout, not just the public API.
+    const raw = service.db
+      .prepare(`SELECT vector, vector_blob FROM memory_entries WHERE id = ?`)
+      .get('blob-1') as { vector: string; vector_blob: Buffer | null };
+    expect(raw.vector).toBe('[]');
+    expect(raw.vector_blob).toBeInstanceOf(Buffer);
+    expect(raw.vector_blob!.byteLength).toBe(vec.length * 4);
+
+    expect(service.getMemory('blob-1')?.vector).toEqual(vec);
+    service.db.close();
+  });
+
+  it('falls back to JSON vector for legacy rows with NULL vector_blob', () => {
+    // Build a row that looks like a pre-V2 write: vector TEXT populated, blob null.
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE memory_entries (
+        id TEXT PRIMARY KEY,
+        vector TEXT NOT NULL DEFAULT '[]',
+        metadata TEXT NOT NULL DEFAULT '{}',
+        type TEXT,
+        tags TEXT,
+        created_at DATETIME
+      );
+      INSERT INTO memory_entries (id, vector, metadata) VALUES ('legacy-blob', '[0.5,0.25]', '{"type":"legacy"}');
+    `);
+    db.close();
+
+    const service = new SqliteService(dbPath);
+    // Migration adds vector_blob column; existing row should still decode.
+    expect(service.getMemory('legacy-blob')).toMatchObject({
+      id: 'legacy-blob',
+      vector: [0.5, 0.25],
+      metadata: { type: 'legacy' },
+    });
+
+    // After updating, the same row should re-emit as BLOB.
+    service.insertMemory('legacy-blob', [0.75, -0.5], { type: 'legacy', tags: ['migrated'] });
+    const raw = service.db
+      .prepare(`SELECT vector, vector_blob FROM memory_entries WHERE id = ?`)
+      .get('legacy-blob') as { vector: string; vector_blob: Buffer | null };
+    expect(raw.vector).toBe('[]');
+    expect(raw.vector_blob).toBeInstanceOf(Buffer);
+    expect(service.getMemory('legacy-blob')?.vector).toEqual([0.75, -0.5]);
+    service.db.close();
+  });
+
+  it('getAllMemoriesAsync decodes a mixed store (BLOB + legacy TEXT)', async () => {
+    const db = new Database(dbPath);
+    db.exec(`
+      CREATE TABLE memory_entries (
+        id TEXT PRIMARY KEY,
+        vector TEXT NOT NULL DEFAULT '[]',
+        metadata TEXT NOT NULL DEFAULT '{}',
+        type TEXT,
+        tags TEXT,
+        created_at DATETIME
+      );
+      INSERT INTO memory_entries (id, vector, metadata) VALUES ('legacy', '[0.5,0.25]', '{}');
+    `);
+    db.close();
+
+    const service = new SqliteService(dbPath);
+    service.insertMemory('modern', [0.125, -0.0625], {});
+
+    const all = await service.getAllMemoriesAsync();
+    const byId = new Map(all.map(e => [e.id, e.vector]));
+    expect(byId.get('legacy')).toEqual([0.5, 0.25]);
+    expect(byId.get('modern')).toEqual([0.125, -0.0625]);
     service.db.close();
   });
 
