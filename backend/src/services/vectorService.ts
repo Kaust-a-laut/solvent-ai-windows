@@ -56,6 +56,9 @@ export class VectorService {
   private dbPath: string;
   private embeddingCachePath: string;
   private memory: VectorEntry[] = [];
+  // O(1) id → entry lookup. Shadows `this.memory` and MUST be kept in sync via
+  // trackEntry/untrackEntry (or a rebuildIndices() pass for bulk resets).
+  private memoryById: Map<string, VectorEntry> = new Map();
   private isIndexing: boolean = false;
   private embeddingCache: Map<string, CachedEmbedding> = new Map();
   private embeddingCacheLoaded: Promise<void>;
@@ -165,6 +168,7 @@ export class VectorService {
       if (!recovered) {
         logger.warn('[VectorService] Starting with empty memory.');
         this.memory = [];
+        this.memoryById.clear();
       }
     }
   }
@@ -259,9 +263,32 @@ export class VectorService {
     this.typeIndex.clear();
     this.tagIndex.clear();
     this.symbolIndex.clear();
+    this.memoryById.clear();
     for (const entry of this.memory) {
+      this.memoryById.set(entry.id, entry);
       this.addToIndices(entry);
     }
+  }
+
+  // Single insertion point for new entries — keeps this.memory and
+  // this.memoryById in lockstep. Eviction and bulk-reset paths bypass this and
+  // call rebuildIndices() instead.
+  private trackEntry(entry: VectorEntry): void {
+    this.memory.push(entry);
+    this.memoryById.set(entry.id, entry);
+  }
+
+  // Removes a single entry from the in-memory array + id map. Returns the
+  // splice index for callers that need to know whether anything was removed.
+  // Linear over this.memory by design (id index can't replace splice without
+  // breaking iteration order); bulk delete paths should still prefer a single
+  // filter + map.clear sequence.
+  private untrackEntry(id: string): number {
+    const idx = this.memory.findIndex(m => m.id === id);
+    if (idx === -1) return -1;
+    this.memory.splice(idx, 1);
+    this.memoryById.delete(id);
+    return idx;
   }
 
   private addToIndices(entry: VectorEntry) {
@@ -291,7 +318,7 @@ export class VectorService {
   }
 
   private removeFromIndices(id: string) {
-    const entry = this.memory.find(m => m.id === id);
+    const entry = this.memoryById.get(id);
     if (!entry) return;
 
     if (this.hnswIndex && this.useHNSW) {
@@ -358,6 +385,7 @@ export class VectorService {
     for (const entry of entriesToDelete) {
       this.removeFromIndices(entry.id);
       sqliteService.deleteMemory(entry.id);
+      this.memoryById.delete(entry.id);
     }
     this.memory = this.memory.filter(e => e.metadata.filePath !== filePath);
     await this.saveMemory();
@@ -368,7 +396,7 @@ export class VectorService {
    * Add links to an existing entry
    */
   async addLinks(entryId: string, links: Array<{ targetId: string; type: string }>) {
-    const entry = this.memory.find(e => e.id === entryId);
+    const entry = this.memoryById.get(entryId);
     if (!entry) return false;
 
     if (!entry.metadata.links) {
@@ -685,7 +713,7 @@ export class VectorService {
       }
     };
 
-    this.memory.push(entry);
+    this.trackEntry(entry);
     sqliteService.insertMemory(entry.id, entry.vector, entry.metadata);
     this.addToIndices(entry);
     if (this.hnswIndex && this.useHNSW) {
@@ -729,7 +757,7 @@ export class VectorService {
           links: normalizedLinks
         }
       };
-      this.memory.push(entry);
+      this.trackEntry(entry);
       sqliteService.insertMemory(entry.id, entry.vector, entry.metadata);
       this.addToIndices(entry);
       if (this.hnswIndex && this.useHNSW) {
@@ -865,9 +893,9 @@ export class VectorService {
 
                       for (const id of addedIds) {
 
-    
 
-                        const entry = this.memory.find(m => m.id === id);
+
+                        const entry = this.memoryById.get(id);
 
     
 
@@ -1108,10 +1136,9 @@ export class VectorService {
       }
 
     async updateEntry(id: string, updates: Partial<VectorMetadata>) {
-      const index = this.memory.findIndex(m => m.id === id);
-      if (index === -1) return false;
+      const entry = this.memoryById.get(id);
+      if (!entry) return false;
 
-      const entry = this.memory[index]!;
       this.removeFromIndices(id);
 
       entry.metadata = {
@@ -1123,12 +1150,11 @@ export class VectorService {
       sqliteService.insertMemory(entry.id, entry.vector, entry.metadata);
       await this.saveMemory();      return true;
     }
-  
-    async deprecateEntry(id: string, reason: string) {
-      const index = this.memory.findIndex(m => m.id === id);
-      if (index === -1) return false;
 
-      const entry = this.memory[index]!;
+    async deprecateEntry(id: string, reason: string) {
+      const entry = this.memoryById.get(id);
+      if (!entry) return false;
+
       entry.metadata = {
         ...entry.metadata,
         status: 'deprecated',
@@ -1153,7 +1179,7 @@ export class VectorService {
           // Map back to full entries and apply filters
           const entries: (VectorEntry & { score: number })[] = [];
           for (const { id, distance } of results) {
-            const entry = this.memory.find(m => m.id === id);
+            const entry = this.memoryById.get(id);
             if (entry && entry.metadata.status !== 'deprecated') {
               entries.push({ ...entry, score: 1 - distance }); // Convert distance to similarity
             }
@@ -1262,7 +1288,7 @@ export class VectorService {
                         const linkId = typeof link === 'string' ? link : link.targetId;
                         if (!expandedResults.find(r => r.id === linkId)) {
 
-                          const targetEntry = this.memory.find(m => m.id === linkId);
+                          const targetEntry = this.memoryById.get(linkId);
 
                           if (targetEntry) {
 
@@ -1309,7 +1335,7 @@ export class VectorService {
   }
 
   async findRelated(id: string, limit: number = 3) {
-    const target = this.memory.find(m => m.id === id);
+    const target = this.memoryById.get(id);
     if (!target) return [];
 
     return this.memory
@@ -1327,10 +1353,12 @@ export class VectorService {
   }
 
   getEntriesByIds(ids: string[]) {
-    // Filter to only return entries that exist and filter out any undefined results
-    return this.memory
-      .filter((m): m is VectorEntry => m !== undefined && ids.includes(m.id))
-      .filter(Boolean);
+    const out: VectorEntry[] = [];
+    for (const id of ids) {
+      const entry = this.memoryById.get(id);
+      if (entry) out.push(entry);
+    }
+    return out;
   }
 
   getMemoryInternal() {
@@ -1376,7 +1404,7 @@ export class VectorService {
    * Get a single entry by ID.
    */
   getEntryById(id: string): (VectorEntry & { score: number }) | null {
-    const entry = this.memory.find(e => e.id === id);
+    const entry = this.memoryById.get(id);
     if (!entry || entry.metadata.status === 'deprecated') return null;
     return { ...entry, score: 0 };
   }
@@ -1387,7 +1415,7 @@ export class VectorService {
   async recordRetrieval(ids: string[]): Promise<void> {
     let changed = false;
     for (const id of ids) {
-      const entry = this.memory.find(e => e.id === id);
+      const entry = this.memoryById.get(id);
       if (entry) {
         entry.metadata.retrievalCount = Number(entry.metadata.retrievalCount || 0) + 1;
         sqliteService.insertMemory(entry.id, entry.vector, entry.metadata);
