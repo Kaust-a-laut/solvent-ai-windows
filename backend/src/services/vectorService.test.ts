@@ -81,6 +81,34 @@ describe('VectorService Enhancements', () => {
     expect(results).toHaveLength(1);
     expect(results[0]!.metadata.type).toBe(type);
   });
+
+  it('LRU embedding cache evicts the coldest key by access order', async () => {
+    // Swap in a small cache for this test, then restore.
+    const { LRUCache } = await import('lru-cache');
+    const original = (vectorService as any).embeddingCache;
+    (vectorService as any).embeddingCache = new LRUCache<string, any>({ max: 3 });
+
+    try {
+      await vectorService.getEmbedding('cold-key-a');
+      await vectorService.getEmbedding('cold-key-b');
+      await vectorService.getEmbedding('cold-key-c');
+
+      // Touch A so B becomes the coldest.
+      await vectorService.getEmbedding('cold-key-a');
+
+      // Adding a 4th key should evict B (oldest by access), not C (newest by access).
+      await vectorService.getEmbedding('cold-key-d');
+
+      const cache = (vectorService as any).embeddingCache;
+      expect(cache.size).toBe(3);
+      expect(cache.has('cold-key-a')).toBe(true);
+      expect(cache.has('cold-key-b')).toBe(false);
+      expect(cache.has('cold-key-c')).toBe(true);
+      expect(cache.has('cold-key-d')).toBe(true);
+    } finally {
+      (vectorService as any).embeddingCache = original;
+    }
+  });
 });
 
 describe('Embedding Cache Persistence', () => {

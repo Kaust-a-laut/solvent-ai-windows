@@ -1,4 +1,5 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
+import { LRUCache } from 'lru-cache';
 import { config } from '../config';
 import fs from 'fs/promises';
 import { statSync } from 'fs';
@@ -60,7 +61,9 @@ export class VectorService {
   // trackEntry/untrackEntry (or a rebuildIndices() pass for bulk resets).
   private memoryById: Map<string, VectorEntry> = new Map();
   private isIndexing: boolean = false;
-  private embeddingCache: Map<string, CachedEmbedding> = new Map();
+  // O(1) eviction via lru-cache v11. Initialized in the constructor so we can
+  // read MAX_CACHE_SIZE without depending on field-initializer ordering.
+  private embeddingCache!: LRUCache<string, CachedEmbedding>;
   private embeddingCacheLoaded: Promise<void>;
   private newEntriesSinceLastDream: number = 0;
   private readonly SATURATION_THRESHOLD = 200;
@@ -87,6 +90,7 @@ export class VectorService {
   public symbolIndex: Map<string, string> = new Map(); // symbol -> entryId
 
   constructor() {
+    this.embeddingCache = new LRUCache({ max: this.MAX_CACHE_SIZE });
     if (config.GEMINI_API_KEY) {
       this.genAI = new GoogleGenerativeAI(config.GEMINI_API_KEY);
     }
@@ -657,22 +661,7 @@ export class VectorService {
   }
 
   private cacheEmbedding(text: string, vector: number[]) {
-    // LRU Eviction: Remove least recently accessed entry when at capacity
-    if (this.embeddingCache.size >= this.MAX_CACHE_SIZE) {
-      let oldestKey: string | null = null;
-      let oldestTime = Infinity;
-      for (const [key, val] of this.embeddingCache.entries()) {
-        if (val.lastAccess < oldestTime) {
-          oldestTime = val.lastAccess;
-          oldestKey = key;
-        }
-      }
-      if (oldestKey) {
-        this.embeddingCache.delete(oldestKey);
-        logger.debug(`[VectorService] LRU eviction: ${oldestKey}`);
-      }
-    }
-    
+    // lru-cache handles eviction internally in O(1); we just set.
     this.embeddingCache.set(text, { vector, lastAccess: Date.now(), dirty: true });
     memoryMetrics.updateCacheSize(this.embeddingCache.size);
 
