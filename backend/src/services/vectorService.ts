@@ -6,7 +6,6 @@ import { statSync } from 'fs';
 import path from 'path';
 import { logger } from '../utils/logger';
 import { CrystallizedMemory, CrystallizedRule, SuccessPattern, SupervisoryInsight } from '../types/memory';
-import { AtomicFileSystem } from '../utils/fileSystem';
 import { BackupManager } from '../utils/backupManager';
 import { HNSWIndex } from '../utils/hnswIndex';
 import { memoryMetrics } from '../utils/memoryMetrics';
@@ -90,7 +89,22 @@ export class VectorService {
   public symbolIndex: Map<string, string> = new Map(); // symbol -> entryId
 
   constructor() {
-    this.embeddingCache = new LRUCache({ max: this.MAX_CACHE_SIZE });
+    this.embeddingCache = new LRUCache({
+      max: this.MAX_CACHE_SIZE,
+      // V4: drop the on-disk row only when the LRU genuinely evicts an entry
+      // because it's full. lru-cache also calls dispose on 'set' (overwrite)
+      // and 'delete' (explicit/.clear()) — both are correctness-neutral for the
+      // disk layer, and treating them as evictions would wipe SQLite on every
+      // reload. The next persist cycle will upsert the new in-memory value.
+      dispose: (_value, key, reason) => {
+        if (reason !== 'evict') return;
+        try {
+          sqliteService.deleteEmbedding(key);
+        } catch (e) {
+          logger.debug(`[VectorService] deleteEmbedding on evict failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      },
+    });
     if (config.GEMINI_API_KEY) {
       this.genAI = new GoogleGenerativeAI(config.GEMINI_API_KEY);
     }
@@ -198,66 +212,87 @@ export class VectorService {
 
   async loadEmbeddingCache() {
     try {
-      const data = await fs.readFile(this.embeddingCachePath, 'utf-8');
-      const parsed = JSON.parse(data);
-
-      // Validate structure
-      if (!Array.isArray(parsed)) {
-        logger.warn('[VectorService] Embedding cache file has invalid format, starting fresh.');
+      const dbCount = sqliteService.countEmbeddings();
+      if (dbCount > 0) {
+        const rows = await sqliteService.getAllEmbeddingsAsync();
+        this.embeddingCache.clear();
+        for (const row of rows) {
+          this.embeddingCache.set(row.text, {
+            vector: row.vector,
+            lastAccess: row.lastAccess,
+            dirty: false,
+          });
+        }
+        logger.info(`[VectorService] Loaded ${rows.length} cached embeddings from SQLite.`);
         return;
       }
 
+      // First boot after V4 upgrade — migrate the legacy JSON cache once, then
+      // unlink the file so we don't re-migrate on every restart.
+      let parsed: unknown;
+      try {
+        const data = await fs.readFile(this.embeddingCachePath, 'utf-8');
+        parsed = JSON.parse(data);
+      } catch (e: unknown) {
+        const err = e as NodeJS.ErrnoException;
+        if (err.code === 'ENOENT') {
+          logger.debug('[VectorService] No legacy embedding cache file; starting fresh.');
+        } else {
+          logger.warn(`[VectorService] Failed to read legacy cache file: ${err.message}. Starting fresh.`);
+        }
+        return;
+      }
+
+      if (!Array.isArray(parsed)) {
+        logger.warn('[VectorService] Legacy embedding cache file has invalid format; skipping migration.');
+        return;
+      }
+
+      const migrationPayload: Array<{ text: string; vector: number[]; lastAccess: number }> = [];
       this.embeddingCache.clear();
-      let loadedCount = 0;
       for (const entry of parsed) {
-        // Validate each entry has required fields
         if (entry && typeof entry.text === 'string' && Array.isArray(entry.vector)) {
-          // Mark loaded entries as clean (not dirty) since they match disk state
+          const lastAccess = entry.lastAccess || Date.now();
           this.embeddingCache.set(entry.text, {
             vector: entry.vector,
-            lastAccess: entry.lastAccess || Date.now(),
-            dirty: false
+            lastAccess,
+            dirty: false,
           });
-          loadedCount++;
+          migrationPayload.push({ text: entry.text, vector: entry.vector, lastAccess });
         }
       }
-      logger.info(`[VectorService] Loaded ${loadedCount} cached embeddings from disk.`);
-    } catch (e: unknown) {
-      const err = e as NodeJS.ErrnoException;
-      if (err.code === 'ENOENT') {
-        // File doesn't exist yet, that's fine
-        logger.debug('[VectorService] No embedding cache file found, starting fresh.');
-      } else {
-        // JSON parse error or other issue
-        logger.warn(`[VectorService] Failed to load embedding cache: ${err.message}. Starting fresh.`);
+
+      if (migrationPayload.length > 0) {
+        sqliteService.upsertEmbeddings(migrationPayload);
+        await fs.unlink(this.embeddingCachePath).catch(() => { /* best effort */ });
+        logger.info(`[VectorService] Migrated ${migrationPayload.length} cached embeddings from JSON to SQLite (legacy file removed).`);
       }
+    } catch (e: unknown) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      logger.warn(`[VectorService] Failed to load embedding cache from SQLite: ${err.message}. Starting fresh.`);
     }
   }
 
   async persistEmbeddingCache() {
     try {
-      // Check if any dirty entries exist before writing; skip if nothing changed
-      const hasDirty = Array.from(this.embeddingCache.values()).some(v => v.dirty);
-      if (!hasDirty) {
+      const now = Date.now();
+      const dirty: Array<{ text: string; entry: CachedEmbedding }> = [];
+      for (const [text, entry] of this.embeddingCache.entries()) {
+        if (entry.dirty) dirty.push({ text, entry });
+      }
+      if (dirty.length === 0) {
         logger.debug('[VectorService] No dirty entries to persist.');
         return;
       }
 
-      // Write ALL entries so a reload doesn't lose clean entries from a prior persist
-      const allEntries = Array.from(this.embeddingCache.entries())
-        .map(([text, { vector, lastAccess }]) => ({
-          text,
-          vector,
-          lastAccess
-        }));
-
-      await AtomicFileSystem.writeJson(this.embeddingCachePath, allEntries);
-      logger.info(`[VectorService] Persisted ${allEntries.length} embeddings to cache file.`);
-
-      // Mark all entries as clean after successful persist
-      for (const entry of this.embeddingCache.values()) {
-        entry.dirty = false;
-      }
+      const payload = dirty.map(d => ({
+        text: d.text,
+        vector: d.entry.vector,
+        lastAccess: d.entry.lastAccess || now,
+      }));
+      sqliteService.upsertEmbeddings(payload);
+      for (const d of dirty) d.entry.dirty = false;
+      logger.info(`[VectorService] Persisted ${dirty.length} dirty embeddings to SQLite.`);
     } catch (error) {
       logger.error('[VectorService] Failed to persist embedding cache', error);
     }

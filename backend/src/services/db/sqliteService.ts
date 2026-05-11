@@ -45,6 +45,16 @@ export class SqliteService {
       // and IF NOT EXISTS makes the call idempotent across migrations.
       this.db.exec(`CREATE INDEX IF NOT EXISTS idx_memory_entries_type ON memory_entries(type)`);
       this.db.exec(`CREATE INDEX IF NOT EXISTS idx_memory_entries_created_at ON memory_entries(created_at)`);
+      // V4: embedding cache, replacing the legacy .solvent_embedding_cache.json
+      // full-file rewrite with per-row upserts.
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS embedding_cache (
+          text_key TEXT PRIMARY KEY,
+          vector BLOB NOT NULL,
+          last_access INTEGER NOT NULL
+        );
+      `);
+      this.db.exec(`CREATE INDEX IF NOT EXISTS idx_embedding_cache_last_access ON embedding_cache(last_access)`);
       logger.info('[SqliteService] Schema initialized successfully.');
     } catch (error) {
       logger.error('[SqliteService] Failed to initialize schema', error);
@@ -186,6 +196,68 @@ export class SqliteService {
    *
    * Decoding prefers the BLOB column; legacy JSON `vector` is the fallback.
    */
+  // --- embedding_cache (V4) ---
+
+  public upsertEmbedding(text: string, vector: number[], lastAccess: number): void {
+    const stmt = this.db.prepare(`
+      INSERT INTO embedding_cache (text_key, vector, last_access)
+      VALUES (?, ?, ?)
+      ON CONFLICT(text_key) DO UPDATE SET
+        vector = excluded.vector,
+        last_access = excluded.last_access
+    `);
+    stmt.run(text, this.encodeVector(vector), lastAccess);
+  }
+
+  // Batch variant — wraps a single transaction around N upserts. Use this for
+  // the persist cycle so we don't pay N fsyncs.
+  public upsertEmbeddings(entries: Array<{ text: string; vector: number[]; lastAccess: number }>): void {
+    if (entries.length === 0) return;
+    const stmt = this.db.prepare(`
+      INSERT INTO embedding_cache (text_key, vector, last_access)
+      VALUES (?, ?, ?)
+      ON CONFLICT(text_key) DO UPDATE SET
+        vector = excluded.vector,
+        last_access = excluded.last_access
+    `);
+    const tx = this.db.transaction((rows: Array<{ text: string; vector: number[]; lastAccess: number }>) => {
+      for (const r of rows) stmt.run(r.text, this.encodeVector(r.vector), r.lastAccess);
+    });
+    tx(entries);
+  }
+
+  public deleteEmbedding(text: string): void {
+    this.db.prepare(`DELETE FROM embedding_cache WHERE text_key = ?`).run(text);
+  }
+
+  public countEmbeddings(): number {
+    const row = this.db.prepare(`SELECT COUNT(*) as c FROM embedding_cache`).get() as { c: number };
+    return row.c;
+  }
+
+  // Async chunked load to keep the event loop responsive on large caches.
+  // Mirrors getAllMemoriesAsync's pattern.
+  public async getAllEmbeddingsAsync(chunkSize: number = 500): Promise<Array<{ text: string; vector: number[]; lastAccess: number }>> {
+    const stmt = this.db.prepare(`SELECT text_key, vector, last_access FROM embedding_cache`);
+    const out: Array<{ text: string; vector: number[]; lastAccess: number }> = [];
+    let i = 0;
+    for (const row of stmt.iterate() as IterableIterator<{ text_key: string; vector: Buffer; last_access: number }>) {
+      const buf = row.vector;
+      const f32 = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+      out.push({
+        text: row.text_key,
+        vector: Array.from(f32),
+        lastAccess: row.last_access,
+      });
+      if (++i % chunkSize === 0) {
+        await new Promise<void>(resolve => setImmediate(resolve));
+      }
+    }
+    return out;
+  }
+
+  // --- memory_entries async loader ---
+
   public async getAllMemoriesAsync(chunkSize: number = 500): Promise<Array<{ id: string; vector: number[]; metadata: unknown }>> {
     const stmt = this.db.prepare(`SELECT id, vector, vector_blob, metadata FROM memory_entries`);
     const out: Array<{ id: string; vector: number[]; metadata: unknown }> = [];

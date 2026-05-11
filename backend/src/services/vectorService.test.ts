@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 import { vectorService } from './vectorService';
+import { sqliteService } from './db/sqliteService';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -111,83 +112,129 @@ describe('VectorService Enhancements', () => {
   });
 });
 
-describe('Embedding Cache Persistence', () => {
+describe('Embedding Cache Persistence (SQLite)', () => {
+  beforeEach(() => {
+    // Isolate each test from leftover rows in the shared singleton DB.
+    sqliteService.db.exec('DELETE FROM embedding_cache');
+    (vectorService as any).embeddingCache.clear();
+  });
+
   afterEach(async () => {
-    // Clean up test cache file
+    // Clean up any legacy JSON file a migration test may have left behind.
     try {
       await fs.unlink(EMBEDDING_CACHE_PATH);
     } catch {
       // File may not exist, that's fine
     }
+    sqliteService.db.exec('DELETE FROM embedding_cache');
   });
 
-  it('should persist embedding cache to disk', async () => {
-    // Generate an embedding to populate cache
+  it('persists dirty embeddings to SQLite (no JSON file)', async () => {
     const text = 'Cache persistence test ' + Date.now();
     await vectorService.getEmbedding(text);
 
-    // Persist cache
+    expect(sqliteService.countEmbeddings()).toBe(0); // dirty, not yet flushed
     await vectorService.persistEmbeddingCache();
+    expect(sqliteService.countEmbeddings()).toBeGreaterThan(0);
 
-    // Verify file exists
-    const exists = await fs.access(EMBEDDING_CACHE_PATH).then(() => true).catch(() => false);
-    expect(exists).toBe(true);
-
-    // Verify content structure
-    const content = JSON.parse(await fs.readFile(EMBEDDING_CACHE_PATH, 'utf-8'));
-    expect(Array.isArray(content)).toBe(true);
-    expect(content.length).toBeGreaterThan(0);
-    expect(content[0]).toHaveProperty('text');
-    expect(content[0]).toHaveProperty('vector');
+    // V4 removed the JSON file write path entirely.
+    const jsonExists = await fs.access(EMBEDDING_CACHE_PATH).then(() => true).catch(() => false);
+    expect(jsonExists).toBe(false);
   });
 
-  it('should load embedding cache from disk on initialization', async () => {
-    // Create a mock cache file
-    const mockCache = [
-      { text: 'preloaded_test_entry', vector: new Array(768).fill(0.1), lastAccess: Date.now() }
-    ];
-    await fs.writeFile(EMBEDDING_CACHE_PATH, JSON.stringify(mockCache));
+  it('loads embedding cache from SQLite on initialization', async () => {
+    const preVec = new Array(768).fill(0); // f32-exact zeros
+    sqliteService.upsertEmbedding('preloaded_test_entry', preVec, Date.now());
 
-    // Force reload
+    (vectorService as any).embeddingCache.clear();
     await vectorService.loadEmbeddingCache();
 
-    // Verify cache was loaded (embedding call should be instant)
     const start = Date.now();
     const result = await vectorService.getEmbedding('preloaded_test_entry');
     const elapsed = Date.now() - start;
-
-    expect(elapsed).toBeLessThan(50); // Should be near-instant from cache
+    expect(elapsed).toBeLessThan(50);
     expect(result).toHaveLength(768);
   });
 
-  it('should persist and reload embedding cache from disk', async () => {
-    // Manually inject a cached embedding
-    const testVector = new Array(768).fill(0).map((_, i) => i / 768);
+  it('round-trips dirty entries through SQLite', async () => {
+    // f32-exact pattern so the BLOB round-trip is bitwise identical.
+    const testVector = new Array(768).fill(0).map((_, i) => (i % 4) * 0.25);
     (vectorService as any).embeddingCache.set('persist_test_text', {
       vector: testVector,
       lastAccess: Date.now(),
-      dirty: true
+      dirty: true,
     });
 
-    // Persist to disk
     await vectorService.persistEmbeddingCache();
 
-    // Clear in-memory cache
     (vectorService as any).embeddingCache.clear();
     expect((vectorService as any).embeddingCache.size).toBe(0);
 
-    // Reload from disk
     await (vectorService as any).loadEmbeddingCache();
 
-    // Verify round-trip
     const reloaded = (vectorService as any).embeddingCache.get('persist_test_text');
     expect(reloaded).toBeDefined();
     expect(reloaded.vector).toEqual(testVector);
-    expect(reloaded.dirty).toBe(false); // Loaded entries should be clean
+    expect(reloaded.dirty).toBe(false);
+  });
 
-    // Clean up the test cache file
-    const cachePath = (vectorService as any).embeddingCachePath;
-    const fsPromises = await import('fs/promises');
-    await fsPromises.unlink(cachePath).catch(() => {});
+  it('migrates legacy JSON cache to SQLite on first boot and removes the file', async () => {
+    // Pre-seed legacy JSON, ensure SQLite is empty so the migration path runs.
+    sqliteService.db.exec('DELETE FROM embedding_cache');
+    const legacy = [
+      { text: 'legacy-1', vector: new Array(768).fill(0), lastAccess: 1234567890 },
+      { text: 'legacy-2', vector: new Array(768).fill(0).map((_, i) => (i % 2) * 0.5), lastAccess: 9999999999 },
+    ];
+    await fs.writeFile(EMBEDDING_CACHE_PATH, JSON.stringify(legacy));
+
+    (vectorService as any).embeddingCache.clear();
+    await vectorService.loadEmbeddingCache();
+
+    expect(sqliteService.countEmbeddings()).toBe(2);
+    const jsonExists = await fs.access(EMBEDDING_CACHE_PATH).then(() => true).catch(() => false);
+    expect(jsonExists).toBe(false);
+
+    // Second boot: SQLite already populated, JSON gone → migration path is a no-op.
+    (vectorService as any).embeddingCache.clear();
+    await vectorService.loadEmbeddingCache();
+    expect((vectorService as any).embeddingCache.has('legacy-1')).toBe(true);
+    expect((vectorService as any).embeddingCache.has('legacy-2')).toBe(true);
+  });
+
+  it('LRU eviction also deletes the SQLite row via dispose hook', async () => {
+    const { LRUCache } = await import('lru-cache');
+    const original = (vectorService as any).embeddingCache;
+    // Mirror the production dispose hook on a tiny cache so eviction is observable.
+    (vectorService as any).embeddingCache = new LRUCache<string, any>({
+      max: 2,
+      // Mirror the production dispose hook: only react to true evictions.
+      dispose: (_v: unknown, key: string, reason: unknown) => {
+        if (reason !== 'evict') return;
+        try { sqliteService.deleteEmbedding(key); } catch { /* test-only swallow */ }
+      },
+    });
+
+    try {
+      sqliteService.upsertEmbedding('evict-a', new Array(4).fill(0), Date.now());
+      sqliteService.upsertEmbedding('evict-b', new Array(4).fill(0), Date.now());
+      sqliteService.upsertEmbedding('evict-c', new Array(4).fill(0), Date.now());
+      expect(sqliteService.countEmbeddings()).toBe(3);
+
+      // Fill the in-memory cache, then push a 4th key so the LRU evicts the oldest.
+      (vectorService as any).embeddingCache.set('evict-a', { vector: [0, 0, 0, 0], lastAccess: 1, dirty: false });
+      (vectorService as any).embeddingCache.set('evict-b', { vector: [0, 0, 0, 0], lastAccess: 2, dirty: false });
+      (vectorService as any).embeddingCache.set('evict-c', { vector: [0, 0, 0, 0], lastAccess: 3, dirty: false });
+
+      // The LRU evicted 'evict-a' (capacity 2 + 3 inserts ⇒ 'a' is gone).
+      // Dispose hook must have removed it from SQLite too.
+      const remaining = new Set(
+        (await sqliteService.getAllEmbeddingsAsync()).map(r => r.text)
+      );
+      expect(remaining.has('evict-a')).toBe(false);
+      expect(remaining.has('evict-b')).toBe(true);
+      expect(remaining.has('evict-c')).toBe(true);
+    } finally {
+      (vectorService as any).embeddingCache = original;
+    }
   });
 });
