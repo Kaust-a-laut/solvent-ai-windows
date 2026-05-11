@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { pluginManager } from '../../services/pluginManager';
 import { orchestrationService } from '../../services/orchestrationService';
 
@@ -64,26 +64,33 @@ describe('Provider Resolution Integration', () => {
     // Get the first *ready* provider to use as override (order is non-deterministic with parallel loading)
     const firstProvider = providers.find(p => p.isReady()) ?? providers[0];
 
-    // Test that the orchestration service attempts to use the provider override
-    // We expect this to fail due to API configuration, but the resolution should happen
+    // Stub `complete` on every ready provider so the test never touches a real
+    // API. The test's intent is to verify the override is *resolved* and that
+    // the orchestrator actually calls into the chosen provider — not to round-
+    // trip a real LLM call. Without this, under parallel vitest worker load
+    // the Gemini round-trip can blow past the 15s test timeout.
+    const stubs = providers
+      .filter(p => p.isReady())
+      .map(p => vi.spyOn(p, 'complete').mockResolvedValue('stubbed completion'));
+    // vectorService.addEntry is called by runMissionSync's memory-persistence
+    // phase; in tests we don't need the side effect, and spying makes the call
+    // graph fully deterministic.
+    const { vectorService } = await import('../../services/vectorService');
+    const addEntrySpy = vi.spyOn(vectorService, 'addEntry').mockResolvedValue('stub-id');
+
     try {
       await orchestrationService.runMission(
         'consultation',
         'Integration test goal',
         { async: false, providerOverride: firstProvider!.id }
       );
-    } catch (error) {
-      // If the error is related to API keys or network (expected in test environment),
-      // that's fine - the important part is that provider resolution happened
-      const errorMessage = (error as Error).message.toLowerCase();
-      if (!errorMessage.includes('api') &&
-          !errorMessage.includes('network') &&
-          !errorMessage.includes('connect') &&
-          !errorMessage.includes('fetch') &&
-          !errorMessage.includes('not found') &&
-          !errorMessage.includes('model')) {
-        throw error; // Re-throw if it's not a connectivity/API/model issue
-      }
+
+      // The override's complete() must have been invoked at least once
+      // (synthesis pass + per-agent calls all go through complete()).
+      expect(stubs.some(s => s.mock.calls.length > 0)).toBe(true);
+    } finally {
+      for (const stub of stubs) stub.mockRestore();
+      addEntrySpy.mockRestore();
     }
   });
 });
