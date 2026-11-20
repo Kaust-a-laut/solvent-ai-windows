@@ -19,7 +19,8 @@ interface DocEntry {
 export class BM25Index {
   private docs: Map<string, DocEntry> = new Map();
   private invertedIndex: Map<string, Set<string>> = new Map(); // term -> doc IDs
-  private avgDocLength: number = 0;
+  private totalDocLength: number = 0;
+  private avgDocLength: number = 1;
   private docCount: number = 0;
 
   /**
@@ -35,20 +36,27 @@ export class BM25Index {
   build(documents: Array<{ id: string; text: string }>) {
     this.docs.clear();
     this.invertedIndex.clear();
-
-    let totalLength = 0;
+    this.totalDocLength = 0;
+    this.docCount = 0;
 
     for (const doc of documents) {
+      // Deduplicate duplicate IDs cleanly so invertedIndex never retains stale postings
+      if (this.docs.has(doc.id)) {
+        this.removeDocumentInternal(doc.id);
+      }
+
       const tokens = this.tokenize(doc.text);
       const termFreqs = new Map<string, number>();
 
       for (const token of tokens) {
         termFreqs.set(token, (termFreqs.get(token) || 0) + 1);
 
-        if (!this.invertedIndex.has(token)) {
-          this.invertedIndex.set(token, new Set());
+        let postings = this.invertedIndex.get(token);
+        if (!postings) {
+          postings = new Set();
+          this.invertedIndex.set(token, postings);
         }
-        this.invertedIndex.get(token)!.add(doc.id);
+        postings.add(doc.id);
       }
 
       this.docs.set(doc.id, {
@@ -57,38 +65,42 @@ export class BM25Index {
         length: tokens.length
       });
 
-      totalLength += tokens.length;
+      this.totalDocLength += tokens.length;
     }
 
-    this.docCount = documents.length;
-    this.avgDocLength = this.docCount > 0 ? totalLength / this.docCount : 1;
+    this.docCount = this.docs.size;
+    this.avgDocLength = this.docCount > 0 && this.totalDocLength > 0
+      ? this.totalDocLength / this.docCount
+      : 1;
   }
 
   /**
-   * Add a single document to the index (or replace if same id exists).
+   * Add a single document to the index (or replace if same id exists). O(tokens) time.
    */
   addDocument(doc: { id: string; text: string }): void {
     if (this.docs.has(doc.id)) {
-      this.removeDocument(doc.id);
+      this.removeDocumentInternal(doc.id);
     }
     const tokens = this.tokenize(doc.text);
     const termFreqs = new Map<string, number>();
     for (const token of tokens) {
       termFreqs.set(token, (termFreqs.get(token) ?? 0) + 1);
-      if (!this.invertedIndex.has(token)) {
-        this.invertedIndex.set(token, new Set());
+      let postings = this.invertedIndex.get(token);
+      if (!postings) {
+        postings = new Set();
+        this.invertedIndex.set(token, postings);
       }
-      this.invertedIndex.get(token)!.add(doc.id);
+      postings.add(doc.id);
     }
     this.docs.set(doc.id, { id: doc.id, termFreqs, length: tokens.length });
-    this.docCount++;
-    this.recalcAvgDocLength();
+    this.totalDocLength += tokens.length;
+    this.docCount = this.docs.size;
+    this.avgDocLength = this.docCount > 0 && this.totalDocLength > 0
+      ? this.totalDocLength / this.docCount
+      : 1;
   }
 
-  /**
-   * Remove a document from the index by id.
-   */
-  removeDocument(id: string): void {
+  private removeDocumentInternal(id: string): void {
     const doc = this.docs.get(id);
     if (!doc) return;
     for (const term of doc.termFreqs.keys()) {
@@ -101,23 +113,19 @@ export class BM25Index {
       }
     }
     this.docs.delete(id);
-    this.docCount--;
-    this.recalcAvgDocLength();
+    this.totalDocLength = Math.max(0, this.totalDocLength - doc.length);
   }
 
   /**
-   * Recalculate the average document length across all indexed documents.
+   * Remove a document from the index by id. O(terms in doc) time.
    */
-  private recalcAvgDocLength(): void {
-    if (this.docCount === 0) {
-      this.avgDocLength = 1;
-      return;
-    }
-    let total = 0;
-    for (const doc of this.docs.values()) {
-      total += doc.length;
-    }
-    this.avgDocLength = total / this.docCount;
+  removeDocument(id: string): void {
+    if (!this.docs.has(id)) return;
+    this.removeDocumentInternal(id);
+    this.docCount = this.docs.size;
+    this.avgDocLength = this.docCount > 0 && this.totalDocLength > 0
+      ? this.totalDocLength / this.docCount
+      : 1;
   }
 
   /**

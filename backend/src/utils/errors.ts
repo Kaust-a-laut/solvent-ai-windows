@@ -30,7 +30,7 @@ export class SolventError extends Error {
     this.status = options.status || 500;
     this.retryable = options.retryable || false;
     this.cause = options.cause;
-    Object.setPrototypeOf(this, SolventError.prototype);
+    Object.setPrototypeOf(this, new.target.prototype);
   }
   
   // Static factory methods for common error types (merged from AppError)

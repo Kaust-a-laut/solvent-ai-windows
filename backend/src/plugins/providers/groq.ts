@@ -35,6 +35,10 @@ export class GroqProviderPlugin extends BaseOpenAIService implements IProviderPl
     return this.isInitialized;
   }
 
+  hasConfiguredKey(): boolean {
+    return this.isInitialized && !!this.apiKey;
+  }
+
   async healthCheck(): Promise<boolean> {
     try {
       if (!this.apiKey) return false;

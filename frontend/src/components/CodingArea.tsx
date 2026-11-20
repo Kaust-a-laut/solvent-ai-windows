@@ -5,7 +5,6 @@ import type { editor as MonacoEditor } from 'monaco-editor';
 import * as monaco from 'monaco-editor';
 import { AnimatePresence } from 'framer-motion';
 import { useAppStore } from '../store/useAppStore';
-import type { ConsoleEntry, ElementInfo } from '../store/codingSlice';
 import { persistProjectOpenState, restoreProjectOpenState } from '../store/codingSlice';
 import { useShallow } from 'zustand/react/shallow';
 import { fetchWithRetry, getSecret, getNativeBackendStatus } from '../lib/api-client';
@@ -16,7 +15,6 @@ import { CodingTerminal } from './coding/CodingTerminal';
 import { AgentChatPanel } from './coding/AgentChatPanel';
 import { DiffBanner } from './coding/DiffBanner';
 import { MemoryPanel } from './coding/MemoryPanel';
-import { ReviewScorecard } from './ReviewScorecard';
 import {
   getOrBootWebContainer,
   getWebContainerInstance,
@@ -34,8 +32,8 @@ import { BRIDGE_SCRIPT } from '../lib/preview-bridge-script';
 export const CodingArea = () => {
   const {
     openFiles, setOpenFiles, activeFile, setActiveFile,
-    pendingDiff, clearPendingDiff,
-    stagedDiffs, addStagedDiff, setStagedDiffStatus, applyAllStagedDiffs, clearStagedDiffs,
+    pendingDiff,
+    stagedDiffs, setStagedDiffStatus, applyAllStagedDiffs, clearStagedDiffs,
     fileTreeVisible, chatPanelVisible, terminalVisible,
     setFileTreeVisible, setChatPanelVisible, setTerminalVisible,
     memoryVisible, setMemoryVisible,
@@ -43,7 +41,7 @@ export const CodingArea = () => {
     terminalLines, addTerminalLine, clearTerminalLines,
     activeTier,
     currentProject, createNewProject, openFolder,
-    setPreviewUrl, setPreviewSnapshot,
+    setPreviewUrl,
   } = useAppStore(
     useShallow((state) => ({
       openFiles: state.openFiles,
@@ -51,9 +49,7 @@ export const CodingArea = () => {
       activeFile: state.activeFile,
       setActiveFile: state.setActiveFile,
       pendingDiff: state.pendingDiff,
-      clearPendingDiff: state.clearPendingDiff,
       stagedDiffs: state.stagedDiffs,
-      addStagedDiff: state.addStagedDiff,
       setStagedDiffStatus: state.setStagedDiffStatus,
       applyAllStagedDiffs: state.applyAllStagedDiffs,
       clearStagedDiffs: state.clearStagedDiffs,
@@ -74,7 +70,6 @@ export const CodingArea = () => {
       createNewProject: state.createNewProject,
       openFolder: state.openFolder,
       setPreviewUrl: state.setPreviewUrl,
-      setPreviewSnapshot: state.setPreviewSnapshot,
     }))
   );
   const sandboxRunTrigger = useAppStore((s) => s.sandboxRunTrigger);
@@ -85,8 +80,6 @@ export const CodingArea = () => {
   const [isRunning, setIsRunning] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
   const [iframeUrl, setIframeUrl] = useState<string | null>(null);
-  const [reviewState, setReviewState] = useState<unknown>(null);
-  const [isApplying, setIsApplying] = useState(false);
 
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
   const editorContainerRef = useRef<HTMLDivElement>(null);
@@ -162,6 +155,17 @@ export const CodingArea = () => {
 
   useEffect(() => {
     const handler = (e: MessageEvent) => {
+      // Only trust messages from the live preview iframe's own origin —
+      // otherwise any other window/frame on the page could forge a
+      // 'solvent:*' message and inject fake console/DOM content into what
+      // later gets fed back into the coding agent's context.
+      if (!iframeUrl) return;
+      try {
+        if (new URL(iframeUrl).origin !== e.origin) return;
+      } catch {
+        return;
+      }
+
       const data = e.data;
       if (!data || typeof data !== 'object' || !String(data.type).startsWith('solvent:')) return;
 
@@ -191,7 +195,7 @@ export const CodingArea = () => {
     };
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
-  }, [appendConsoleEntry, updatePreviewDom, setSelectedElement]);
+  }, [appendConsoleEntry, updatePreviewDom, setSelectedElement, iframeUrl]);
 
   const bootWebContainer = useCallback(async () => {
     if (isBootingRef.current) return;
@@ -520,7 +524,7 @@ export const CodingArea = () => {
     } finally {
       setIsRunning(false);
     }
-  }, [webContainer, activeFile, openFiles, addLog, setTerminalVisible, bootStatus]);
+  }, [webContainer, activeFile, addLog, setTerminalVisible, bootStatus, syncProjectToWebContainer]);
 
   // Agent-driven sandbox run: ide_run_in_sandbox tool increments sandboxRunTrigger,
   // which invokes the same handleRun flow as the manual Run button.
@@ -530,31 +534,6 @@ export const CodingArea = () => {
     lastSandboxRunRef.current = sandboxRunTrigger;
     handleRun();
   }, [sandboxRunTrigger, handleRun]);
-
-  const handleApplyAll = useCallback(async () => {
-    if (!pendingDiff) return;
-    const { filePath, modified } = pendingDiff;
-    setIsApplying(true);
-    const existing = openFiles.find((f) => f.path === filePath);
-    const updated = existing
-      ? openFiles.map((f) => (f.path === filePath ? { ...f, content: modified } : f))
-      : [...openFiles, { path: filePath, content: modified }];
-    setOpenFiles(updated);
-    clearPendingDiff();
-    try {
-      await fetchWithRetry(`${BASE_URL}/api/files/write`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: filePath, content: modified }),
-      });
-      await writeFileToWebContainer(toWcPath(filePath, currentProject?.name), modified).catch(() => {});
-      addLog(`[SYSTEM]: Applied diff to ${filePath}`);
-    } catch {
-      addLog(`[ERROR]: Failed to persist ${filePath}`);
-    } finally {
-      setIsApplying(false);
-    }
-  }, [pendingDiff, openFiles, setOpenFiles, clearPendingDiff, currentProject, addLog]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -567,24 +546,19 @@ export const CodingArea = () => {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [fileTreeVisible, terminalVisible, chatPanelVisible, setFileTreeVisible, setTerminalVisible, setChatPanelVisible]);
+  }, [fileTreeVisible, terminalVisible, chatPanelVisible, setFileTreeVisible, setTerminalVisible, setChatPanelVisible, handleSave]);
 
   const handleEditorMount: OnMount = useCallback((editor) => { editorRef.current = editor; }, []);
   const handleInlineCommand = useCallback((command: string, selection: string) => {
     addLog(`[AI]: ${command} on "${selection.slice(0, 60)}…"`);
   }, [addLog]);
 
-  void isApplying; // used for future animation states
-
-  type ReviewStatus = 'analyzing' | 'approved' | 'rejected';
-  interface ReviewBreakdown { syntax: number; security: number; logic: number; efficiency: number; }
-
   return (
     <div className="flex-1 flex overflow-hidden bg-[#020205] text-slate-300">
       {/* ── Left: File Tree ─────────────────────────────────────────── */}
       {fileTreeVisible && (
         <div
-          className="shrink-0 border-r border-white/[0.04] overflow-hidden"
+          className="shrink-0 border-r border-white/[0.12] overflow-hidden"
           style={{ width: panelWidths.fileTree }}
         >
           <FileTreePanel onFileSelect={handleFileSelect} />
@@ -665,7 +639,7 @@ export const CodingArea = () => {
                 type="button"
                 onClick={() => setTerminalVisible(true)}
                 aria-label="Show terminal"
-                className="mx-4 mb-2 mt-1 flex items-center gap-2 px-3 py-1 rounded-lg border border-white/[0.04] text-white/20 hover:text-white/50 text-[11px] font-mono hover:bg-white/5 transition-colors shrink-0"
+                className="mx-4 mb-2 mt-1 flex items-center gap-2 px-3 py-1 rounded-lg border border-white/[0.12] text-white/20 hover:text-white/50 text-[11px] font-mono hover:bg-white/5 transition-colors shrink-0"
               >
                 <span>▸ CONSOLE</span>
                 {terminalLines.some((l) => l.startsWith('[ERROR]')) && (
@@ -700,7 +674,7 @@ export const CodingArea = () => {
       {/* ── Right: Agent Chat ───────────────────────────────────────── */}
       {chatPanelVisible && (
         <div
-          className="shrink-0 border-l border-white/[0.04] overflow-clip"
+          className="shrink-0 border-l border-white/[0.12] overflow-clip"
           style={{ width: panelWidths.chat }}
         >
           <AgentChatPanel />
@@ -713,23 +687,6 @@ export const CodingArea = () => {
         onClose={() => setMemoryVisible(false)}
       />
 
-      {/* Review scorecard overlay */}
-      <AnimatePresence>
-        {Boolean(reviewState) && (() => {
-          const rs = reviewState as Record<string, unknown>;
-          const bd = rs.breakdown as ReviewBreakdown;
-          const status = rs.status as ReviewStatus;
-          return (
-            <ReviewScorecard
-              score={rs.score as number}
-              breakdown={bd}
-              issues={rs.issues as string[]}
-              status={status}
-              attempt={rs.attempt as number}
-            />
-          );
-        })()}
-      </AnimatePresence>
     </div>
   );
 };

@@ -11,8 +11,10 @@ export const FloatingNotepad = () => {
     setCommandCenterPiPOpen,
   } = useAppStore();
 
-  const [lastContent, setLastContent] = useState(notepadContent);
-  const [isFirstLoad, setIsFirstLoad] = useState(true);
+  // Refs, not state: neither value is rendered — they only gate the
+  // auto-open effect below, so state would just cause extra render passes.
+  const lastContentRef = useRef(notepadContent);
+  const isFirstChangeRef = useRef(true);
   const pipWindowRef = useRef<Window | null>(null);
 
   const [position, setPosition] = useState({
@@ -21,14 +23,15 @@ export const FloatingNotepad = () => {
   });
   const [size, setSize] = useState({ width: 420, height: 650 });
 
-  // Auto-open panel when AI updates notepad content
+  // Auto-open panel when AI updates notepad content. The first change after
+  // mount is the disk hydration — swallow it so the panel doesn't pop open
+  // on app start.
   useEffect(() => {
-    if (notepadContent !== lastContent) {
-      setLastContent(notepadContent);
-      if (isFirstLoad) { setIsFirstLoad(false); return; }
-      if (!isOpen) setIsOpen(true);
-    }
-  }, [notepadContent, isFirstLoad, isOpen, lastContent, setIsOpen]);
+    if (notepadContent === lastContentRef.current) return;
+    lastContentRef.current = notepadContent;
+    if (isFirstChangeRef.current) { isFirstChangeRef.current = false; return; }
+    if (!isOpen) setIsOpen(true);
+  }, [notepadContent, isOpen, setIsOpen]);
 
   const openDocumentPiP = async () => {
     if (pipWindowRef.current && !pipWindowRef.current.closed) {

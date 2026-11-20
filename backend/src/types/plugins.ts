@@ -53,6 +53,13 @@ export interface IProviderPlugin extends IPlugin {
   /** Provider capabilities */
   capabilities?: ProviderCapabilities;
 
+  /**
+   * True when the provider has server-side credentials/host configured and can
+   * serve autonomous background requests (ProviderSelector, Overseer, Delegation)
+   * without a runtime frontend API key.
+   */
+  hasConfiguredKey?(): boolean;
+
   /** Get current health status */
   getHealth?(): Promise<ProviderHealth>;
 

@@ -25,8 +25,13 @@ export class HarnessController {
       return;
     }
 
-    const run = await harnessOptimizer.startRun(parsed.data);
-    res.json(run);
+    try {
+      const run = await harnessOptimizer.startRun(parsed.data);
+      res.json(run);
+    } catch (error: unknown) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      res.status(500).json({ error: err.message });
+    }
   }
 
   static async cancelRun(req: Request, res: Response) {
@@ -64,14 +69,27 @@ export class HarnessController {
     const sse = createSSEWriter(req, res);
     sse.send(run);
 
-    harnessOptimizer.onRunUpdate(id, (updatedRun) => {
-      if (sse.signal.aborted) return;
+    // If the run already finished before the client subscribed, terminate immediately
+    if (run.status !== 'running') {
+      if (!res.writableEnded) res.write(`data: [DONE]\n\n`);
+      sse.end();
+      return;
+    }
+
+    const unsubscribe = harnessOptimizer.onRunUpdate(id, (updatedRun) => {
+      if (sse.signal.aborted) {
+        unsubscribe();
+        return;
+      }
       sse.send(updatedRun);
       if (updatedRun.status !== 'running') {
+        unsubscribe();
         // Literal [DONE] sentinel (not JSON) — preserves existing wire contract
-        res.write(`data: [DONE]\n\n`);
+        if (!res.writableEnded) res.write(`data: [DONE]\n\n`);
         sse.end();
       }
     });
+
+    sse.signal.addEventListener('abort', unsubscribe, { once: true });
   }
 }

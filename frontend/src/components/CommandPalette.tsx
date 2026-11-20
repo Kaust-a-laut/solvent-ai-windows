@@ -2,13 +2,13 @@ import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   MessageSquare, Code, Globe, Sparkles, FlaskConical,
-  Brain, Search, FileText, Terminal, Settings, Camera,
-  ArrowRight, ChevronRight, Command, X
+  Brain, Search, FileText, Terminal, Settings,
+  Command, X, ScanEye, Swords, GitCompare, Users, NotebookPen, Home
 } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
 import { cn } from '../lib/utils';
 
-type ModeId = 'chat' | 'coding' | 'browse' | 'image' | 'waterfall' | 'debate' | 'compare' | 'collaborate' | 'solvent-see' | 'playground' | 'home';
+type ModeId = 'home' | 'chat' | 'vision' | 'coding' | 'browser' | 'notepad' | 'model_playground' | 'compare' | 'debate' | 'collaborate' | 'waterfall';
 
 interface CommandItem {
   id: string;
@@ -21,6 +21,13 @@ interface CommandItem {
 
 const COMMAND_PALETTE_STORAGE_KEY = 'solvent-command-recent';
 const MAX_RECENT = 8;
+
+const loadRecentIds = (): string[] => {
+  try {
+    const stored = localStorage.getItem(COMMAND_PALETTE_STORAGE_KEY);
+    return stored ? JSON.parse(stored) as string[] : [];
+  } catch { return []; }
+};
 
 interface CommandPaletteProps {
   open: boolean;
@@ -35,36 +42,30 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ open, onClose })
 
   const {
     currentMode, setCurrentMode, openFiles, setActiveFile,
-    projectMap, setSettingsOpen, toggleCommandCenter,
+    setSettingsOpen, toggleCommandCenter,
     setMemoryVisible, setTerminalVisible,
   } = useAppStore();
-
-  // Parse project file paths for file search
-  const projectFiles = useMemo(() => {
-    if (!projectMap) return [];
-    return projectMap.split('\n')
-      .map(line => line.trim())
-      .filter(line => /\.(ts|tsx|js|jsx|css|json|md|html|py|go|rs)$/.test(line))
-      .slice(0, 100);
-  }, [projectMap]);
 
   // Build commands
   const commands: CommandItem[] = useMemo(() => [
     // Modes
+    { id: 'mode-home', label: 'Overview', icon: Home, category: 'mode' as const, shortcut: '', action: () => setCurrentMode('home' as ModeId) },
     { id: 'mode-chat', label: 'Chat', icon: MessageSquare, category: 'mode' as const, shortcut: '', action: () => setCurrentMode('chat' as ModeId) },
+    { id: 'mode-vision', label: 'SolventSee Lab', icon: ScanEye, category: 'mode' as const, shortcut: '', action: () => setCurrentMode('vision' as ModeId) },
     { id: 'mode-coding', label: 'Coding Suite', icon: Code, category: 'mode' as const, shortcut: '', action: () => setCurrentMode('coding' as ModeId) },
-    { id: 'mode-browser', label: 'Universal Browser', icon: Globe, category: 'mode' as const, shortcut: '', action: () => setCurrentMode('browse' as ModeId) },
-    { id: 'mode-playground', label: 'Model Playground', icon: Sparkles, category: 'mode' as const, shortcut: '', action: () => setCurrentMode('playground' as ModeId) },
-    { id: 'mode-waterfall', label: 'Waterfall Architect', icon: FlaskConical, category: 'mode' as const, shortcut: '', action: () => setCurrentMode('waterfall' as ModeId) },
-    { id: 'mode-vision', label: 'SolventSee Lab', icon: Brain, category: 'mode' as const, shortcut: '', action: () => setCurrentMode('solvent-see' as ModeId) },
-    { id: 'mode-compare', label: 'Model Comparison Lab', icon: ChevronRight, category: 'mode' as const, shortcut: '', action: () => setCurrentMode('compare' as ModeId) },
+    { id: 'mode-browser', label: 'Web Search', icon: Globe, category: 'mode' as const, shortcut: '', action: () => setCurrentMode('browser' as ModeId) },
+    { id: 'mode-notepad', label: 'Notepad', icon: NotebookPen, category: 'mode' as const, shortcut: '', action: () => setCurrentMode('notepad' as ModeId) },
+    { id: 'mode-model_playground', label: 'Lab Center', icon: Sparkles, category: 'mode' as const, shortcut: '', action: () => setCurrentMode('model_playground' as ModeId) },
+    { id: 'mode-compare', label: 'Compare', icon: GitCompare, category: 'mode' as const, shortcut: '', action: () => setCurrentMode('compare' as ModeId) },
+    { id: 'mode-debate', label: 'Debate', icon: Swords, category: 'mode' as const, shortcut: '', action: () => setCurrentMode('debate' as ModeId) },
+    { id: 'mode-collaborate', label: 'Multi-Agent', icon: Users, category: 'mode' as const, shortcut: '', action: () => setCurrentMode('collaborate' as ModeId) },
+    { id: 'mode-waterfall', label: 'Waterfall Lab', icon: FlaskConical, category: 'mode' as const, shortcut: '', action: () => setCurrentMode('waterfall' as ModeId) },
 
     // Actions
     { id: 'action-command-center', label: 'Open Command Center', icon: Command, category: 'action' as const, shortcut: '', action: () => toggleCommandCenter() },
     { id: 'action-settings', label: 'Settings', icon: Settings, category: 'action' as const, shortcut: '', action: () => setSettingsOpen(true) },
     { id: 'action-memory', label: 'View Agent Memory', icon: Brain, category: 'action' as const, shortcut: '', action: () => setMemoryVisible(true) },
     { id: 'action-terminal', label: 'Toggle Terminal', icon: Terminal, category: 'action' as const, shortcut: '', action: () => setTerminalVisible(!useAppStore.getState().terminalVisible) },
-    { id: 'action-home', label: 'Go to Home', icon: Search, category: 'action' as const, shortcut: '', action: () => setCurrentMode('home' as ModeId) },
 
     // Files
     ...openFiles.map(f => ({
@@ -74,23 +75,32 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ open, onClose })
       category: 'file' as const,
       action: () => setActiveFile(f.path),
     })),
-  ], [currentMode, openFiles, setActiveFile, setCurrentMode, toggleCommandCenter, setSettingsOpen, setMemoryVisible, setTerminalVisible]);
+  ], [openFiles, setActiveFile, setCurrentMode, toggleCommandCenter, setSettingsOpen, setMemoryVisible, setTerminalVisible]);
 
-  // Load recent from localStorage
-  const recentIds = useMemo(() => {
-    try {
-      const stored = localStorage.getItem(COMMAND_PALETTE_STORAGE_KEY);
-      return stored ? JSON.parse(stored) as string[] : [];
-    } catch { return []; }
-  }, [open]);
+  const [recentIds, setRecentIds] = useState<string[]>(() => loadRecentIds());
+
+  // Reset transient state on the open transition (render-adjust idiom — an
+  // effect would paint one frame with the stale query/selection first), and
+  // refresh recents in case another surface recorded usage.
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) {
+      setQuery('');
+      setSelectedIndex(0);
+      setRecentIds(loadRecentIds());
+    }
+  }
 
   const recordRecent = useCallback((id: string) => {
-    try {
-      const prev = recentIds.filter((x: string) => x !== id);
-      const next = [id, ...prev].slice(0, MAX_RECENT);
-      localStorage.setItem(COMMAND_PALETTE_STORAGE_KEY, JSON.stringify(next));
-    } catch { /* storage full — ignore */ }
-  }, [recentIds]);
+    setRecentIds(prev => {
+      const next = [id, ...prev.filter((x) => x !== id)].slice(0, MAX_RECENT);
+      try {
+        localStorage.setItem(COMMAND_PALETTE_STORAGE_KEY, JSON.stringify(next));
+      } catch { /* storage full — ignore */ }
+      return next;
+    });
+  }, []);
 
   // Filter commands by query
   const filteredCommands = useMemo(() => {
@@ -106,13 +116,10 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ open, onClose })
     return commands.filter(c => c.label.toLowerCase().includes(q));
   }, [query, commands, recentIds]);
 
-  // Reset selection when query or results change
-  useEffect(() => { setSelectedIndex(0); }, [query, filteredCommands.length]);
-
-  // Focus input on open
+  // Focus input on open (selection/query resets happen in the render-adjust
+  // block above; query edits reset selection at the onChange site).
   useEffect(() => {
     if (open) {
-      setQuery('');
       requestAnimationFrame(() => inputRef.current?.focus());
     }
   }, [open]);
@@ -190,14 +197,14 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ open, onClose })
               <input
                 ref={inputRef}
                 value={query}
-                onChange={(e) => setQuery(e.target.value)}
+                onChange={(e) => { setQuery(e.target.value); setSelectedIndex(0); }}
                 onKeyDown={handleKeyDown}
                 placeholder="Type a command or search files..."
                 className="flex-1 bg-transparent border-none outline-none text-sm font-medium text-white placeholder:text-white/25"
               />
               {query && (
                 <button
-                  onClick={() => setQuery('')}
+                  onClick={() => { setQuery(''); setSelectedIndex(0); }}
                   className="p-0.5 rounded text-white/20 hover:text-white/50 transition-colors"
                 >
                   <X size={14} />
@@ -210,7 +217,7 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({ open, onClose })
             <div ref={listRef} className="max-h-[360px] overflow-y-auto py-2 scrollbar-thin">
               {filteredCommands.length === 0 && (
                 <div className="px-5 py-8 text-center text-[12px] text-white/20">
-                  No results for "{query}"
+                  No results for &ldquo;{query}&rdquo;
                 </div>
               )}
 

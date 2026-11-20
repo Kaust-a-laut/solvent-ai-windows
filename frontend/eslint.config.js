@@ -24,11 +24,19 @@ export default [
     rules: {
       ...tseslint.configs.recommended.rules,
       ...react.configs.recommended.rules,
+      // React 18 automatic JSX runtime — no `import React` needed in scope.
+      ...react.configs['jsx-runtime'].rules,
       ...reactHooks.configs.recommended.rules,
       'react-hooks/rules-of-hooks': 'error',
       'react-hooks/exhaustive-deps': 'warn',
-      '@typescript-eslint/no-unused-vars': 'error',
-      'no-console': 'warn',
+      '@typescript-eslint/no-unused-vars': ['error', {
+        argsIgnorePattern: '^_',
+        varsIgnorePattern: '^_',
+        caughtErrorsIgnorePattern: '^_',
+      }],
+      // TypeScript types cover prop validation.
+      'react/prop-types': 'off',
+      'no-console': ['warn', { allow: ['warn', 'error'] }],
     },
     settings: {
       react: {

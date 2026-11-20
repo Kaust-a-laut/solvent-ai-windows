@@ -29,8 +29,8 @@ describe('useModelCapabilities', () => {
     expect(result.current.canUseClickToEdit).toBe(true);
   });
 
-  it('returns code-only for Qwen3 Coder 480B', () => {
-    useAppStore.setState({ selectedCloudModel: 'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct', selectedCloudProvider: 'fireworks' });
+  it('returns code-only for GLM-5.1 on Fireworks', () => {
+    useAppStore.setState({ selectedCloudModel: 'accounts/fireworks/models/glm-5p1', selectedCloudProvider: 'fireworks' });
     const { result } = renderHook(() => useModelCapabilities());
     expect(result.current.tier).toBe('code-only');
     expect(result.current.canUseRuntimeTools).toBe(false);

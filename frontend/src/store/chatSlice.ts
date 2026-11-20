@@ -3,29 +3,19 @@ import { AppState, Message } from './types';
 import { api } from '../lib/api';
 import { generateUUID } from '../lib/crypto';
 
-function debounce<T extends (...args: unknown[]) => unknown>(
-  func: T,
-  wait: number
-): (...args: Parameters<T>) => void {
-  let timeout: ReturnType<typeof setTimeout> | null = null;
-  return (...args: Parameters<T>) => {
-    if (timeout) clearTimeout(timeout);
-    timeout = setTimeout(() => func(...args), wait);
-  };
-}
-
 export interface ChatSlice {
   sessions: Record<string, Message[]>;
   messages: Message[]; // Current active messages
   codingMessages: Message[]; // Legacy/Specific for coding if needed
-  isProcessing: boolean;
+  // Keyed by mode (mirrors `sessions`) so an in-flight request in one mode
+  // doesn't show "thinking"/block input in an unrelated mode.
+  isProcessingByMode: Record<string, boolean>;
   lastGeneratedImage: string | null;
   currentSessionId: string | null;
   pendingPrompt: string | null;
   addMessage: (message: Message, target?: string) => void;
-  updateLastMessage: (content: string, target?: string) => void;
   setMessages: (messages: Message[], target?: string) => void;
-  setIsProcessing: (isProcessing: boolean) => void;
+  setIsProcessing: (isProcessing: boolean, mode?: string) => void;
   setLastGeneratedImage: (url: string | null) => void;
   setPendingPrompt: (prompt: string | null) => void;
   persistSession: () => Promise<void>;
@@ -36,11 +26,16 @@ export interface ChatSlice {
   setCurrentSessionId: (id: string | null) => void;
 }
 
+// A long-running or reloaded-and-reused session would otherwise grow this
+// array unboundedly — mirrors the capped-array pattern already used for
+// agentMessages/terminalLines/previewConsoleBuffer in codingSlice.ts.
+const MAX_SESSION_MESSAGES = 500;
+
 export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (set, get) => ({
   sessions: {},
   messages: [],
   codingMessages: [],
-  isProcessing: false,
+  isProcessingByMode: {},
   lastGeneratedImage: null,
   currentSessionId: null,
   pendingPrompt: null,
@@ -50,35 +45,14 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (set, 
   addMessage: (message, target) => set((state) => {
     const activeMode = target || state.currentMode;
     const currentMessages = state.sessions[activeMode] || [];
-    const msgWithId = message.id ? message : { ...message, id: generateUUID() };
-    const newMessages = [...currentMessages, msgWithId];
+    const withCreatedAt = message.createdAt !== undefined ? message : { ...message, createdAt: Date.now() };
+    const msgWithId = withCreatedAt.id ? withCreatedAt : { ...withCreatedAt, id: generateUUID() };
+    const newMessages = [...currentMessages, msgWithId].slice(-MAX_SESSION_MESSAGES);
 
     return {
       sessions: { ...state.sessions, [activeMode]: newMessages },
       messages: activeMode === state.currentMode ? newMessages : state.messages
     };
-  }),
-
-  updateLastMessage: (content, target) => set((state) => {
-    const activeMode = target || state.currentMode;
-    const targetMessages = state.sessions[activeMode] || [];
-
-    if (targetMessages.length > 0) {
-      const updatedMessages = [...targetMessages];
-      const lastIndex = updatedMessages.length - 1;
-      const lastMsg = updatedMessages[lastIndex];
-      if (!lastMsg) return state;
-      updatedMessages[lastIndex] = {
-        ...lastMsg,
-        content: lastMsg.content + content
-      };
-
-      return {
-        sessions: { ...state.sessions, [activeMode]: updatedMessages },
-        messages: activeMode === state.currentMode ? updatedMessages : state.messages
-      };
-    }
-    return state;
   }),
 
   setMessages: (messages, target) => set((state) => {
@@ -89,7 +63,9 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (set, 
     };
   }),
 
-  setIsProcessing: (isProcessing) => set({ isProcessing }),
+  setIsProcessing: (isProcessing, mode) => set((state) => ({
+    isProcessingByMode: { ...state.isProcessingByMode, [mode ?? state.currentMode]: isProcessing }
+  })),
   setLastGeneratedImage: (url) => set({ lastGeneratedImage: url }),
 
   setCurrentSessionId: (id) => set({ currentSessionId: id }),
@@ -128,7 +104,8 @@ export const createChatSlice: StateCreator<AppState, [], [], ChatSlice> = (set, 
         image: m.image,
         thinking: m.thinking,
         isGeneratedImage: m.isGeneratedImage,
-        imageUrl: m.imageUrl
+        imageUrl: m.imageUrl,
+        createdAt: m.createdAt
       }));
       
       set({

@@ -12,7 +12,12 @@ export interface ActionSlice {
 export const createActionSlice: StateCreator<AppState, [], [], ActionSlice> = (set, get) => ({
   sendMessage: async (content: string, image: string | null = null) => {
     const state = get();
-    if (state.isProcessing) return;
+    // Capture the mode once, up front, and use it explicitly everywhere below
+    // (setIsProcessing, addMessage) instead of re-reading state.currentMode
+    // after each await — otherwise a mode switch while the request is in
+    // flight would land the reply (or an error) in the wrong session.
+    const mode = state.currentMode;
+    if (state.isProcessingByMode[mode]) return;
 
     // Detect image generation intent via the backend's single authoritative implementation.
     // This replaces the duplicated regex that previously lived here in the frontend.
@@ -43,11 +48,11 @@ export const createActionSlice: StateCreator<AppState, [], [], ActionSlice> = (s
     }
 
     const userMessage: Message = { role: 'user', content: finalContent, image };
-    state.addMessage(userMessage, state.currentMode);
-    state.setIsProcessing(true);
+    state.addMessage(userMessage, mode);
+    state.setIsProcessing(true, mode);
 
     if (window.electron?.logAction) {
-      window.electron.logAction({ type: 'user_message', content, mode: state.currentMode });
+      window.electron.logAction({ type: 'user_message', content, mode });
     }
 
     try {
@@ -89,14 +94,14 @@ export const createActionSlice: StateCreator<AppState, [], [], ActionSlice> = (s
         imageUrl: result.imageUrl,
         provenance: result.provenance,
         traceId: result.traceId
-      }, state.currentMode);
+      }, mode);
 
       if (result.isGeneratedImage && result.imageUrl) {
         state.setLastGeneratedImage(result.imageUrl);
       }
 
       // Code Extraction & Auto-Update
-      if (state.currentMode === 'coding' || result.response.includes('```')) {
+      if (mode === 'coding' || result.response.includes('```')) {
         const codeBlocks = result.response.match(/```(?:[a-z]*)\n([\s\S]*?)```/g);
         if (codeBlocks && codeBlocks.length > 0) {
           const lastBlock = codeBlocks[codeBlocks.length - 1] ?? '';
@@ -132,32 +137,33 @@ export const createActionSlice: StateCreator<AppState, [], [], ActionSlice> = (s
         role: 'assistant',
         content: `Error: ${errorMessage}`,
         model: 'System'
-      });
+      }, mode);
     } finally {
-      state.setIsProcessing(false);
+      state.setIsProcessing(false, mode);
     }
   },
 
   generateImageAction: async (prompt: string) => {
     const state = get();
-    state.addMessage({ role: 'user', content: `Generate an image of: ${prompt}` });
-    state.setIsProcessing(true);
+    const mode = state.currentMode;
+    state.addMessage({ role: 'user', content: `Generate an image of: ${prompt}` }, mode);
+    state.setIsProcessing(true, mode);
 
     try {
       const imageUrl = await ChatService.generateImage(
-        prompt, 
-        state.imageProvider, 
+        prompt,
+        state.imageProvider,
         state.apiKeys,
         { localUrl: state.localImageUrl }
       );
       state.setLastGeneratedImage(imageUrl);
-      state.addMessage({ 
-        role: 'assistant', 
+      state.addMessage({
+        role: 'assistant',
         content: `Here is the image I generated for: "${prompt}"`,
         model: state.imageProvider,
         isGeneratedImage: true,
         imageUrl
-      });
+      }, mode);
     } catch (error: unknown) {
       const err = error as { body?: { error?: string }; message?: string };
       const errorMessage = err.body?.error || err.message || 'Image generation failed.';
@@ -165,9 +171,9 @@ export const createActionSlice: StateCreator<AppState, [], [], ActionSlice> = (s
         role: 'assistant',
         content: `Error: ${errorMessage}`,
         model: 'Image Generator'
-      });
+      }, mode);
     } finally {
-      state.setIsProcessing(false);
+      state.setIsProcessing(false, mode);
     }
   }
 });

@@ -39,8 +39,6 @@ export const OLLAMA_CLOUD_CHAT_MODELS = [
 
 export const GEMINI_CHAT_MODELS = [
   // Stable (latest generation)
-  { label: 'Gemini 3.1 Pro',        value: 'gemini-3.1-pro' },
-  { label: 'Gemini 3 Flash',        value: 'gemini-3-flash' },
   { label: 'Gemini 3.1 Flash Lite', value: 'gemini-3.1-flash-lite' },
   // Preview variants
   { label: 'Gemini 3.1 Pro Preview',        value: 'gemini-3.1-pro-preview' },
@@ -131,6 +129,77 @@ export const PROVIDER_GROUPS = [
     models: [...OLLAMA_CLOUD_CHAT_MODELS],
   },
 ] as const;
+
+// ── Live-aware variants ───────────────────────────────────────────────────────
+// The static lists above are the curated catalog (labels, grouping, order).
+// These hooks intersect them with the live registry from /api/v1/models:
+// retired ids drop out, and ids the provider added that we have no label for
+// yet are appended with their raw id as the label. Until the fetch lands (or
+// when a provider is unverifiable) the curated entries pass through untouched.
+
+import { useMemo } from 'react';
+import { useLiveModels, type LiveModelMap } from './liveModels';
+
+const GROUP_LABELS: Record<string, string> = {
+  groq: 'Groq', gemini: 'Gemini', openrouter: 'OpenRouter',
+  dashscope: 'DashScope', cerebras: 'Cerebras', fireworks: 'Fireworks',
+  deepseek: 'DeepSeek', ollama: 'Ollama Cloud',
+};
+
+export interface LiveModelEntry {
+  provider: string;
+  model: string;
+  label: string;
+  group: string;
+}
+
+function filterAllModels(live: LiveModelMap | null): LiveModelEntry[] {
+  const base: LiveModelEntry[] = ALL_MODELS.map(m => ({ ...m }));
+  if (!live) return base;
+  const out = base.filter(m => {
+    const list = live[m.provider];
+    return !list || list.includes(m.model);
+  });
+  // Append live ids with no curated entry (backend already caps extras to
+  // small catalogs, so this can't flood the list).
+  for (const [provider, ids] of Object.entries(live)) {
+    for (const id of ids) {
+      if (!out.some(m => m.provider === provider && m.model === id)) {
+        out.push({ provider, model: id, label: id, group: GROUP_LABELS[provider] ?? provider });
+      }
+    }
+  }
+  return out;
+}
+
+export function useLiveAllModels(): LiveModelEntry[] {
+  const live = useLiveModels();
+  return useMemo(() => filterAllModels(live), [live]);
+}
+
+export function useLiveProviderGroups(): Array<{ id: string; label: string; models: Array<{ label: string; value: string }> }> {
+  const live = useLiveModels();
+  return useMemo(() => {
+    const groups: Array<{ id: string; label: string; models: Array<{ label: string; value: string }> }> =
+      PROVIDER_GROUPS.map(g => ({
+        id: g.id,
+        label: g.label,
+        models: g.models.map(m => ({ label: m.label as string, value: m.value as string })),
+      }));
+    if (!live) return groups;
+    for (const group of groups) {
+      const list = live[group.id];
+      if (!list) continue; // unverifiable provider — keep curated
+      group.models = group.models.filter(m => list.includes(m.value));
+      for (const id of list) {
+        if (!group.models.some(m => m.value === id)) {
+          group.models.push({ label: id, value: id });
+        }
+      }
+    }
+    return groups;
+  }, [live]);
+}
 
 // ── Helpers — encode/decode provider:model composite keys ────────────────────
 

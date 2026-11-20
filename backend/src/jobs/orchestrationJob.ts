@@ -12,8 +12,14 @@ export interface OrchestrationJobData {
   modelOverride?: string;
 }
 
-export async function orchestrationJob(job: Job<OrchestrationJobData>): Promise<unknown> {
-  const { templateId, goal, template, providerOverride, modelOverride } = job.data;
+export async function orchestrationJob(job: Job<OrchestrationJobData | { type?: string; data?: OrchestrationJobData }>): Promise<unknown> {
+  const raw = job.data as unknown as { data?: OrchestrationJobData } & Partial<OrchestrationJobData>;
+  const payload = (raw?.data && typeof raw.data === 'object' ? raw.data : raw) as Partial<OrchestrationJobData>;
+  const { templateId, goal, template, providerOverride, modelOverride } = payload;
+
+  if (!templateId || typeof goal !== 'string' || !template || !Array.isArray(template.agents)) {
+    throw new Error('Orchestration mission failed: invalid job payload');
+  }
 
   logger.info(`[OrchestrationJob] Starting mission: ${templateId} for goal: ${goal.substring(0, 50)}...`);
 
@@ -29,25 +35,27 @@ export async function orchestrationJob(job: Job<OrchestrationJobData>): Promise<
 
     // Phase 1: Parallel expert analysis (5-75%)
     const agentCount = template.agents.length;
-    const progressPerAgent = 70 / agentCount;
+    const progressPerAgent = agentCount > 0 ? 70 / agentCount : 0;
+    let completedAgents = 0;
 
-    const expertOpinions = await Promise.all(template.agents.map(async (agent, index) => {
+    const expertOpinions = await Promise.all(template.agents.map(async (agent) => {
       // Per-agent provider override if specified
       const agentProvider = agent.provider
         ? await pluginManager.resolveProvider(agent.provider)
         : provider;
-      const agentModel = agent.model || model;
+      const agentModel = agent.model || (agent.provider ? agentProvider.defaultModel || model : model);
 
       const response = await agentProvider.complete(
         [{ role: 'user', content: `GOAL: ${goal}\n\nAs the ${agent.name}, provide your professional analysis. ${agent.instruction}` }],
         { model: agentModel }
       );
 
-      // Update progress after each agent completes
-      const currentProgress = 5 + (progressPerAgent * (index + 1));
+      // Monotonic progress across concurrent completions
+      completedAgents++;
+      const currentProgress = 5 + (progressPerAgent * completedAgents);
       await job.updateProgress(Math.min(75, Math.round(currentProgress)));
 
-      return { agent: agent.name, opinion: response };
+      return { id: agent.id, agent: agent.name, opinion: response };
     }));
 
     // Phase 2: Synthesis pass (75-90%)
@@ -65,7 +73,7 @@ export async function orchestrationJob(job: Job<OrchestrationJobData>): Promise<
     ${template.synthesisInstruction}
 
     Verify that the consensus meets all INVARIANTS.
-    Output the synthesis followed by a 'VERIFICATION' section marking each invariant as PASSED or FAILED}.`;
+    Output the synthesis followed by a 'VERIFICATION' section marking each invariant as PASSED or FAILED.`;
 
     const synthesis = await provider.complete(
       [{ role: 'user', content: synthesisPrompt }],

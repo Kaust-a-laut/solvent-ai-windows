@@ -62,8 +62,9 @@ router.get('/status', (_req, res) => {
 });
 
 /**
- * SSE log stream. Client opens EventSource and receives `log` events for
- * each new line. Closes naturally on client disconnect.
+ * SSE log stream. Client opens a fetch-based SSE stream (with X-Solvent-Secret)
+ * and receives `log` events for each new line and `status` events on change.
+ * Closes cleanly on client disconnect via res 'close'.
  */
 router.get('/logs', (req, res) => {
   res.set({
@@ -75,30 +76,65 @@ router.get('/logs', (req, res) => {
   res.flushHeaders();
 
   let lastTs = 0;
+  let lastSeq = 0;
+  let lastStatusKey = '';
   const sinceParam = Number(req.query.since);
   if (Number.isFinite(sinceParam) && sinceParam > 0) lastTs = sinceParam;
+  const sinceSeqParam = Number(req.query.sinceSeq);
+  if (Number.isFinite(sinceSeqParam) && sinceSeqParam > 0) lastSeq = sinceSeqParam;
 
-  const push = () => {
-    const lines = nativeCopyManager.logsSince(lastTs);
-    for (const line of lines) {
-      if (line.ts > lastTs) lastTs = line.ts;
-      res.write(`event: log\ndata: ${JSON.stringify(line)}\n\n`);
+  let closed = false;
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    clearInterval(interval);
+    if (!res.writableEnded && !res.destroyed) {
+      try { res.end(); } catch { /* already closed */ }
     }
-    const status = nativeCopyManager.status();
-    res.write(`event: status\ndata: ${JSON.stringify(status)}\n\n`);
   };
 
-  push();
-  const interval = setInterval(push, 1000);
-
-  req.on('close', () => {
-    clearInterval(interval);
-    try {
-      res.end();
-    } catch {
-      /* already closed */
+  const push = () => {
+    if (closed || res.writableEnded || res.destroyed) {
+      cleanup();
+      return;
     }
-  });
+    try {
+      const lines = nativeCopyManager.logsSince(lastTs);
+      for (const line of lines) {
+        const lineSeq = (line as { seq?: number }).seq;
+        if (typeof lineSeq === 'number') {
+          if (lineSeq <= lastSeq) continue;
+          lastSeq = lineSeq;
+        }
+        if (line.ts > lastTs) lastTs = line.ts;
+        res.write(`event: log\ndata: ${JSON.stringify(line)}\n\n`);
+      }
+      const status = nativeCopyManager.status();
+      // Omit the 50-line lastLogs buffer from periodic status pulses; only emit on state delta
+      const { lastLogs: _omitted, ...summary } = status;
+      const statusKey = JSON.stringify({
+        running: summary.running,
+        ready: summary.ready,
+        port: summary.port,
+        pid: summary.pid,
+        exitCode: summary.exitCode,
+      });
+      if (statusKey !== lastStatusKey) {
+        lastStatusKey = statusKey;
+        res.write(`event: status\ndata: ${JSON.stringify(summary)}\n\n`);
+      } else {
+        // Lightweight SSE comment heartbeat to keep proxies alive
+        res.write(': keepalive\n\n');
+      }
+    } catch {
+      cleanup();
+    }
+  };
+
+  const interval = setInterval(push, 1000);
+  res.on('close', cleanup);
+  req.on('aborted', cleanup);
+  push();
 });
 
 export default router;

@@ -27,11 +27,9 @@ export function useStageTimings(steps: {
         stageStartTimes.current[stage] = null;
       }
     });
-  }, [
-    steps.planner.status,
-    steps.executor.status,
-    steps.reviewer.status,
-  ]);
+    // Depending on `steps` directly is safe: extra runs from identity churn
+    // are no-ops because the start-time guards make the loop idempotent.
+  }, [steps]);
 
   return stageTimings;
 }

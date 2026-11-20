@@ -1,10 +1,11 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useAppStore } from '../../store/useAppStore';
-import type { AgentMessage, ToolEvent } from '../../store/codingSlice';
+import type { AgentMessage, ToolEvent, AgentPlan } from '../../store/codingSlice';
 import { persistAgentMessages, restoreAgentMessages } from '../../store/codingSlice';
 import { API_BASE_URL, BASE_URL } from '../../lib/config';
 import { fetchWithRetry, getSecret } from '../../lib/api-client';
 import { toolResultToIDEActions } from '../../lib/toolToIDEAction';
+import { streamSSE } from '../../lib/sse';
 import { AgentStatusBar } from './AgentStatusBar';
 import { AgentTimeline } from './AgentTimeline';
 import { EmptyState } from '../ui/EmptyState';
@@ -89,6 +90,10 @@ export const AgentChatPanel: React.FC = () => {
         .map(m => m.role === 'assistant' ? { ...m, isStreaming: false } : m);
       cleaned.forEach(m => addAgentMessage(m));
     }
+    // Keyed to the project path only: adding agentMessages.length would
+    // re-restore (resurrect) persisted history the moment the user clears
+    // the chat. Store actions are stable.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentProject?.path]);
 
   // Persist messages on change
@@ -100,6 +105,9 @@ export const AgentChatPanel: React.FC = () => {
       persistAgentMessages(projectKey, agentMessages);
     }, 2000);
     return () => clearTimeout(timer);
+    // currentProject is read only to build the key; its identity follows
+    // currentProject.path, which is already a dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentMessages, currentProject?.path]);
 
   // Sync local isGenerating to the store so PreviewPanel can show/hide the fix chip
@@ -110,21 +118,32 @@ export const AgentChatPanel: React.FC = () => {
     if (!queuedAgentPrompt || isGenerating) return;
     setQueuedAgentPrompt(null); // clear it immediately
     handleSend(queuedAgentPrompt);
+    // handleSend is memoized below; including it here is safe because the
+    // queued prompt is cleared before sending, so re-runs no-op.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queuedAgentPrompt, isGenerating, setQueuedAgentPrompt]);
 
   // Fetch project index
   useEffect(() => {
     if (!currentProject) { setProjectMap(null); return; }
+    const controller = new AbortController();
     const fetchIndex = async () => {
       try {
         const param = currentProject.type === 'folder'
           ? `?project=${encodeURIComponent(currentProject.path)}`
           : `?project=${encodeURIComponent(currentProject.name)}`;
-        const data = await fetchWithRetry(`${BASE_URL}/api/files/index${param}`) as { map: string };
+        const data = await fetchWithRetry(`${BASE_URL}/api/files/index${param}`, { signal: controller.signal }) as { map: string };
         setProjectMap(data.map ?? null);
-      } catch { setProjectMap(null); }
+      } catch (err) {
+        if ((err as Error)?.name === 'AbortError') return; // superseded by a newer request
+        setProjectMap(null);
+      }
     };
     void fetchIndex();
+    // Keyed to the project path; currentProject's identity follows it and
+    // setProjectMap is a stable store action.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => controller.abort();
   }, [currentProject?.path]);
 
   // Cleanup abort controller
@@ -297,140 +316,124 @@ export const AgentChatPanel: React.FC = () => {
       });
 
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      if (!response.body) throw new Error('No response body');
 
-      const reader = response.body?.getReader();
-      if (!reader) throw new Error('No response body');
+      for await (const json of streamSSE(response.body)) {
+        if (json === '[DONE]') continue;
 
-      const decoder = new TextDecoder();
-      let buffer = '';
+        try {
+          const evt = JSON.parse(json) as { type: string } & Record<string, unknown>;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-
-        for (const line of lines) {
-          if (!line.trim() || !line.startsWith('data: ')) continue;
-          const json = line.slice(6).trim();
-          if (!json || json === '[DONE]') continue;
-
-          try {
-            const evt = JSON.parse(json) as { type: string } & Record<string, unknown>;
-
-            switch (evt.type) {
-              case 'text_delta': {
-                const delta = (evt.content as string) ?? '';
-                if (!delta) break;
-                const iterIdx = textIterationRef.current;
-                const pending = pendingDeltaRef.current;
-                // If iteration changed, flush what we have first.
-                if (pending.buf && pending.iterIdx !== iterIdx) {
-                  flushPendingDelta(assistantId);
-                }
-                pending.buf += delta;
-                pending.iterIdx = iterIdx;
-                if (!pending.timer) {
-                  pending.timer = setTimeout(() => flushPendingDelta(assistantId), 50);
-                }
-                break;
-              }
-              case 'tool_start':
-              case 'tool_result':
-              case 'tool_error': {
+          switch (evt.type) {
+            case 'text_delta': {
+              const delta = (evt.content as string) ?? '';
+              if (!delta) break;
+              const iterIdx = textIterationRef.current;
+              const pending = pendingDeltaRef.current;
+              // If iteration changed, flush what we have first.
+              if (pending.buf && pending.iterIdx !== iterIdx) {
                 flushPendingDelta(assistantId);
-                const toolEvent: ToolEvent = {
-                  type: evt.type as ToolEvent['type'],
-                  tool: evt.tool as string,
-                  args: evt.args as Record<string, unknown>,
-                  result: evt.result,
-                  error: evt.error as string | undefined,
-                  iteration: evt.iteration as number,
-                  callId: evt.callId as string,
-                };
-                const iterIdx = toolEvent.iteration;
-                if (evt.type === 'tool_start') {
-                  textIterationRef.current = iterIdx + 1;
-                  setIteration(iterIdx + 1);
-                  setCurrentAction(`${toolEvent.tool} ${(toolEvent.args?.path as string) || ''}`);
-                  if (WRITE_TOOL_NAMES.has(toolEvent.tool)) {
-                    const path = toolEvent.args?.path as string;
-                    if (path) {
-                      const snap = useAppStore.getState().openFiles.find(f => f.path === path)?.content;
-                      if (snap) toolEvent.beforeContent = snap;
-                    }
+              }
+              pending.buf += delta;
+              pending.iterIdx = iterIdx;
+              if (!pending.timer) {
+                pending.timer = setTimeout(() => flushPendingDelta(assistantId), 50);
+              }
+              break;
+            }
+            case 'tool_start':
+            case 'tool_result':
+            case 'tool_error': {
+              flushPendingDelta(assistantId);
+              const toolEvent: ToolEvent = {
+                type: evt.type as ToolEvent['type'],
+                tool: evt.tool as string,
+                args: evt.args as Record<string, unknown>,
+                result: evt.result,
+                error: evt.error as string | undefined,
+                iteration: evt.iteration as number,
+                callId: evt.callId as string,
+              };
+              const iterIdx = toolEvent.iteration;
+              if (evt.type === 'tool_start') {
+                textIterationRef.current = iterIdx + 1;
+                setIteration(iterIdx + 1);
+                setCurrentAction(`${toolEvent.tool} ${(toolEvent.args?.path as string) || ''}`);
+                if (WRITE_TOOL_NAMES.has(toolEvent.tool)) {
+                  const path = toolEvent.args?.path as string;
+                  if (path) {
+                    const snap = useAppStore.getState().openFiles.find(f => f.path === path)?.content;
+                    if (snap) toolEvent.beforeContent = snap;
                   }
                 }
-                updateAgentMessage(assistantId, (prev) => {
-                  const iters = prev.iterations ? [...prev.iterations] : [];
-                  const existing = iters.find(it => it.index === iterIdx);
-                  const truncated = truncateResult(toolEvent);
-                  if (existing) existing.toolEvents = [...existing.toolEvents, truncated];
-                  else iters.push({ index: iterIdx, text: '', toolEvents: [truncated] });
-                  return { iterations: iters };
-                });
-                if (evt.type === 'tool_result' || evt.type === 'tool_error') {
-                  await dispatchIDEActions(toolEvent);
-                }
-                // Extract plan data from create_plan / update_plan results
-                const tre = evt as { tool?: string; result?: { plan?: any } };
-                if ((tre.tool === 'create_plan' || tre.tool === 'update_plan') && tre.result?.plan) {
-                  setAgentPlan({ steps: tre.result.plan });
-                }
-                break;
               }
-              case 'text_complete': {
-                flushPendingDelta(assistantId);
-                const finalText = (evt.content as string) ?? '';
-                updateAgentMessage(assistantId, (prev) => ({
-                  content: finalText,
-                  isStreaming: false,
-                  iterations: prev.iterations?.map((it, idx) =>
-                    idx === (prev.iterations?.length ?? 0) - 1 ? { ...it, text: finalText } : it
-                  ),
-                }));
-                break;
+              updateAgentMessage(assistantId, (prev) => {
+                const iters = prev.iterations ? [...prev.iterations] : [];
+                const existing = iters.find(it => it.index === iterIdx);
+                const truncated = truncateResult(toolEvent);
+                if (existing) existing.toolEvents = [...existing.toolEvents, truncated];
+                else iters.push({ index: iterIdx, text: '', toolEvents: [truncated] });
+                return { iterations: iters };
+              });
+              if (evt.type === 'tool_result' || evt.type === 'tool_error') {
+                await dispatchIDEActions(toolEvent);
               }
-              case 'usage': {
-                const u = evt as Record<string, unknown>;
-                if (typeof u.promptTokens === 'number' && typeof u.completionTokens === 'number') {
-                  accumulateTokenUsage({ promptTokens: u.promptTokens, completionTokens: u.completionTokens, cachedTokens: u.cachedTokens as number | undefined });
-                }
-                break;
+              // Extract plan data from create_plan / update_plan results
+              const tre = evt as { tool?: string; result?: { plan?: AgentPlan['steps'] } };
+              if ((tre.tool === 'create_plan' || tre.tool === 'update_plan') && tre.result?.plan) {
+                setAgentPlan({ steps: tre.result.plan });
               }
-              case 'plan_update': {
-                const u = evt as Record<string, unknown>;
-                if (u.plan && typeof u.plan === 'object') {
-                  setAgentPlan(u.plan as any);
-                }
-                break;
-              }
-              case 'done':
-                flushPendingDelta(assistantId);
-                updateAgentMessage(assistantId, { isStreaming: false });
-                setIsGenerating(false);
-                setCurrentAction('');
-                break;
-              case 'error': {
-                flushPendingDelta(assistantId);
-                addTerminalLine(`[Agent Error]: ${evt.message as string}`);
-                const errMsg = useAppStore.getState().agentMessages.find(m => m.id === assistantId);
-                if (!errMsg?.content) {
-                  useAppStore.setState(state => ({
-                    agentMessages: state.agentMessages.filter(m => m.id !== assistantId),
-                  }));
-                } else {
-                  updateAgentMessage(assistantId, { isStreaming: false });
-                }
-                setIsGenerating(false);
-                setCurrentAction('');
-                break;
-              }
+              break;
             }
-          } catch { /* malformed SSE line — skip */ }
-        }
+            case 'text_complete': {
+              flushPendingDelta(assistantId);
+              const finalText = (evt.content as string) ?? '';
+              updateAgentMessage(assistantId, (prev) => ({
+                content: finalText,
+                isStreaming: false,
+                iterations: prev.iterations?.map((it, idx) =>
+                  idx === (prev.iterations?.length ?? 0) - 1 ? { ...it, text: finalText } : it
+                ),
+              }));
+              break;
+            }
+            case 'usage': {
+              const u = evt as Record<string, unknown>;
+              if (typeof u.promptTokens === 'number' && typeof u.completionTokens === 'number') {
+                accumulateTokenUsage({ promptTokens: u.promptTokens, completionTokens: u.completionTokens, cachedTokens: u.cachedTokens as number | undefined });
+              }
+              break;
+            }
+            case 'plan_update': {
+              const u = evt as Record<string, unknown>;
+              if (u.plan && typeof u.plan === 'object') {
+                setAgentPlan(u.plan as AgentPlan);
+              }
+              break;
+            }
+            case 'done':
+              flushPendingDelta(assistantId);
+              updateAgentMessage(assistantId, { isStreaming: false });
+              setIsGenerating(false);
+              setCurrentAction('');
+              break;
+            case 'error': {
+              flushPendingDelta(assistantId);
+              addTerminalLine(`[Agent Error]: ${evt.message as string}`);
+              const errMsg = useAppStore.getState().agentMessages.find(m => m.id === assistantId);
+              if (!errMsg?.content) {
+                useAppStore.setState(state => ({
+                  agentMessages: state.agentMessages.filter(m => m.id !== assistantId),
+                }));
+              } else {
+                updateAgentMessage(assistantId, { isStreaming: false });
+              }
+              setIsGenerating(false);
+              setCurrentAction('');
+              break;
+            }
+          }
+        } catch { /* malformed SSE line — skip */ }
       }
     } catch (err) {
       flushPendingDelta(assistantId);
@@ -448,7 +451,7 @@ export const AgentChatPanel: React.FC = () => {
       setIsGenerating(false);
       setCurrentAction('');
     }
-  }, [agentMessages, isGenerating, currentProject, activeFile, openFiles, selectedAgentModel, selectedAgentProvider, previewSnapshot, previewBodyHTML, previewConsoleBuffer, previewSelectedElement, addAgentMessage, updateAgentMessage, dispatchIDEActions, addTerminalLine, flushPendingDelta]);
+  }, [agentMessages, isGenerating, currentProject, activeFile, openFiles, selectedAgentModel, selectedAgentProvider, previewSnapshot, previewBodyHTML, previewConsoleBuffer, previewSelectedElement, addAgentMessage, updateAgentMessage, dispatchIDEActions, addTerminalLine, flushPendingDelta, accumulateTokenUsage, setAgentPlan]);
 
   const handleModelChange = useCallback((model: string, provider: string) => {
     useAppStore.getState().setSelectedAgentModel(model);
@@ -456,7 +459,7 @@ export const AgentChatPanel: React.FC = () => {
   }, []);
 
   return (
-    <div className="flex flex-col h-full bg-jb-panel border-l border-white/[0.06]">
+    <div className="flex flex-col h-full bg-jb-panel border-l border-white/[0.14]">
       <AgentStatusBar
         isGenerating={isGenerating}
         currentAction={currentAction}

@@ -33,7 +33,7 @@ export const AgentStatusBar: React.FC<Props> = ({
     AGENT_MODEL_OPTIONS.find(m => m.model === model) ?? AGENT_MODEL_OPTIONS[0];
 
   return (
-    <div className="flex items-center justify-between px-3 py-2 border-b border-white/[0.06] bg-white/[0.02]">
+    <div className="flex items-center justify-between px-3 py-2 border-b border-white/[0.16] bg-white/[0.04] shadow-[inset_0_-1px_0_rgba(255,255,255,0.04)]">
       <div className="flex items-center gap-3">
         <span className="text-[11px] font-black uppercase tracking-[0.2em] text-white/60">Agent</span>
         <span className="text-[11px] text-white/20">·</span>

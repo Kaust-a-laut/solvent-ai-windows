@@ -11,9 +11,12 @@ export class PathSecurityError extends Error {
 const withSeparator = (value: string): string =>
   value.endsWith(path.sep) ? value : value + path.sep;
 
+const normalizeCase = (value: string): string =>
+  process.platform === 'win32' ? value.toLowerCase() : value;
+
 export function isPathInside(candidate: string, root: string): boolean {
-  const resolvedCandidate = path.resolve(candidate);
-  const resolvedRoot = path.resolve(root);
+  const resolvedCandidate = normalizeCase(path.resolve(candidate));
+  const resolvedRoot = normalizeCase(path.resolve(root));
   return resolvedCandidate === resolvedRoot || resolvedCandidate.startsWith(withSeparator(resolvedRoot));
 }
 
@@ -25,7 +28,7 @@ async function realPathWithMissingTail(target: string): Promise<string> {
   const resolvedTarget = path.resolve(target);
   let current = resolvedTarget;
   const tail: string[] = [];
-  while (true) {
+  for (;;) {
     try {
       const real = await fs.realpath(current);
       return tail.length === 0 ? real : path.join(real, ...tail.reverse());
@@ -55,8 +58,11 @@ export async function resolveSecurePath(
     throw new PathSecurityError();
   }
 
-  const realPath = await realPathWithMissingTail(resolvedPath);
-  const allowed = permittedRoots.map(p => path.resolve(p)).some(permittedRoot =>
+  const [realPath, realPermittedRoots] = await Promise.all([
+    realPathWithMissingTail(resolvedPath),
+    Promise.all(permittedRoots.map(p => realPathWithMissingTail(p))),
+  ]);
+  const allowed = realPermittedRoots.some(permittedRoot =>
     isPathInside(realPath, permittedRoot)
   );
 
@@ -72,6 +78,18 @@ export async function resolveSecureChildPath(
   childPath: string | undefined,
   permittedRoots: string[],
 ): Promise<string> {
-  if (!childPath) return path.resolve(root);
+  if (!childPath) {
+    const [realRoot, realPermittedRoots] = await Promise.all([
+      realPathWithMissingTail(root),
+      Promise.all(permittedRoots.map(p => realPathWithMissingTail(p))),
+    ]);
+    const allowed = realPermittedRoots.some(permittedRoot =>
+      isPathInside(realRoot, permittedRoot)
+    );
+    if (!allowed) {
+      throw new PathSecurityError();
+    }
+    return realRoot;
+  }
   return resolveSecurePath(childPath, root, permittedRoots);
 }

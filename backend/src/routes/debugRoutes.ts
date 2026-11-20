@@ -1,10 +1,17 @@
 import { Router } from 'express';
+import { z } from 'zod';
 import { memoryMetrics } from '../utils/memoryMetrics';
 import { vectorService } from '../services/vectorService';
-import fs from 'fs/promises';
-import path from 'path';
 
 const router = Router();
+
+const MAX_MEMORY_SAMPLE_LIMIT = 100;
+const DEFAULT_MEMORY_SAMPLE_LIMIT = 10;
+
+const memorySampleQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(MAX_MEMORY_SAMPLE_LIMIT)
+    .catch(DEFAULT_MEMORY_SAMPLE_LIMIT).default(DEFAULT_MEMORY_SAMPLE_LIMIT),
+});
 
 router.get('/memory-stats', (_req, res) => {
   const stats = memoryMetrics.getStats();
@@ -17,7 +24,7 @@ router.get('/metrics', (_req, res) => {
 });
 
 router.get('/memory-sample', (req, res) => {
-  const limit = parseInt(req.query.limit as string) || 10;
+  const { limit } = memorySampleQuerySchema.parse(req.query);
   const entries = vectorService.getRecentEntries(limit);
 
   // Redact vectors for readability
@@ -35,20 +42,9 @@ router.post('/reset-metrics', (_req, res) => {
   res.json({ success: true, message: 'Metrics reset' });
 });
 
-router.get('/traces', async (_req, res) => {
-  try {
-    const tracePath = path.resolve(__dirname, '../../../../.solvent_retrieval_traces.jsonl');
-    const content = await fs.readFile(tracePath, 'utf-8');
-    const lines = content.split('\n').filter(line => line.trim().length > 0);
-    const traces = lines.map(line => JSON.parse(line));
-    res.json(traces.reverse().slice(0, 100)); // Return last 100 traces
-  } catch (error: any) {
-    if (error.code === 'ENOENT') {
-      res.json([]);
-    } else {
-      res.status(500).json({ error: 'Failed to read traces' });
-    }
-  }
-});
+// GET /traces was removed — superseded by the more capable
+// AIController.getTraces (mounted at GET /api/v1/debug/traces), which is the
+// only endpoint the frontend (DebugTab.tsx) actually calls and additionally
+// supports query/mode/since/outcome filtering and localhost-gating.
 
 export default router;

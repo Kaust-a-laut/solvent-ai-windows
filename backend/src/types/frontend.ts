@@ -7,4 +7,6 @@ export interface Message {
   thinking?: string;
   isGeneratedImage?: boolean;
   imageUrl?: string;
+  /** Epoch ms when the message was created on the frontend. */
+  createdAt?: number;
 }

@@ -9,7 +9,7 @@ import { useShallow } from 'zustand/react/shallow';
 import { API_BASE_URL } from '../lib/config';
 import { cn } from '../lib/utils';
 import { TabButton } from './settings/shared';
-import { TAB_TITLES, TAB_SUBTITLES, SETTINGS_DEFAULTS } from './settings/settingsDefaults';
+import { TAB_TITLES, TAB_SUBTITLES } from './settings/settingsDefaults';
 import { useSettingsSearch } from './settings/useSettingsSearch';
 import { AboutSection } from './settings/AboutSection';
 import { ModelsTab } from './settings/ModelsTab';
@@ -24,14 +24,12 @@ export const SettingsModal = () => {
   const {
     settingsOpen, setSettingsOpen,
     settingsInitialTab, setSettingsInitialTab,
-    apiKeys,
   } = useAppStore(
     useShallow((s) => ({
       settingsOpen: s.settingsOpen,
       setSettingsOpen: s.setSettingsOpen,
       settingsInitialTab: s.settingsInitialTab,
       setSettingsInitialTab: s.setSettingsInitialTab,
-      apiKeys: s.apiKeys,
     }))
   );
 
@@ -58,9 +56,13 @@ export const SettingsModal = () => {
   }, [settingsOpen]);
 
   // ── Initial tab from external navigation ──────────────────────────────────
+  // Adopt the requested tab during render (render-adjust idiom); the store
+  // handoff slot is cleared in the effect afterwards.
+  if (settingsOpen && settingsInitialTab && activeTab !== settingsInitialTab) {
+    setActiveTab(settingsInitialTab as TabId);
+  }
   useEffect(() => {
     if (settingsOpen && settingsInitialTab) {
-      setActiveTab(settingsInitialTab as TabId);
       setSettingsInitialTab(null);
     }
   }, [settingsOpen, settingsInitialTab, setSettingsInitialTab]);
@@ -152,7 +154,8 @@ export const SettingsModal = () => {
         if (data.auraMode) state.setAuraMode(data.auraMode);
         if (data.performanceMode) state.setPerformanceMode(data.performanceMode);
         if (data.modeConfigs) {
-          Object.entries(data.modeConfigs).forEach(([mode, config]: [string, any]) => {
+          const modeConfigs = data.modeConfigs as Record<string, { provider: string; model: string }>;
+          Object.entries(modeConfigs).forEach(([mode, config]) => {
             state.setModeConfig(mode, config);
           });
         }

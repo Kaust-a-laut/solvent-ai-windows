@@ -3,24 +3,31 @@ import { cn } from '../../lib/utils';
 import { useAppStore } from '../../store/useAppStore';
 import { STAGE_CONFIGS, type StageKey } from './WaterfallStageCard';
 import { WATERFALL_PRESETS_BY_KEY } from '../../lib/waterfallPresets';
+import { modelLabelLookup, PROVIDER_LABELS } from './waterfallConstants';
+import type { WaterfallModelSelection } from '../../store/waterfallSlice';
 import { ArrowDown, Workflow, ArrowUpCircle, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const STAGE_ORDER: StageKey[] = ['planner', 'executor', 'reviewer'];
 
-// Resolve model label for a stage from the current preset
+// Resolve the label for a stage from the live model selection. This is the
+// source of truth — when the user is in 'custom' mode the preset itself has no
+// stageLabels, so we look up the actual chosen model + provider.
 function resolveModelLabel(
   stage: StageKey,
+  selection: WaterfallModelSelection,
   presetKey: string,
 ): { model: string; provider: string } {
+  const choice = selection[stage];
+  if (typeof choice === 'object') {
+    const name = modelLabelLookup.get(`${choice.provider}:${choice.model}`) ?? choice.model;
+    const provider = PROVIDER_LABELS[choice.provider] ?? choice.provider;
+    return { model: name, provider };
+  }
+  // Sentinel 'A'/'B' choices — fall back to the preset's display labels.
   const preset = WATERFALL_PRESETS_BY_KEY[presetKey];
-  if (!preset) return { model: 'Custom', provider: '' };
-  return {
-    model: preset.stageLabels[stage],
-    provider: typeof preset.selection[stage] === 'object'
-      ? (preset.selection[stage] as { provider: string }).provider
-      : '',
-  };
+  if (preset) return { model: preset.stageLabels[stage], provider: '' };
+  return { model: '—', provider: '' };
 }
 
 interface UpgradeSuggestion {
@@ -45,7 +52,7 @@ export const WaterfallFlowPreview = ({
   onDismissUpgrade: (key: string) => void;
   onSwapModel: (stage: StageKey, model: string, provider: string) => void;
 }) => {
-  const { waterfallPresetKey } = useAppStore();
+  const { waterfallPresetKey, waterfallModelSelection } = useAppStore();
   const [activePopover, setActivePopover] = useState<StageKey | null>(null);
   const preset = WATERFALL_PRESETS_BY_KEY[waterfallPresetKey];
 
@@ -72,7 +79,7 @@ export const WaterfallFlowPreview = ({
   }
 
   return (
-    <div className="glass-panel rounded-[2rem] overflow-hidden h-fit sticky top-6">
+    <div className="surface-1 bg-white/[0.035] rounded-[2rem] overflow-hidden h-fit sticky top-6 backdrop-blur-xl">
       <div className="p-6 space-y-5">
 
         {/* Header */}
@@ -88,7 +95,7 @@ export const WaterfallFlowPreview = ({
           {STAGE_ORDER.map((stage, i) => {
             const cfg = STAGE_CONFIGS[stage];
             const Icon = cfg.icon;
-            const { model, provider } = resolveModelLabel(stage, waterfallPresetKey);
+            const { model, provider } = resolveModelLabel(stage, waterfallModelSelection, waterfallPresetKey);
             const isLast = i === STAGE_ORDER.length - 1;
 
             return (
@@ -97,27 +104,27 @@ export const WaterfallFlowPreview = ({
                   initial={{ opacity: 0, x: 12 }}
                   animate={{ opacity: 1, x: 0 }}
                   transition={{ delay: i * 0.08, duration: 0.3 }}
-                  className="flex items-center gap-4"
+                  className="flex items-center gap-3.5"
                 >
-                  {/* Icon node */}
+                  {/* Icon node — slightly larger to anchor the row */}
                   <div className={cn(
-                    'w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border',
+                    'w-11 h-11 rounded-xl flex items-center justify-center shrink-0 border',
                     cfg.bgColor,
-                    `border-${cfg.color}/20`,
+                    `border-${cfg.color}/25`,
                   )}>
-                    <Icon size={18} className={cfg.textColor} />
+                    <Icon size={19} className={cfg.textColor} />
                   </div>
 
-                  {/* Info */}
+                  {/* Info — model name is the focal point, stage label demoted to sub-line. */}
                   <div className="flex-1 min-w-0">
-                    <span className={cn('text-[12px] font-black uppercase tracking-wider block', cfg.textColor)}>
+                    <span className={cn('text-[9px] font-black uppercase tracking-[0.2em] block leading-none mb-1', cfg.textColor)}>
                       {cfg.displayName}
                     </span>
-                    <span className="text-[13px] font-bold text-white block truncate">
+                    <span className="text-[14px] font-black text-white block truncate leading-tight tracking-tight" title={model}>
                       {model}
                     </span>
                     {provider && (
-                      <span className="text-[11px] text-slate-300 font-medium capitalize">
+                      <span className="inline-block mt-1 px-1.5 py-[1px] rounded text-[9px] font-mono font-semibold uppercase tracking-wider text-slate-300 bg-white/[0.04] border border-white/[0.08]">
                         {provider}
                       </span>
                     )}
@@ -199,8 +206,8 @@ export const WaterfallFlowPreview = ({
         </div>
 
         {/* Description footer */}
-        <div className="pt-3 border-t border-white/[0.04]">
-          <p className="text-[12px] text-slate-400 leading-relaxed">
+        <div className="pt-3 border-t border-white/[0.08]">
+          <p className="text-[12px] text-slate-300 leading-relaxed">
             Each stage streams its output to the next. The planner decomposes and strategizes, the executor implements, and the reviewer scores.
           </p>
         </div>

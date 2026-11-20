@@ -3,12 +3,12 @@ import { useAppStore } from '../store/useAppStore';
 import { motion, AnimatePresence } from 'framer-motion';
 import type { WaterfallStepPayload } from '../store/waterfallSlice';
 import {
-  Compass, Brain, Code, Eye, ChevronRight, ChevronDown,
+  Brain, Code, Eye, ChevronRight, ChevronDown,
   CheckCircle2, Loader2, AlertCircle, Circle, Pause,
   ExternalLink, FlaskConical, Sparkles, Zap, Clock,
 } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { WATERFALL_PRESET_LIST, type WaterfallPresetMeta } from '../lib/waterfallPresets';
+import { WATERFALL_PRESET_LIST } from '../lib/waterfallPresets';
 
 // ─── Stage configs matching WaterfallStageCard palette ─────────────────────
 
@@ -284,7 +284,7 @@ export const WaterfallVisualizer = () => {
 
         {/* Link to full view */}
         <button
-          onClick={() => setCurrentMode('waterfall' as 'waterfall')}
+          onClick={() => setCurrentMode('waterfall' as const)}
           className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.03] border border-white/5 text-slate-400 text-[11px] font-black uppercase tracking-wider hover:bg-white/[0.06] hover:text-slate-400 transition-all"
         >
           <ExternalLink size={9} />
@@ -398,7 +398,7 @@ export const WaterfallVisualizer = () => {
 
       {/* Open in main app */}
       <button
-        onClick={() => setCurrentMode('waterfall' as 'waterfall')}
+        onClick={() => setCurrentMode('waterfall' as const)}
         className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-white/[0.03] border border-white/5 text-slate-300 text-[11px] font-black uppercase tracking-wider hover:bg-white/[0.06] hover:text-white transition-all"
       >
         <ExternalLink size={9} />

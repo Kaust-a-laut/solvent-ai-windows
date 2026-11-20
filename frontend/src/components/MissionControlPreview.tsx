@@ -1,10 +1,9 @@
 import React from 'react';
-import { 
-  Terminal, GripHorizontal, Network, FileText, Save, 
-  ExternalLink, Minimize2, X, FlaskConical, Code, 
+import {
+  Terminal, GripHorizontal, Network,
+  ExternalLink, X, FlaskConical, Code,
   ScanEye, Globe, Sparkles, Zap, Smartphone
 } from 'lucide-react';
-import { cn } from '../lib/utils';
 
 export const MissionControlPreview = () => {
   return (

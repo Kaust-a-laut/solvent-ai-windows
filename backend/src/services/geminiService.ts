@@ -39,14 +39,15 @@ export class GeminiService implements AIProvider {
   }
 
   async generateChatCompletion(messages: ChatMessage[], options: CompletionOptions): Promise<string> {
-    const { model: modelName, shouldSearch, temperature = 0.7, maxTokens = 2048, apiKey } = options;
+    const { model: modelName, shouldSearch, temperature = 0.7, maxTokens = 2048, apiKey, signal } = options;
+    if (messages.length === 0) throw new Error('No messages provided');
 
     const genAI = this.getGenAI(apiKey);
-    const tools = this.getToolDefinitions() as Tool[];
+    const tools = shouldSearch === false || options.jsonMode ? undefined : (this.getToolDefinitions() as Tool[]);
 
     const model = genAI.getGenerativeModel({
       model: modelName,
-      tools,
+      ...(tools ? { tools } : {}),
       generationConfig: {
         temperature,
         maxOutputTokens: maxTokens,
@@ -59,75 +60,81 @@ export class GeminiService implements AIProvider {
     const chat = model.startChat({ history });
     const lastMessage = messages[messages.length - 1]!.content;
 
+    const MAX_TOOL_ITERATIONS = 10;
     try {
       let result = await withTimeout(chat.sendMessage(lastMessage), GEMINI_TIMEOUT_MS, 'Gemini chat');
       let response = await result.response;
-      let call = response.candidates?.[0]?.content?.parts?.find(p => p.functionCall);
+      let calls = (response.candidates?.[0]?.content?.parts ?? []).filter(p => p.functionCall);
+      let iteration = 0;
 
-      // Handle Tool Calls (Recursive)
-      while (call && call.functionCall) {
-        const rawArgs = call.functionCall.args;
-        const isPlainArgsObject =
-          rawArgs != null &&
-          typeof rawArgs === 'object' &&
-          !Array.isArray(rawArgs);
-
-        let toolResult: unknown;
-        if (!isPlainArgsObject) {
-          // Gemini occasionally hands back malformed function-call args. Surface
-          // a structured error to the next turn so the model can self-correct
-          // instead of forwarding garbage into toolService.executeTool, which
-          // assumes a Record<string, unknown>.
-          logger.warn(`[GeminiService] Invalid functionCall.args for ${call.functionCall.name}: ${typeof rawArgs}`);
-          toolResult = {
-            error: `Tool arguments must be a JSON object. Received ${Array.isArray(rawArgs) ? 'array' : typeof rawArgs}.`
-          };
-        } else {
-          toolResult = await toolService.executeTool(
-            call.functionCall.name,
-            rawArgs as Record<string, unknown>
-          );
+      // Handle Tool Calls (bounded loop; responds to ALL parallel functionCalls per turn)
+      while (calls.length > 0) {
+        if (signal?.aborted) throw new Error('Gemini request aborted');
+        if (++iteration > MAX_TOOL_ITERATIONS) {
+          throw new Error(`GeminiService exceeded max tool-calling iterations (${MAX_TOOL_ITERATIONS})`);
         }
 
-        const fnResponse = {
-          functionResponse: {
-            name: call.functionCall.name,
-            response: { content: toolResult }
-          }
-        };
+        const responseParts: Array<Record<string, unknown>> = [];
+        for (const part of calls) {
+          const fnCall = part.functionCall!;
+          const rawArgs = fnCall.args;
+          const isPlainArgsObject =
+            rawArgs != null &&
+            typeof rawArgs === 'object' &&
+            !Array.isArray(rawArgs);
 
-        // If it was a UI capture, inject the image into the next turn for visual reasoning
-        const captureBase64 =
-          call.functionCall.name === 'capture_ui' &&
-          toolResult != null &&
-          typeof toolResult === 'object' &&
-          typeof (toolResult as { base64?: unknown }).base64 === 'string'
-            ? (toolResult as { base64: string }).base64
-            : undefined;
-        let messageParts: Parameters<typeof chat.sendMessage>[0];
-        if (captureBase64) {
-          const imageInfo = extractImageFromDataUrl(captureBase64);
-          if (imageInfo) {
-            messageParts = [
-              fnResponse,
-              {
-                inlineData: {
-                  data: imageInfo.data,
-                  mimeType: imageInfo.mimeType
-                }
-              },
-              { text: "Above is the screenshot I just captured. Analyze it to verify the UI state." }
-            ];
+          let toolResult: unknown;
+          if (!isPlainArgsObject) {
+            logger.warn(`[GeminiService] Invalid functionCall.args for ${fnCall.name}: ${typeof rawArgs}`);
+            toolResult = {
+              error: `Tool arguments must be a JSON object. Received ${Array.isArray(rawArgs) ? 'array' : typeof rawArgs}.`
+            };
           } else {
-            messageParts = [fnResponse];
+            try {
+              toolResult = await toolService.executeTool(
+                fnCall.name,
+                rawArgs as Record<string, unknown>
+              );
+            } catch (toolErr: unknown) {
+              const msg = toolErr instanceof Error ? toolErr.message : String(toolErr);
+              logger.error(`[GeminiService] Tool ${fnCall.name} failed: ${msg}`);
+              toolResult = { error: msg };
+            }
           }
-        } else {
-          messageParts = [fnResponse];
+
+          responseParts.push({
+            functionResponse: {
+              name: fnCall.name,
+              response: { content: toolResult }
+            }
+          });
+
+          // If it was a UI capture, inject the image into the next turn for visual reasoning
+          const captureBase64 =
+            fnCall.name === 'capture_ui' &&
+            toolResult != null &&
+            typeof toolResult === 'object' &&
+            typeof (toolResult as { base64?: unknown }).base64 === 'string'
+              ? (toolResult as { base64: string }).base64
+              : undefined;
+          if (captureBase64) {
+            const imageInfo = extractImageFromDataUrl(captureBase64);
+            if (imageInfo) {
+              responseParts.push(
+                { inlineData: { data: imageInfo.data, mimeType: imageInfo.mimeType } },
+                { text: "Above is the screenshot I just captured. Analyze it to verify the UI state." }
+              );
+            }
+          }
         }
 
-        result = await withTimeout(chat.sendMessage(messageParts), GEMINI_TIMEOUT_MS, 'Gemini tool response');
+        result = await withTimeout(
+          chat.sendMessage(responseParts as unknown as Parameters<typeof chat.sendMessage>[0]),
+          GEMINI_TIMEOUT_MS,
+          'Gemini tool response'
+        );
         response = await result.response;
-        call = response.candidates?.[0]?.content?.parts?.find(p => p.functionCall);
+        calls = (response.candidates?.[0]?.content?.parts ?? []).filter(p => p.functionCall);
       }
 
       return response.text();
@@ -139,9 +146,10 @@ export class GeminiService implements AIProvider {
   }
 
   async *generateChatStream(messages: ChatMessage[], options: CompletionOptions): AsyncGenerator<string> {
-    const { model: modelName, shouldSearch, temperature = 0.7, maxTokens = 2048 } = options;
+    const { model: modelName, temperature = 0.7, maxTokens = 2048, apiKey, signal } = options;
+    if (signal?.aborted) return;
 
-    const genAI = this.getGenAI();
+    const genAI = this.getGenAI(apiKey);
     const model = genAI.getGenerativeModel({
       model: modelName,
       generationConfig: {
@@ -159,7 +167,9 @@ export class GeminiService implements AIProvider {
     const result = await withTimeout(chat.sendMessageStream(lastMessage), GEMINI_TIMEOUT_MS, 'Gemini stream');
 
     for await (const chunk of result.stream) {
-      yield chunk.text();
+      if (signal?.aborted) break;
+      const text = chunk.text();
+      if (text) yield text;
     }
   }
 

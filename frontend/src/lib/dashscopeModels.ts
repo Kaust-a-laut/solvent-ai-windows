@@ -3,6 +3,12 @@
 
 export const DASHSCOPE_CHAT_MODELS = [
   // Qwen 3.6 — latest generation
+  { label: 'Qwen 3.7 Max',            value: 'qwen3.7-max' },
+
+  { label: 'Qwen 3.7 Max Preview',    value: 'qwen3.7-max-preview' },
+
+  { label: 'Qwen 3.7 Plus',           value: 'qwen3.7-plus' },
+
   { label: 'Qwen 3.6 Max Preview',   value: 'qwen3.6-max-preview' },
   { label: 'Qwen 3.6 Plus',          value: 'qwen3.6-plus' },
   { label: 'Qwen 3.6 Flash',         value: 'qwen3.6-flash' },
@@ -30,7 +36,6 @@ export const DASHSCOPE_CHAT_MODELS = [
   { label: 'Qwen3 32B',              value: 'qwen3-32b' },
   { label: 'Qwen3 14B',              value: 'qwen3-14b' },
   { label: 'Qwen3 8B',               value: 'qwen3-8b' },
-  { label: 'Qwen3 4B',               value: 'qwen3-4b' },
   { label: 'Qwen3 30B A3B',          value: 'qwen3-30b-a3b' },
   // Reasoning
   { label: 'QwQ Plus',               value: 'qwq-plus' },

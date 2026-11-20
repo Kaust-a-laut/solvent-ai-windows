@@ -25,9 +25,13 @@ export const TextNode: React.FC<NodeProps> = ({ id, data, selected }) => {
   const taRef = useRef<HTMLTextAreaElement | null>(null);
   const updateActive = useAppStore((s) => s.notepadUpdateActive);
 
-  useEffect(() => {
+  // Sync draft when the node text changes externally (render-adjust idiom —
+  // an effect would paint one frame with the stale draft first).
+  const [lastText, setLastText] = useState(d.text);
+  if (d.text !== lastText) {
+    setLastText(d.text);
     setDraft(d.text ?? '');
-  }, [d.text]);
+  }
 
   useEffect(() => {
     if (editing) {

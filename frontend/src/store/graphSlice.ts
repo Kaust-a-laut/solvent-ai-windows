@@ -22,6 +22,13 @@ export interface GraphSlice {
   upsertMission: (mission: Partial<ActiveMission> & { jobId: string }) => void;
 }
 
+// Long-running sessions (or a session that keeps emitting <graph_data>
+// blocks) would otherwise grow these arrays unboundedly — mirrors the
+// capped-array pattern already used for agentMessages/terminalLines/
+// previewConsoleBuffer in codingSlice.ts.
+const MAX_GRAPH_NODES = 300;
+const MAX_GRAPH_EDGES = 600;
+
 export const createGraphSlice: StateCreator<AppState, [], [], GraphSlice> = (set) => ({
   graphNodes: [],
   graphEdges: [],
@@ -31,11 +38,19 @@ export const createGraphSlice: StateCreator<AppState, [], [], GraphSlice> = (set
   overseerDecisions: [],
   activeMissions: [],
 
-  addGraphNode: (node) => set((state) => ({
-    graphNodes: [...state.graphNodes.filter(n => n.id !== node.id), node]
-  })),
+  addGraphNode: (node) => set((state) => {
+    const nodes = [...state.graphNodes.filter(n => n.id !== node.id), node];
+    if (nodes.length <= MAX_GRAPH_NODES) return { graphNodes: nodes };
+    const trimmed = nodes.slice(-MAX_GRAPH_NODES);
+    const keepIds = new Set(trimmed.map(n => n.id));
+    return {
+      graphNodes: trimmed,
+      // Evicting a node would otherwise leave dangling edges pointing at it.
+      graphEdges: state.graphEdges.filter(e => keepIds.has(e.source) && keepIds.has(e.target))
+    };
+  }),
   addGraphEdge: (edge) => set((state) => ({
-    graphEdges: [...state.graphEdges, edge]
+    graphEdges: [...state.graphEdges, edge].slice(-MAX_GRAPH_EDGES)
   })),
   removeGraphNode: (id) => set((state) => ({
     graphNodes: state.graphNodes.filter(n => n.id !== id),

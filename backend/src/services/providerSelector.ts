@@ -1,9 +1,10 @@
 import { pluginManager } from './pluginManager';
 import { circuitBreaker } from './circuitBreaker';
-import { IProviderPlugin, ProviderCapabilities } from '../types/plugins';
+import { IProviderPlugin } from '../types/plugins';
 
 export interface SelectionCriteria {
   priority: 'cost' | 'performance' | 'reliability';
+  excludeProviders?: string[];
   requirements: {
     minContext?: number;
     supportsVision?: boolean;
@@ -15,26 +16,44 @@ export interface SelectionCriteria {
 export class ProviderSelector {
   async select(criteria: SelectionCriteria): Promise<IProviderPlugin> {
     const allProviders = pluginManager.getAllProviders();
-    
-    // 1. Filter by Health & Circuit Breaker
-    const available = [];
+    const excluded = new Set(criteria.excludeProviders ?? []);
+
+    // 1. Filter by readiness, configured credentials, requirements, and read-only circuit availability
+    // (avoiding side-effecting isOpen() transitions on unselected candidates)
+    const available: IProviderPlugin[] = [];
     for (const p of allProviders) {
+      if (excluded.has(p.id)) continue;
       if (!p.isReady()) continue;
-      if (await circuitBreaker.isOpen(p.id)) continue;
+      if (typeof p.hasConfiguredKey === 'function' && !p.hasConfiguredKey()) continue;
       if (!this.meetsRequirements(p, criteria.requirements)) continue;
+      const availableNow = typeof circuitBreaker.isAvailable === 'function'
+        ? await circuitBreaker.isAvailable(p.id)
+        : !(await circuitBreaker.isOpen(p.id));
+      if (!availableNow) continue;
       available.push(p);
     }
 
     if (available.length === 0) throw new Error("No healthy providers match requirements");
 
     // 2. Sort by Criteria
-    return available.sort((a, b) => {
+    available.sort((a, b) => {
       if (criteria.priority === 'cost') {
         return this.calculateCost(a, criteria) - this.calculateCost(b, criteria);
       }
-      // Implement 'performance' or 'reliability' sorting here later
+      if (criteria.priority === 'performance') {
+        return (b.capabilities?.contextWindow ?? 0) - (a.capabilities?.contextWindow ?? 0);
+      }
       return 0;
-    })[0]!;
+    });
+
+    // 3. Acquire circuit slot only on the chosen candidate (and fall through if another probe beat us)
+    for (const candidate of available) {
+      if (!(await circuitBreaker.isOpen(candidate.id))) {
+        return candidate;
+      }
+    }
+
+    throw new Error("No healthy providers match requirements");
   }
 
   private meetsRequirements(p: IProviderPlugin, reqs: { supportsVision?: boolean; minContext?: number }): boolean {

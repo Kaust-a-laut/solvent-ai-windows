@@ -2,9 +2,9 @@ import { logger } from '../utils/logger';
 
 export const MODELS = {
   GEMINI: {
-    PRO_3_1: 'gemini-3.1-pro',
+    // GA ids gemini-3.1-pro / gemini-3-flash are not served yet (verified
+    // 2026-06-10 via tests/audit-models.ts) — previews are the live ids.
     PRO_3_1_PREVIEW: 'gemini-3.1-pro-preview',
-    FLASH_3: 'gemini-3-flash',
     FLASH_3_PREVIEW: 'gemini-3-flash-preview',
     FLASH_LITE_3_1: 'gemini-3.1-flash-lite',
     FLASH_LITE_3_1_PREVIEW: 'gemini-3.1-flash-lite-preview',
@@ -65,6 +65,9 @@ export const MODELS = {
     QWEN3_CODER: 'qwen/qwen3-coder',
   },
   DASHSCOPE: {
+    QWEN3_7_MAX: 'qwen3.7-max',
+    QWEN3_7_MAX_PREVIEW: 'qwen3.7-max-preview',
+    QWEN3_7_PLUS: 'qwen3.7-plus',
     QWEN3_6_MAX_PREVIEW: 'qwen3.6-max-preview',
     QWEN3_6_PLUS: 'qwen3.6-plus',
     QWEN3_6_FLASH: 'qwen3.6-flash',
@@ -78,6 +81,10 @@ export const MODELS = {
     QWEN_FLASH: 'qwen-flash',
   },
   DASHSCOPE_MODELS: [
+    // Qwen 3.7 (current flagship line)
+    'qwen3.7-max',
+    'qwen3.7-max-preview',
+    'qwen3.7-plus',
     // Qwen 3.6
     'qwen3.6-max-preview',
     'qwen3.6-plus',
@@ -106,7 +113,6 @@ export const MODELS = {
     'qwen3-32b',
     'qwen3-14b',
     'qwen3-8b',
-    'qwen3-4b',
     'qwen3-30b-a3b',
     // Reasoning
     'qwq-plus',
@@ -152,15 +158,11 @@ export const MODELS = {
     'nvidia/nemotron-3-nano-30b-a3b:free',
     'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
     'nvidia/nemotron-nano-9b-v2:free',
-    // Google Gemma
+    // Google Gemma (gemma-3 :free variants retired — verified 2026-06-10)
     'google/gemma-4-26b-a4b-it:free',
     'google/gemma-4-31b-it:free',
-    'google/gemma-3-27b-it:free',
-    'google/gemma-3-12b-it:free',
-    // Z.ai GLM
-    'z-ai/glm-4.5-air:free',
-    // MiniMax
-    'minimax/minimax-m2.5:free',
+    // Moonshot Kimi
+    'moonshotai/kimi-k2.6:free',
     // NousResearch
     'nousresearch/hermes-3-llama-3.1-405b:free',
   ]
@@ -289,7 +291,7 @@ export const WATERFALL_PRESETS: Record<string, WaterfallPreset> = {
     selection: {
       planner:  { model: 'openai/gpt-oss-120b:free', provider: 'openrouter' },
       executor: { model: 'qwen3-coder-plus', provider: 'dashscope' },
-      reviewer: { model: 'google/gemma-3-27b-it:free', provider: 'openrouter' },
+      reviewer: { model: 'google/gemma-4-26b-a4b-it:free', provider: 'openrouter' },
     },
   },
   'glm-speed': {
@@ -430,9 +432,7 @@ export const WATERFALL_CONFIG: Record<string, WaterfallPhaseConfig> = {
 
 export const CONTEXT_LIMITS: Record<string, number> = {
   // Gemini: Massive Context
-  'gemini-3.1-pro': 1000000,
   'gemini-3.1-pro-preview': 1000000,
-  'gemini-3-flash': 1000000,
   'gemini-3-flash-preview': 1000000,
   'gemini-3.1-flash-lite': 1000000,
   'gemini-3.1-flash-lite-preview': 1000000,
@@ -474,6 +474,9 @@ export const CONTEXT_LIMITS: Record<string, number> = {
   'gemini-3-flash-preview:cloud': 1000000,
 
   // DashScope (Qwen)
+  'qwen3.7-max': 131072,
+  'qwen3.7-max-preview': 131072,
+  'qwen3.7-plus': 131072,
   'qwen3.6-max-preview': 131072,
   'qwen3.6-plus': 131072,
   'qwen3.6-flash': 131072,
@@ -496,7 +499,6 @@ export const CONTEXT_LIMITS: Record<string, number> = {
   'qwen3-32b': 131072,
   'qwen3-14b': 131072,
   'qwen3-8b': 131072,
-  'qwen3-4b': 131072,
   'qwen3-30b-a3b': 131072,
   'qwq-plus': 131072,
   'qvq-max': 131072,
@@ -506,22 +508,14 @@ export const CONTEXT_LIMITS: Record<string, number> = {
   'qwen3-vl-flash': 131072,
   'deepseek-v3.2': 131072,
 
-  // Fireworks AI
+  // Fireworks AI — only the ids the account actually serves
+  // (verified 2026-06-10 via tests/audit-models.ts; flux-1-schnell is
+  // image-gen and has no chat context limit)
   'accounts/fireworks/models/kimi-k2p6': 262144,
   'accounts/fireworks/models/kimi-k2p5': 262144,
   'accounts/fireworks/models/glm-5p1': 202800,
-  'accounts/fireworks/models/glm-5': 202800,
-  'accounts/fireworks/models/deepseek-v3p2': 131072,
-  'accounts/fireworks/models/deepseek-v3p1': 131072,
-  'accounts/deepseek-ai/models/deepseek-v4-pro': 1000000,
+  'accounts/fireworks/models/deepseek-v4-pro': 1000000,
   'accounts/fireworks/models/gpt-oss-120b': 131072,
-  'accounts/fireworks/models/gpt-oss-20b': 131072,
-  'accounts/fireworks/models/minimax-m2p7': 196608,
-  'accounts/fireworks/models/minimax-m2p5': 196608,
-  'accounts/fireworks/models/qwen3p6-plus': 131072,
-  'accounts/fireworks/models/qwen3-235b-a22b': 131072,
-  'accounts/fireworks/models/qwen3-coder-480b-a35b-instruct': 262144,
-  'accounts/fireworks/models/llama-v3p3-70b-instruct': 131072,
 
   // Cerebras
   'gpt-oss-120b': 131072,

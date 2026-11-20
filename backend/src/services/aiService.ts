@@ -2,7 +2,7 @@ import { AIProviderFactory } from './aiProviderFactory';
 import { WaterfallService, WaterfallStep } from './waterfallService';
 import { WaterfallContext, WaterfallResult, WaterfallPausedResult, OpenFileContext } from '../types/waterfall';
 import { contextService, getHarnessSnapshot, ContextProvenance, ProvenanceItem } from './contextService';
-import { ChatRequestData, ChatMessage, CompletionOptions } from '../types/ai';
+import { ChatRequestData, ChatMessage } from '../types/ai';
 import { randomUUID as uuidv4 } from 'crypto';
 import { traceLogger, RetrievalTrace } from './traceLogger';
 import path from 'path';
@@ -19,6 +19,7 @@ import { logger } from '../utils/logger';
 import { config, APP_CONSTANTS } from '../config';
 import { MODELS } from '../constants/models';
 import type { WaterfallModelSelection } from '../constants/models';
+import { modelRegistryService } from './modelRegistryService';
 import { telemetryService } from './telemetryService';
 import { supervisorService } from './supervisorService';
 import type { AgentEvent } from '../types/agentEvents';
@@ -35,7 +36,8 @@ import { LRUMap } from '../utils/lruMap';
 const SESSION_MAP_MAX = 5000;
 import { providerSelector } from './providerSelector';
 
-const providerSemaphore = new ProviderSemaphore(parseInt(process.env.MAX_CONCURRENT_PROVIDER_CALLS || '5', 10));
+const parsedMaxConcurrent = Number.parseInt(process.env.MAX_CONCURRENT_PROVIDER_CALLS || '5', 10);
+const providerSemaphore = new ProviderSemaphore(Number.isFinite(parsedMaxConcurrent) && parsedMaxConcurrent >= 1 ? parsedMaxConcurrent : 5);
 
 // --- Named Constants ---
 
@@ -277,7 +279,9 @@ export class AIService {
     const corrAdj = this.sessionMinScoreAdj.get(data.sessionId || 'unknown') || 0;
     if (corrAdj > 0) data.minScoreAdjustment = corrAdj;
 
-    const { messages: enrichedMessages } = await this.enrichContext(data);
+    const enrichStart = Date.now();
+    const { messages: enrichedMessages, provenance } = await this.enrichContext(data);
+    const pipelineMs = Date.now() - enrichStart;
     const normalizedMessages = normalizeMessages(enrichedMessages);
 
     const sessionId = data.sessionId || 'unknown';
@@ -287,6 +291,43 @@ export class AIService {
       this.traceToSession.delete(prevTraceId);
     }
     const traceId = uuidv4();
+    const trace: RetrievalTrace = {
+      id: traceId,
+      ts: new Date().toISOString(),
+      responseId: uuidv4(),
+      sessionId,
+      mode: mode || 'chat',
+      provider,
+      model,
+      query: data.messages[data.messages.length - 1]?.content?.slice(0, 500) || '',
+      harnessSnapshot: getHarnessSnapshot(),
+      active: provenance.active.map((p: ProvenanceItem) => ({
+        id: p.id,
+        text: p.text.slice(0, 200),
+        type: p.type,
+        tier: (p as ProvenanceItem & { tier?: string }).tier || '',
+        score: p.score,
+        source: p.source || '',
+        status: 'active' as const,
+      })),
+      suppressed: provenance.suppressed.map((p: ProvenanceItem) => ({
+        id: p.id,
+        text: p.text.slice(0, 200),
+        type: p.type,
+        tier: (p as ProvenanceItem & { tier?: string }).tier || '',
+        score: p.score,
+        reason: p.reason || 'unknown',
+        status: 'suppressed' as const,
+      })),
+      promptTokens: provenance.promptTokens ?? {
+        memory: 0, rules: 0, workspace: 0, conversationHistory: 0,
+        systemPrompt: 0, total: 0, budget: 0,
+      },
+      counts: provenance.counts,
+      pipelineMs,
+      outcome: null,
+    };
+    traceLogger.appendTrace(trace).catch(() => {});
     this.lastTraceBySession.set(sessionId, traceId);
     this.traceToSession.set(traceId, sessionId);
 
@@ -299,21 +340,24 @@ export class AIService {
     let resolvedModel = model;
 
     try {
-      const selectedProvider = await AIProviderFactory.getProvider(provider);
-      if (typeof selectedProvider.generateChatStream === 'function') {
-        const iter = selectedProvider.generateChatStream(finalMessages, {
+      const selectedProvider = await AIProviderFactory.getProvider(provider, { allowFallback: false });
+      const streamFn = selectedProvider.generateChatStream ?? selectedProvider.stream;
+      if (typeof streamFn === 'function') {
+        const iter = streamFn.call(selectedProvider, finalMessages, {
           model,
           temperature,
           maxTokens,
           apiKey: apiKeys?.[provider],
           signal,
           shouldSearch: false,
+          sessionId,
         });
         for await (const chunk of iter) {
           if (signal?.aborted) break;
           collected += chunk;
           yield { type: 'token', value: chunk };
         }
+        if (signal?.aborted) return;
         await circuitBreaker.recordSuccess(provider).catch(() => {});
       } else {
         // Provider doesn't stream — fall back to single-shot completion delivered as one chunk
@@ -323,21 +367,38 @@ export class AIService {
           temperature,
           maxTokens,
           apiKey: apiKeys?.[provider],
+          signal,
+          shouldSearch: false,
+          sessionId,
         }));
+        if (signal?.aborted) return;
         collected = response;
         yield { type: 'token', value: response };
+        await circuitBreaker.recordSuccess(provider).catch(() => {});
       }
     } catch (err) {
+      // User cancellation must never trip circuit breakers or run uncancellable fallback completions
+      if (signal?.aborted) return;
+
       const e = err instanceof Error ? err : new Error(String(err));
       await circuitBreaker.recordFailure(provider).catch(() => {});
+
+      // If partial tokens were already streamed to the client, don't splice a full
+      // unrelated fallback answer onto the end of a partial sentence — surface the error.
+      if (collected.length > 0) {
+        throw e;
+      }
+
       logger.warn(`[AIService] Stream from ${provider} failed: ${e.message} — running non-streaming fallback chain`);
-      // Static fallback chain — emit the result as a single chunk (no streaming on fallback)
-      const fallback = await this.handleFallbacks(finalMessages, mode, undefined, temperature, maxTokens, e, apiKeys, provider);
+      const fallback = await this.handleFallbacks(finalMessages, mode, undefined, temperature, maxTokens, e, apiKeys, provider, signal);
+      if (signal?.aborted) return;
       collected = fallback.response;
       resolvedModel = fallback.model;
       resolvedProvider = fallback.info?.replace(' fallback', '') || provider;
       yield { type: 'token', value: fallback.response };
     }
+
+    if (signal?.aborted) return;
 
     yield { type: 'done', model: resolvedModel, provider: resolvedProvider, traceId };
 
@@ -353,7 +414,8 @@ export class AIService {
     }).catch(() => {});
 
     if (mode && collected) {
-      const allMessages = [...finalMessages, { role: 'assistant' as const, content: collected }];
+      // Pass user/assistant conversation messages (NOT enriched system prompts) to memory consolidation
+      const allMessages = [...data.messages, { role: 'assistant' as const, content: collected }];
       memoryConsolidationService.scheduleConsolidation(mode, allMessages);
       memoryConsolidationService.scheduleKnowledgeExtraction(collected);
     }
@@ -367,17 +429,19 @@ export class AIService {
     data: ChatRequestData,
     onEvent: (event: AgentEvent) => void
   ): Promise<string> {
-    const { provider, model, temperature, maxTokens, apiKeys, tier, traits } = data;
+    const { provider, model, temperature, maxTokens, apiKeys, tier, traits, signal, sessionId } = data;
 
     logger.info(`[AIService] Processing agent chat with provider: ${provider}, model: ${model}`);
 
-    // Enrich context (same as processChat)
+    // Enrich context and fit conversation window to model context budget
     const { messages: enrichedMessages } = await this.enrichContext(data);
     const normalizedMessages = normalizeMessages(enrichedMessages);
-    const finalMessages = this.injectThinkingMode(normalizedMessages, data.thinkingModeEnabled);
+    const contextBudget = getContextBudget(model, maxTokens || 8192);
+    const { messages: windowedMessages } = await fitConversation(normalizedMessages, contextBudget.history);
+    const finalMessages = this.injectThinkingMode(windowedMessages, data.thinkingModeEnabled);
 
-    // Get the provider instance — must support generateChatCompletionWithEvents
-    const selectedProvider = await AIProviderFactory.getProvider(provider);
+    // Get the provider instance — strict lookup so model/key match provider
+    const selectedProvider = await AIProviderFactory.getProvider(provider, { allowFallback: false });
 
     if (selectedProvider instanceof BaseOpenAIService) {
       return selectedProvider.generateChatCompletionWithEvents(
@@ -387,6 +451,8 @@ export class AIService {
           temperature,
           maxTokens,
           apiKey: apiKeys?.[provider],
+          signal,
+          sessionId,
         },
         onEvent,
         tier,
@@ -400,6 +466,8 @@ export class AIService {
       temperature,
       maxTokens,
       apiKey: apiKeys?.[provider],
+      signal,
+      sessionId,
     }));
     onEvent({ type: 'text_complete', content: response });
     return response;
@@ -513,7 +581,7 @@ After </thinking>, deliver the answer cleanly without restating the reasoning.`
       ? [model, ...GEMINI_MODEL_CHAIN.filter(m => m !== model)]
       : [model, ...GEMINI_MODEL_CHAIN];
     
-    const gemini = await AIProviderFactory.getProvider('gemini');
+    const gemini = await AIProviderFactory.getProvider('gemini', { allowFallback: false });
 
     try {
       const hasImage = image || messages.some(m => m.image);
@@ -530,11 +598,13 @@ After </thinking>, deliver the answer cleanly without restating the reasoning.`
             maxTokens,
             apiKey: apiKeys?.gemini
           }));
+          await circuitBreaker.recordSuccess('gemini').catch(() => {});
           return { response, model: currentModel };
-        } catch (err: unknown) {
+        } catch {
           logger.warn(`Gemini ${currentModel} failed, trying next...`);
         }
       }
+      await circuitBreaker.recordFailure('gemini').catch(() => {});
       throw new Error('Gemini chain exhausted.');
     } catch (e: unknown) {
       const error = e instanceof Error ? e : new Error(String(e));
@@ -554,15 +624,17 @@ After </thinking>, deliver the answer cleanly without restating the reasoning.`
     apiKeys: Record<string, string> | undefined,
     fallbackModel: string | undefined,
     mode: string | undefined,
-    _data: ChatRequestData
+    data: ChatRequestData
   ): Promise<CompletionResponse> {
     try {
-      const selectedProvider = await AIProviderFactory.getProvider(provider);
+      const selectedProvider = await AIProviderFactory.getProvider(provider, { allowFallback: false });
       const response = await providerSemaphore.run(() => selectedProvider.complete(messages, {
         model,
         temperature: temp,
         maxTokens,
-        apiKey: apiKeys?.[provider]
+        apiKey: apiKeys?.[provider],
+        sessionId: data.sessionId,
+        shouldSearch: data.smartRouter !== false,
       }));
       await circuitBreaker.recordSuccess(provider);
       return { response, model };
@@ -570,28 +642,36 @@ After </thinking>, deliver the answer cleanly without restating the reasoning.`
       const err = error instanceof Error ? error : new Error(String(error));
       await circuitBreaker.recordFailure(provider);
       logger.warn(`${provider} failed, initiating dynamic fallback: ${err.message}`);
-      
+
+      let nextProviderId: string | undefined;
       try {
         const nextProviderPlugin = await providerSelector.select({
           priority: 'cost',
+          excludeProviders: [provider],
           requirements: {
             inputTokens: messages.reduce((acc, m) => acc + m.content.length, 0) / 4,
             outputTokens: maxTokens || 1000
           }
         });
-        const nextProvider = nextProviderPlugin.id;
-        logger.info(`[AIService] Dynamic fallback selected: ${nextProvider}`);
-        
-        const fallbackModelToUse = fallbackModel || nextProviderPlugin.defaultModel || 'unknown';
+        const selectedId = nextProviderPlugin.id;
+        nextProviderId = selectedId;
+        logger.info(`[AIService] Dynamic fallback selected: ${selectedId}`);
+
+        // Use the fallback provider's own default model (never forward an incompatible model ID from another provider)
+        const fallbackModelToUse = nextProviderPlugin.defaultModel || 'default';
         const fallbackResponse = await providerSemaphore.run(() => nextProviderPlugin.complete(messages, {
           model: fallbackModelToUse,
           temperature: temp,
           maxTokens,
-          apiKey: apiKeys?.[nextProvider]
+          apiKey: apiKeys?.[selectedId],
+          shouldSearch: false,
         }));
-        await circuitBreaker.recordSuccess(nextProvider);
-        return { response: fallbackResponse, model: fallbackModelToUse, info: `${nextProvider} dynamic fallback` };
-      } catch (fallbackError: unknown) {
+        await circuitBreaker.recordSuccess(selectedId);
+        return { response: fallbackResponse, model: fallbackModelToUse, info: `${selectedId} dynamic fallback` };
+      } catch {
+        if (nextProviderId) {
+          await circuitBreaker.recordFailure(nextProviderId).catch(() => {});
+        }
         logger.warn(`[AIService] Dynamic fallback failed, falling back to static chain.`);
         return this.handleFallbacks(messages, mode, fallbackModel, temp, maxTokens, err, apiKeys, provider);
       }
@@ -624,18 +704,21 @@ After </thinking>, deliver the answer cleanly without restating the reasoning.`
   // --- Existing Helper Methods (unchanged) ---
 
   private async handleVisionRequest(messages: ChatMessage[], image: import('../types/ai').ImageContent | string | null | undefined, model: string, temp: number = 0.7, maxTokens: number = 2048, apiKey?: string, openFiles?: Array<{ path: string; content: string }>) {
-    const gemini = await AIProviderFactory.getProvider('gemini');
+    const gemini = await AIProviderFactory.getProvider('gemini', { allowFallback: false });
+    if (typeof gemini.vision !== 'function') {
+      throw SolventError.provider('Gemini vision provider is not available.');
+    }
     try {
       const rawImage = typeof image === 'string' ? image : image?.data ? `data:${image.mimeType};base64,${image.data}` : null;
       const targetImage = rawImage || messages.find(m => m.image)?.image;
       if (!targetImage) throw SolventError.validation('No image for vision mode.');
-      const matches = targetImage.match(/^data:(.+);base64,(.+)$/);
+      const matches = targetImage.match(/^data:(.+);base64,([\s\S]+)$/);
       if (!matches) throw SolventError.validation('Invalid image format.');
 
-      const lastMessage = messages[messages.length - 1]!.content;
+      const lastMessage = messages[messages.length - 1]?.content ?? 'Describe this image';
       const isCodeRequest = CODE_REQUEST_REGEX.test(lastMessage);
 
-      const response = await gemini.vision!(
+      const response = await gemini.vision(
         lastMessage,
         [{ data: matches[2]!, mimeType: matches[1]! }],
         {
@@ -665,7 +748,7 @@ After </thinking>, deliver the answer cleanly without restating the reasoning.`
     }
   }
 
-  private async handleFallbacks(messages: ChatMessage[], _mode: string = 'chat', _fallbackModel: string = '', temp: number = 0.7, maxTokens: number = 2048, _originalError: Error = new Error('Unknown'), apiKeys?: Record<string, string>, failedProvider?: string) {
+  private async handleFallbacks(messages: ChatMessage[], _mode: string = 'chat', _fallbackModel: string = '', temp: number = 0.7, maxTokens: number = 2048, _originalError: Error = new Error('Unknown'), apiKeys?: Record<string, string>, failedProvider?: string, signal?: AbortSignal) {
     // Normalize messages to ensure compatible roles across providers
     const normalizedMessages = messages.map(m => ({
       ...m,
@@ -674,17 +757,25 @@ After </thinking>, deliver the answer cleanly without restating the reasoning.`
 
     let lastError = 'Unknown';
     for (const step of MODELS.FALLBACK_CHAIN) {
+      if (signal?.aborted) {
+        throw SolventError.provider('Request cancelled by client', false);
+      }
       if (step.provider === failedProvider) continue;
       try {
-        const provider = await AIProviderFactory.getProvider(step.provider);
+        const provider = await AIProviderFactory.getProvider(step.provider, { allowFallback: false });
         const res = await providerSemaphore.run(() => provider.complete(normalizedMessages, {
           model: step.model,
           temperature: temp,
           maxTokens,
           apiKey: apiKeys?.[step.provider],
+          signal,
+          shouldSearch: false,
         }));
+        await circuitBreaker.recordSuccess(step.provider).catch(() => {});
         return { response: res, model: step.model, info: `${step.provider} fallback` };
       } catch (e: unknown) {
+        if (signal?.aborted) throw e;
+        await circuitBreaker.recordFailure(step.provider).catch(() => {});
         lastError = e instanceof Error ? e.message : String(e);
         logger.warn(`[Fallback] ${step.provider} failed: ${lastError}`);
       }
@@ -721,14 +812,15 @@ After </thinking>, deliver the answer cleanly without restating the reasoning.`
     try {
       const result = await pollinationsService.generateImage(prompt);
       return this.saveImage(result.base64, 'Pollinations.ai');
-    } catch (pollError: unknown) {
+    } catch {
       throw SolventError.provider('All image providers failed.');
     }
   }
 
   private async saveImage(base64: string, info?: string) {
     const fileName = `generated_${uuidv4()}.png`;
-    const dir = path.join(__dirname, '../../generated_images');
+    const baseDir = process.env.SOLVENT_DATA_DIR || path.join(__dirname, '../..');
+    const dir = path.join(baseDir, 'generated_images');
     await fs.mkdir(dir, { recursive: true });
     await fs.writeFile(path.join(dir, fileName), Buffer.from(base64, 'base64'));
     return { imageUrl: `/generated_images/${fileName}`, fileName, info };
@@ -739,13 +831,38 @@ After </thinking>, deliver the answer cleanly without restating the reasoning.`
     const models: Record<string, string[]> = {};
 
     for (const provider of providers) {
+      // Curated catalog per provider (display order)
+      let curated: string[];
       if (provider.id === 'openrouter') {
-        models[provider.id] = MODELS.OPENROUTER_FREE;
+        curated = [...MODELS.OPENROUTER_FREE];
       } else if (provider.id === 'groq') {
-        models[provider.id] = MODELS.GROQ_MODELS;
+        curated = [...MODELS.GROQ_MODELS];
+      } else if (provider.id === 'dashscope') {
+        curated = [...MODELS.DASHSCOPE_MODELS];
+      } else if (provider.id === 'gemini') {
+        curated = Object.values(MODELS.GEMINI);
+      } else if (provider.id === 'ollama') {
+        curated = [...MODELS.OLLAMA_CLOUD, ...Object.values(MODELS.OLLAMA)];
       } else {
-        models[provider.id] = [provider.defaultModel || 'default-model'];
+        curated = [provider.defaultModel || 'default-model'];
       }
+
+      // Registry-aware filtering: drop curated ids the provider has retired
+      // (only when the provider is listable — isLive is permissive otherwise).
+      const live = curated.filter(id => modelRegistryService.isLive(provider.id, id));
+
+      // For providers with small live catalogs, append anything live that the
+      // curated list missed, so new releases show up without a code change.
+      // Large catalogs (openrouter ~350, dashscope ~150, gemini ~50 incl.
+      // TTS/embedding models) stay curated-only to avoid flooding the pickers.
+      const liveIds = modelRegistryService.getLive(provider.id);
+      if (liveIds && liveIds.length <= 30) {
+        for (const id of liveIds) {
+          if (modelRegistryService.isChatModel(id) && !live.includes(id)) live.push(id);
+        }
+      }
+
+      models[provider.id] = live.length > 0 ? live : curated;
     }
 
     return models;
@@ -769,9 +886,9 @@ After </thinking>, deliver the answer cleanly without restating the reasoning.`
     const m2 = opts.model2 || undefined;
 
     const runOne = async (providerName: string, modelOverride: string | undefined): Promise<string> => {
-      const provider = await AIProviderFactory.getProvider(providerName);
+      const provider = await AIProviderFactory.getProvider(providerName, { allowFallback: false });
       const model = modelOverride || provider.defaultModel || 'default';
-      return providerSemaphore.run(() => provider.complete(messages, { model }));
+      return providerSemaphore.run(() => provider.complete(messages, { model, shouldSearch: false }));
     };
 
     const [r1, r2] = await Promise.allSettled([
@@ -802,7 +919,10 @@ After </thinking>, deliver the answer cleanly without restating the reasoning.`
     const health: Record<string, string> = {};
 
     for (const provider of providers) {
-      health[provider.id] = provider.isReady() ? 'connected' : 'disconnected';
+      const configured = typeof provider.hasConfiguredKey === 'function'
+        ? provider.hasConfiguredKey()
+        : provider.isReady();
+      health[provider.id] = configured ? 'connected' : 'disconnected';
     }
 
     health.ollama = await this.checkOllamaHealth();
@@ -821,16 +941,19 @@ After </thinking>, deliver the answer cleanly without restating the reasoning.`
         .pop();
 
       return consolidation ? consolidation.metadata.text : null;
-    } catch (e) {
+    } catch {
       return null;
     }
   }
 
   private async checkOllamaHealth(): Promise<'connected' | 'disconnected'> {
+    if (!config.ENABLE_OLLAMA) return 'disconnected';
     try {
-      const response = await fetch(`${config.OLLAMA_HOST}/api/version`);
+      const response = await fetch(`${config.OLLAMA_HOST}/api/version`, {
+        signal: AbortSignal.timeout(3000),
+      });
       return response.ok ? 'connected' : 'disconnected';
-    } catch (e) {
+    } catch {
       return 'disconnected';
     }
   }

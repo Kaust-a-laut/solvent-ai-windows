@@ -195,17 +195,18 @@ export const DebateArea = () => {
       }
 
       const result = await response.json();
-      const rounds = result.rounds ?? [];
+      type DebateRound = Omit<DebateTurn, 'side'>;
+      const rounds: DebateRound[] = result.rounds ?? [];
 
       const proTurns: DebateTurn[] = rounds
-        .filter((r: any) => r.role === 'proponent' || r.role === 'proponent_rebuttal')
-        .map((r: any) => ({ ...r, side: 'proponent' as const }));
+        .filter((r) => r.role === 'proponent' || r.role === 'proponent_rebuttal')
+        .map((r) => ({ ...r, side: 'proponent' as const }));
 
       const critTurns: DebateTurn[] = rounds
-        .filter((r: any) => r.role === 'critic' || r.role === 'critic_rebuttal')
-        .map((r: any) => ({ ...r, side: 'critic' as const }));
+        .filter((r) => r.role === 'critic' || r.role === 'critic_rebuttal')
+        .map((r) => ({ ...r, side: 'critic' as const }));
 
-      const synthesizer = rounds.find((r: any) => r.role === 'synthesizer');
+      const synthesizer = rounds.find((r) => r.role === 'synthesizer');
 
       setDebate({
         turns: [...proTurns, ...critTurns],

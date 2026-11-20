@@ -1,9 +1,9 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '../../lib/utils';
 import type { WaterfallStepPayload } from '../../store/waterfallSlice';
 import {
-  Brain, GitBranch, Code2, ShieldCheck,
+  Brain, Code2, ShieldCheck,
   ChevronDown, ChevronUp, AlertCircle,
   CheckCircle2, Loader2, PauseCircle, RefreshCw
 } from 'lucide-react';
@@ -281,9 +281,9 @@ export const WaterfallStageCard = ({
       animate={{ opacity: status === 'idle' ? 0.45 : 1, y: 0 }}
       transition={{ duration: 0.4 }}
       className={cn(
-        'relative glass-panel rounded-[1.5rem] overflow-hidden transition-all duration-500',
+        'relative surface-1 bg-white/[0.035] backdrop-blur-xl rounded-[1.5rem] overflow-hidden transition-all duration-500',
         compact && 'cursor-pointer',
-        isSelected && 'ring-1 ring-white/20',
+        isSelected && 'ring-2 ring-white/30',
       )}
       style={cardStyle()}
       onClick={compact ? onSelect : undefined}

@@ -51,13 +51,24 @@ export const OPENAI_COMPATIBLE_PROVIDERS: Record<string, ProviderConfig> = {
     name: 'fireworks',
     baseUrl: 'https://api.fireworks.ai/inference/v1',
     apiKeyEnvVar: 'FIREWORKS_API_KEY',
-    defaultModel: 'accounts/fireworks/models/llama-v3p3-70b-instruct'
+    defaultModel: 'accounts/fireworks/models/kimi-k2p6'
   },
 };
 
 export class AIProviderFactory {
-  static async getProvider(name: string): Promise<IProviderPlugin> {
+  static async getProvider(name: string, options?: { allowFallback?: boolean }): Promise<IProviderPlugin> {
+    if (options?.allowFallback === false) {
+      return pluginManager.getExactProvider(name);
+    }
     return pluginManager.resolveProvider(name);
+  }
+
+  /**
+   * Strict lookup without silent cross-provider fallback — prevents pairing
+   * provider-specific model IDs / API keys with an unrelated fallback provider.
+   */
+  static async getExactProvider(name: string): Promise<IProviderPlugin> {
+    return pluginManager.getExactProvider(name);
   }
 
   static async getAllProviders() {

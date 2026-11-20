@@ -1,17 +1,18 @@
 import { Router, Request, Response } from 'express';
+import { randomUUID } from 'node:crypto';
+import v8 from 'node:v8';
 import axios from 'axios';
+import { config } from '../config';
 import { storageService } from '../services/storageService';
 import { modelAvailabilityService } from '../services/modelAvailabilityService';
 
 const router = Router();
 
-const OLLAMA_URL = process.env.OLLAMA_HOST || 'http://127.0.0.1:11434';
-
 interface HealthCheckResult {
   status: 'ok' | 'unhealthy';
   checks: {
     storage: { status: 'ok' | 'unhealthy'; message?: string };
-    ollama: { status: 'ok' | 'unhealthy'; message?: string };
+    ollama: { status: 'ok' | 'unhealthy' | 'disabled'; message?: string };
     memory: { status: 'ok' | 'unhealthy'; message?: string };
   };
   timestamp: string;
@@ -23,15 +24,15 @@ router.get('/health', async (req: Request, res: Response) => {
     status: 'ok',
     checks: {
       storage: { status: 'ok' },
-      ollama: { status: 'ok' },
+      ollama: { status: config.ENABLE_OLLAMA ? 'ok' : 'disabled' },
       memory: { status: 'ok' },
     },
     timestamp: new Date().toISOString(),
   };
 
-  // Verify storageService is functional with a write/read round-trip
+  // Verify storageService is functional with an isolated per-request key
   try {
-    const testKey = '__health_check__';
+    const testKey = `__health_check__:${req.id || randomUUID()}`;
     await storageService.set(testKey, true, 10);
     const val = await storageService.get<boolean>(testKey);
     if (val !== true) {
@@ -44,19 +45,25 @@ router.get('/health', async (req: Request, res: Response) => {
     result.status = 'unhealthy';
   }
 
-  try {
-    await axios.get(`${OLLAMA_URL}/api/tags`, { timeout: 5000 });
-  } catch (error) {
-    result.checks.ollama.status = 'unhealthy';
-    result.checks.ollama.message = error instanceof Error ? error.message : 'Ollama unavailable';
-    result.status = 'unhealthy';
+  if (config.ENABLE_OLLAMA) {
+    try {
+      await axios.get(`${config.OLLAMA_HOST}/api/tags`, { timeout: 5000 });
+    } catch (error) {
+      result.checks.ollama.status = 'unhealthy';
+      result.checks.ollama.message = error instanceof Error ? error.message : 'Ollama unavailable';
+      result.status = 'unhealthy';
+    }
+  } else {
+    result.checks.ollama.message = 'Ollama disabled via ENABLE_OLLAMA=false';
   }
 
+  // Compare heapUsed against V8's actual heap_size_limit, not dynamic heapTotal
+  // (heapTotal routinely sits at 90-97% before V8 grows or runs GC).
   const heapUsed = process.memoryUsage().heapUsed;
-  const heapTotal = process.memoryUsage().heapTotal;
-  if (heapUsed >= heapTotal * 0.9) {
+  const heapLimit = v8.getHeapStatistics().heap_size_limit;
+  if (heapLimit > 0 && heapUsed >= heapLimit * 0.9) {
     result.checks.memory.status = 'unhealthy';
-    result.checks.memory.message = `Heap usage: ${Math.round((heapUsed / heapTotal) * 100)}%`;
+    result.checks.memory.message = `Heap usage: ${Math.round((heapUsed / heapLimit) * 100)}% of limit`;
     result.status = 'unhealthy';
   }
 

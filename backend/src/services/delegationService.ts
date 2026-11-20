@@ -2,10 +2,13 @@ import { randomUUID } from 'crypto';
 import { AIProviderFactory } from './aiProviderFactory';
 import { TOOL_DEFINITIONS } from '../constants/tools';
 import { logger } from '../utils/logger';
-import { getEffectiveProjectRoot } from '../utils/fileSystem';
+import { validatePath } from '../utils/fileSystem';
 import { toolService } from './toolService';
 import fs from 'fs/promises';
 import path from 'path';
+
+const SENSITIVE_FILE_RE = /(?:^|[\\/])(?:\.env(?:\.[^\\/]*)?|id_rsa(?:\.pub)?|id_ed25519(?:\.pub)?|settings\.json|.*\.(?:pem|key|p12|pfx))$/i;
+const MAX_DELEGATE_TOOL_RESULT_BYTES = 32 * 1024;
 
 export interface DelegatedTask {
   task: string;
@@ -42,18 +45,27 @@ export class DelegationService {
     logger.info(`[Delegate ${callId}] Starting: "${task.task.slice(0, 80)}"`);
 
     try {
-      // Find cheapest available provider
+      // Find cheapest available provider that actually has a configured key
       const candidates = ['groq', 'fireworks', 'openrouter'];
-      let provider: any = null;
+      let provider: { id: string; apiKey?: string; isReady(): boolean; hasConfiguredKey?(): boolean } | null = null;
       let providerName = '';
       let model = '';
       for (const p of candidates) {
         try {
-          provider = await AIProviderFactory.getProvider(p);
-          if (provider.isReady()) {
+          const candidate = await AIProviderFactory.getExactProvider(p) as unknown as {
+            id: string;
+            apiKey?: string;
+            isReady(): boolean;
+            hasConfiguredKey?(): boolean;
+          };
+          const hasKey = typeof candidate.hasConfiguredKey === 'function'
+            ? candidate.hasConfiguredKey()
+            : Boolean(candidate.apiKey || process.env[`${p.toUpperCase()}_API_KEY`]);
+          if (candidate.id === p && candidate.isReady() && hasKey) {
+            provider = candidate;
             providerName = p;
             model = p === 'groq' ? 'llama-3.1-8b-instant'
-                  : p === 'fireworks' ? 'accounts/fireworks/models/llama-v3p1-8b-instruct'
+                  : p === 'fireworks' ? 'accounts/fireworks/models/gpt-oss-120b'
                   : 'meta-llama/llama-3.1-8b-instruct';
             break;
           }
@@ -63,14 +75,24 @@ export class DelegationService {
         return { summary: 'No available provider for delegation.', filesWritten: [], error: 'No provider' };
       }
 
-      // Read file contexts
-      const projectRoot = getEffectiveProjectRoot();
+      // Read file contexts safely inside effective project root (prevent path traversal & secret leaks)
       const fileContexts: string[] = [];
       for (const f of task.files) {
         try {
-          const content = await fs.readFile(path.join(projectRoot, f), 'utf-8');
+          if (SENSITIVE_FILE_RE.test(f)) {
+            fileContexts.push(`--- ${f} ---\n[skipped sensitive file]\n`);
+            continue;
+          }
+          const safePath = validatePath(f);
+          if (SENSITIVE_FILE_RE.test(path.basename(safePath))) {
+            fileContexts.push(`--- ${f} ---\n[skipped sensitive file]\n`);
+            continue;
+          }
+          const content = await fs.readFile(safePath, 'utf-8');
           fileContexts.push(`--- ${f} ---\n${content.slice(0, 4000)}\n`);
-        } catch { fileContexts.push(`--- ${f} ---\n[unreadable]\n`); }
+        } catch {
+          fileContexts.push(`--- ${f} ---\n[unreadable]\n`);
+        }
       }
 
       const systemPrompt = `You are a focused code implementation assistant. Complete the given task by calling the available file tools. You have: read_file, write_file, edit_file, create_file, get_file_outline, list_files, get_errors. NO shell. Call tools directly — do not describe what you'll do, just do it.`;
@@ -94,6 +116,7 @@ export class DelegationService {
       ];
 
       const filesWritten: string[] = [];
+      let finalAssistantText = '';
       const maxIterations = 8;
 
       for (let iteration = 0; iteration < maxIterations; iteration++) {
@@ -103,6 +126,10 @@ export class DelegationService {
         // Extract assistant message content and tool_calls
         const choice = response.choices?.[0]?.message;
         if (!choice) break;
+
+        if (typeof choice.content === 'string' && choice.content.trim()) {
+          finalAssistantText = choice.content.trim();
+        }
 
         const assistantMsg: Record<string, unknown> = {
           role: 'assistant',
@@ -123,28 +150,56 @@ export class DelegationService {
         // No tool calls — model is done
         if (!toolCalls || toolCalls.length === 0) break;
 
-        // Execute each tool call
+        // Execute each tool call (strictly enforcing DELEGATE_ALLOWED_TOOLS)
         for (const tc of toolCalls) {
           const toolName = tc.function?.name ?? '';
-          let toolArgs: Record<string, unknown> = {};
-          try {
-            toolArgs = typeof tc.function?.arguments === 'string'
-              ? JSON.parse(tc.function.arguments)
-              : tc.function?.arguments ?? {};
-          } catch { /* empty args */ }
-
           const tcId = tc.id || randomUUID().slice(0, 8);
 
-          try {
-            const result = await toolService.executeTool(toolName, toolArgs);
-            if (toolName === 'write_file' || toolName === 'edit_file' || toolName === 'create_file') {
-              filesWritten.push(toolArgs.path as string);
-            }
+          if (!DELEGATE_ALLOWED_TOOLS.has(toolName)) {
+            logger.warn(`[Delegate ${callId}] Blocked disallowed tool: ${toolName}`);
             messages.push({
               role: 'tool',
               tool_call_id: tcId,
               name: toolName,
-              content: typeof result === 'string' ? result : JSON.stringify(result),
+              content: JSON.stringify({ error: `Tool '${toolName}' is not permitted for delegated sub-agents.` }),
+            });
+            continue;
+          }
+
+          let toolArgs: Record<string, unknown>;
+          try {
+            const parsed = typeof tc.function?.arguments === 'string'
+              ? JSON.parse(tc.function.arguments)
+              : tc.function?.arguments;
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+              throw new Error('Tool arguments must be a JSON object');
+            }
+            toolArgs = parsed as Record<string, unknown>;
+          } catch (parseErr) {
+            const parseMsg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+            messages.push({
+              role: 'tool',
+              tool_call_id: tcId,
+              name: toolName,
+              content: JSON.stringify({ error: `Invalid tool arguments JSON: ${parseMsg}` }),
+            });
+            continue;
+          }
+
+          try {
+            const result = await toolService.executeTool(toolName, toolArgs);
+            if ((toolName === 'write_file' || toolName === 'edit_file' || toolName === 'create_file') && typeof toolArgs.path === 'string') {
+              filesWritten.push(toolArgs.path);
+            }
+            const serialized = typeof result === 'string' ? result : JSON.stringify(result);
+            const capped = serialized.length > MAX_DELEGATE_TOOL_RESULT_BYTES
+              ? serialized.slice(0, MAX_DELEGATE_TOOL_RESULT_BYTES) + '...[truncated]'
+              : serialized;
+            messages.push({
+              role: 'tool',
+              tool_call_id: tcId,
+              name: toolName,
+              content: capped,
             });
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
@@ -161,9 +216,15 @@ export class DelegationService {
 
       logger.info(`[Delegate ${callId}] Completed. Files written: ${filesWritten.length}`);
 
+      const uniqueFiles = [...new Set(filesWritten)];
+      const fileSummary = uniqueFiles.length > 0 ? `Files written: ${uniqueFiles.join(', ')}.` : '';
+      const summary = finalAssistantText
+        ? (fileSummary ? `${finalAssistantText}\n\n${fileSummary}` : finalAssistantText)
+        : `Delegated task completed. Files written: ${uniqueFiles.join(', ') || 'none'}.`;
+
       return {
-        summary: `Delegated task completed. Files written: ${filesWritten.join(', ') || 'none'}.`,
-        filesWritten: [...new Set(filesWritten)],
+        summary,
+        filesWritten: uniqueFiles,
       };
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -209,6 +270,7 @@ export class DelegationService {
       method: 'POST',
       headers,
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(60_000),
     });
 
     if (!response.ok) {

@@ -13,7 +13,7 @@ import { cn } from '../lib/utils';
 import { ChatService } from '../services/ChatService';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAppStore } from '../store/useAppStore';
-import type { BrowserTab, PageContent, SearchResultSet } from '../store/types';
+import type { PageContent, SearchResultSet } from '../store/types';
 import { SearchPipelineStepper } from './SearchPipelineStepper';
 
 const stripHtml = (text: string) => {
@@ -113,12 +113,12 @@ const BrowserPiP = () => {
 // ── Main BrowserArea ─────────────────────────────────────────────────────
 export const BrowserArea = () => {
   const {
-    browserHistory, setBrowserHistory, lastSearchResults, setLastSearchResults,
-    deviceInfo, messages,
+    browserHistory, setBrowserHistory, setLastSearchResults,
+    messages,
     browserTabs, activeBrowserTabId, addBrowserTab, closeBrowserTab,
     updateBrowserTab, setActiveBrowserTabId,
-    browserPiPOpen, setBrowserPiPOpen,
-    browserInjectedContext, setBrowserInjectedContext,
+    setBrowserPiPOpen,
+    setBrowserInjectedContext,
     browserPinnedUrls, addBrowserPinnedUrl, removeBrowserPinnedUrl,
     setCurrentMode,
   } = useAppStore();
@@ -171,8 +171,7 @@ export const BrowserArea = () => {
         // Sync legacy store
         setLastSearchResults(null);
         setPipelineStage('idle');
-      } catch (error: unknown) {
-        const err = error instanceof Error ? error : new Error(String(error));
+      } catch {
         updateBrowserTab(tabId, {
           type: 'reader',
           url: newUrl,

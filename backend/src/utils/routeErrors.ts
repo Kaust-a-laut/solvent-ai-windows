@@ -1,5 +1,5 @@
 import { Response } from 'express';
-import { getSafeErrorMessage, logError } from './errors';
+import { SolventError, getSafeErrorMessage, logError } from './errors';
 
 export interface RouteErrorContext {
   res: Response;
@@ -8,9 +8,11 @@ export interface RouteErrorContext {
   statusCode?: number;
 }
 
-export function handleRouteError({ res, error, context, statusCode = 500 }: RouteErrorContext) {
+export function handleRouteError({ res, error, context, statusCode }: RouteErrorContext) {
   const errorId = logError(context, error);
+  if (res.headersSent) return;
+  const resolvedStatus = statusCode ?? (error instanceof SolventError ? error.status : 500);
   const message = getSafeErrorMessage(error, context);
-  res.status(statusCode).json({ error: message, reference: errorId });
+  res.status(resolvedStatus).json({ error: message, reference: errorId });
 }
 

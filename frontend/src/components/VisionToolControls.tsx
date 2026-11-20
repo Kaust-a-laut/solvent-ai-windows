@@ -1,11 +1,8 @@
 import React, { useState } from 'react';
-import { 
-  ScanEye, Sparkles, Wand2, Scissors, 
-  Palette, MousePointer2, Box, Loader2, 
-  Target, Zap, Code, Shield
+import {
+  ScanEye, Sparkles, Wand2, Scissors,
+  Palette, Box, Target
 } from 'lucide-react';
-import { cn } from '../lib/utils';
-import { motion, AnimatePresence } from 'framer-motion';
 
 interface ToolControlProps {
   activeTool: string;

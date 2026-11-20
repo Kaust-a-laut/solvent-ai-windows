@@ -72,7 +72,7 @@ export const DiffBanner: React.FC<Props> = ({ diffs, onApplyAll, onRejectAll, on
   const rejectedCount = diffs.filter(d => d.status === 'rejected').length;
 
   return (
-    <div className="border-b border-white/[0.06] bg-jb-accent/5 shrink-0">
+    <div className="border-b border-white/[0.18] bg-jb-accent/12 shrink-0 shadow-[inset_0_0_0_1px_rgba(60,113,247,0.12)]">
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-2">
         <div className="flex items-center gap-2">
@@ -89,14 +89,14 @@ export const DiffBanner: React.FC<Props> = ({ diffs, onApplyAll, onRejectAll, on
           <button
             type="button"
             onClick={onApplyAll}
-            className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-[11px] font-bold hover:bg-emerald-500/25 transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-emerald-500/20 border border-emerald-500/60 text-emerald-300 text-[11px] font-bold hover:bg-emerald-500/30 hover:border-emerald-500/80 transition-colors shadow-[inset_0_0_0_1px_rgba(16,185,129,0.25),0_4px_14px_-6px_rgba(16,185,129,0.5)]"
           >
             <Check size={12} /> Apply All
           </button>
           <button
             type="button"
             onClick={onRejectAll}
-            className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400 text-[11px] font-bold hover:bg-rose-500/20 transition-colors"
+            className="flex items-center gap-1.5 px-3 py-1 rounded-lg bg-rose-500/15 border border-rose-500/55 text-rose-300 text-[11px] font-bold hover:bg-rose-500/25 hover:border-rose-500/75 transition-colors shadow-[inset_0_0_0_1px_rgba(244,63,94,0.2)]"
           >
             <X size={12} /> Reject All
           </button>

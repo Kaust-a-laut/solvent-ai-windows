@@ -25,12 +25,23 @@ export function createSSEWriter(req: Request, res: Response): SSEWriter {
   let backpressured = false;
   let drainPromise: Promise<void> | null = null;
 
-  req.on('close', () => {
+  const onDisconnect = () => {
+    if (ended) return;
+    ended = true;
     controller.abort();
-    if (!ended) {
-      ended = true;
+    if (!res.writableEnded) {
       res.end();
     }
+  };
+
+  // On Node.js 16+, POST requests emit req 'close' as soon as the request body
+  // finishes reading (req.complete === true), NOT when the client disconnects.
+  // Detect real client disconnects via res 'close' (fired before sse.end()),
+  // req 'aborted', or req 'close' when the request body was never completed.
+  res.on('close', onDisconnect);
+  req.on('aborted', onDisconnect);
+  req.on('close', () => {
+    if (!req.complete) onDisconnect();
   });
 
   function arm(): void {
@@ -38,6 +49,8 @@ export function createSSEWriter(req: Request, res: Response): SSEWriter {
     backpressured = true;
     drainPromise = new Promise<void>(resolve => {
       const settle = () => {
+        res.off('drain', settle);
+        res.off('close', settle);
         backpressured = false;
         drainPromise = null;
         resolve();

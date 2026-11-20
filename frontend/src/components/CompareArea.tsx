@@ -4,12 +4,29 @@ import { API_BASE_URL } from '../lib/config';
 import { getSecret } from '../lib/api-client';
 import { GitCompare, Sparkles, RefreshCw, Bot, AlertCircle, Cloud, Shield } from 'lucide-react';
 import { ModelPickerDropdown } from './ModelPickerDropdown';
-import { ALL_MODELS, toKey, fromKey } from '../lib/allModels';
-import { parse } from 'marked';
-import DOMPurify from 'dompurify';
-import { motion, AnimatePresence } from 'framer-motion';
+import { useLiveAllModels, toKey, fromKey } from '../lib/allModels';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { CodeBlock } from './CodeBlock';
+import { motion } from 'framer-motion';
 import { cn } from '../lib/utils';
 import { BentoItem } from './BentoGrid';
+
+// Mirrors MessageItem.tsx's markdown config so compare results render
+// consistently with the rest of the app (fenced code blocks get the same
+// copy/save CodeBlock treatment instead of plain <pre>).
+const markdownComponents = {
+  code({ className, children, ...props }: React.ComponentPropsWithoutRef<'code'>) {
+    const match = /language-(\w+)/.exec(className || '');
+    return match ? (
+      <CodeBlock language={match[1] ?? ''} code={String(children).replace(/\n$/, '')} />
+    ) : (
+      <code className="bg-white/5 px-1.5 py-0.5 rounded text-jb-accent font-mono text-[12px] border border-white/5" {...props}>
+        {children}
+      </code>
+    );
+  }
+};
 
 export const CompareArea = () => {
   const { deviceInfo } = useAppStore();
@@ -19,9 +36,10 @@ export const CompareArea = () => {
   const [model1Key, setModel1Key] = useState(toKey('gemini', 'gemini-3.1-pro-preview'));
   const [model2Key, setModel2Key] = useState(toKey('ollama', 'qwen2.5-coder:7b'));
   const [error, setError] = useState<string | null>(null);
+  const allModels = useLiveAllModels();
 
-  const model1Label = ALL_MODELS.find(m => toKey(m.provider, m.model) === model1Key)?.label ?? model1Key;
-  const model2Label = ALL_MODELS.find(m => toKey(m.provider, m.model) === model2Key)?.label ?? model2Key;
+  const model1Label = allModels.find(m => toKey(m.provider, m.model) === model1Key)?.label ?? model1Key;
+  const model2Label = allModels.find(m => toKey(m.provider, m.model) === model2Key)?.label ?? model2Key;
 
   const handleCompare = async () => {
     if (!prompt.trim()) return;
@@ -95,7 +113,7 @@ export const CompareArea = () => {
             <ModelPickerDropdown
               value={model1Key}
               onChange={setModel1Key}
-              models={ALL_MODELS}
+              models={allModels}
               accent="blue"
               label="Model A"
               disabled={isComparing}
@@ -105,7 +123,7 @@ export const CompareArea = () => {
             <ModelPickerDropdown
               value={model2Key}
               onChange={setModel2Key}
-              models={ALL_MODELS}
+              models={allModels}
               accent="orange"
               label="Model B"
               disabled={isComparing}
@@ -161,12 +179,15 @@ export const CompareArea = () => {
             </div>
             <div className="flex-1 text-slate-300">
                 {results ? (
-                    <motion.div 
+                    <motion.div
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
-                      className="prose prose-invert prose-sm max-w-none leading-relaxed" 
-                      dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(parse(results.model1 || '') as string) }}
-                    />
+                      className="prose prose-invert prose-sm max-w-none leading-relaxed"
+                    >
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                        {results.model1 || ''}
+                      </ReactMarkdown>
+                    </motion.div>
                 ) : (
                     <div className="h-full flex flex-col justify-center gap-4">
                         <div className="fluid-shimmer rounded-full h-4 w-3/4" />
@@ -203,8 +224,11 @@ export const CompareArea = () => {
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
                       className="prose prose-invert prose-sm max-w-none leading-relaxed"
-                      dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(parse(results.model2 || '') as string) }}
-                    />
+                    >
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+                        {results.model2 || ''}
+                      </ReactMarkdown>
+                    </motion.div>
                 ) : (
                     <div className="h-full flex flex-col justify-center gap-4">
                         <div className="fluid-shimmer rounded-full h-4 w-3/4" />

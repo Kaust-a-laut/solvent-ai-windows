@@ -110,8 +110,8 @@ export class HarnessOptimizer {
         priorEvaluations: run.evaluations.map(e => ({ proposalId: e.proposalId, result: e })),
       });
 
-      if (!proposal) {
-        logger.info(`[HarnessOptimizer] No proposal at iteration ${i} — stopping`);
+      if (!proposal || run.status !== 'running') {
+        logger.info(`[HarnessOptimizer] Stopping at iteration ${i} (status=${run.status})`);
         break;
       }
 
@@ -120,18 +120,23 @@ export class HarnessOptimizer {
 
       // Step 2: Evaluate
       const result = await harnessEvaluator.evaluate(proposal, traces);
+      if (run.status !== 'running') break;
 
-      // Step 3: Update Pareto frontier
-      result.isParetoOptimal = this.updateParetoFrontier(run, result);
+      // Step 3: Append evaluation BEFORE updating Pareto frontier so updateParetoFrontier can find it
       run.evaluations.push(result);
+      result.isParetoOptimal = this.updateParetoFrontier(run, result);
       this.notifyCallbacks(run);
 
       // Small delay to avoid tight loops
       await new Promise(r => setTimeout(r, 100));
     }
 
-    run.status = 'completed';
-    this.activeRunId = null;
+    if (run.status === 'running') {
+      run.status = 'completed';
+    }
+    if (this.activeRunId === run.id) {
+      this.activeRunId = null;
+    }
     this.notifyCallbacks(run);
   }
 
@@ -182,16 +187,29 @@ export class HarnessOptimizer {
     return !isDominated;
   }
 
-  onRunUpdate(runId: string, callback: RunCallback): void {
+  onRunUpdate(runId: string, callback: RunCallback): () => void {
     const cbs = this.callbacks.get(runId) || [];
     cbs.push(callback);
     this.callbacks.set(runId, cbs);
+    return () => {
+      const current = this.callbacks.get(runId);
+      if (!current) return;
+      const filtered = current.filter(cb => cb !== callback);
+      if (filtered.length === 0) {
+        this.callbacks.delete(runId);
+      } else {
+        this.callbacks.set(runId, filtered);
+      }
+    };
   }
 
   private notifyCallbacks(run: OptimizationRun): void {
-    const cbs = this.callbacks.get(run.id) || [];
+    const cbs = [...(this.callbacks.get(run.id) || [])];
     for (const cb of cbs) {
       try { cb(run); } catch { /* ignore callback errors */ }
+    }
+    if (run.status !== 'running') {
+      this.callbacks.delete(run.id);
     }
   }
 }

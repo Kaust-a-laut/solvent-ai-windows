@@ -98,17 +98,6 @@ describe('CoreMemory key-based limits', () => {
 });
 
 describe('CoreMemoryFactory', () => {
-  it('should create session-scoped instance', async () => {
-    const sessionCore = CoreMemoryFactory.createForSession('test_session_123');
-    sessionCore.set('test', 'value');
-    expect(sessionCore.get('test')).toBe('value');
-    await sessionCore.flush();
-    // After absolute-path refactor, the file lives in DATA_DIR (backend root)
-    const expectedPath = path.resolve(__dirname, '../../.solvent_core_memory_test_session_123.json');
-    expect(existsSync(expectedPath)).toBe(true);
-    unlinkSync(expectedPath);
-  });
-
   it('should create global instance', async () => {
     const globalCore = CoreMemoryFactory.createGlobal();
     globalCore.set('test_global', 'value');
@@ -116,8 +105,8 @@ describe('CoreMemoryFactory', () => {
     await globalCore.flush();
   });
 
-  it('should respect custom maxSlots in factory', () => {
-    const customCore = CoreMemoryFactory.createForSession('custom_test', { maxSlots: 5 });
+  it('should respect custom maxSlots', () => {
+    const customCore = new CoreMemory('/tmp/test_core_memory_custom_slots.json', 5);
     for (let i = 0; i < 5; i++) {
       customCore.set(`key${i}`, 'value');
     }
@@ -135,20 +124,5 @@ describe('CoreMemory async save', () => {
     expect(data).toHaveLength(1);
     expect(data[0].key).toBe('key1');
     unlinkSync(testPath);
-  });
-});
-
-describe('CoreMemoryFactory path safety', () => {
-  it('should reject sessionId with path traversal', () => {
-    expect(() => CoreMemoryFactory.createForSession('../../etc/passwd')).toThrow();
-  });
-
-  it('should reject sessionId with special chars', () => {
-    expect(() => CoreMemoryFactory.createForSession('abc;rm -rf /')).toThrow();
-  });
-
-  it('should accept valid UUID sessionId', () => {
-    const cm = CoreMemoryFactory.createForSession('550e8400-e29b-41d4-a716-446655440000');
-    expect(cm).toBeDefined();
   });
 });

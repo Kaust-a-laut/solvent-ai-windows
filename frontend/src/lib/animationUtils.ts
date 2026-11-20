@@ -1,10 +1,10 @@
 import { useAppStore } from '../store/useAppStore';
 
 type AnimationVariant = {
-  initial: Record<string, any>;
-  animate: Record<string, any>;
-  exit?: Record<string, any>;
-  transition?: Record<string, any>;
+  initial: Record<string, unknown>;
+  animate: Record<string, unknown>;
+  exit?: Record<string, unknown>;
+  transition?: Record<string, unknown>;
 };
 
 /**

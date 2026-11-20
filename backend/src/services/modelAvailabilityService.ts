@@ -169,15 +169,17 @@ class ModelAvailabilityService {
 
   /**
    * Fetch available models from a provider's API.
+   * Distinguishes 'skipped' (unsupported provider / no API key) from 'error'
+   * (HTTP/network failure) so unconfigured providers don't pollute scanErrors.
    */
-  private async fetchProviderModels(provider: string): Promise<string[] | null> {
+  private async fetchProviderModels(provider: string): Promise<{ status: 'ok'; models: string[] } | { status: 'skipped' } | { status: 'error' }> {
     const endpoint = PROVIDER_ENDPOINTS[provider];
-    if (!endpoint) return null;  // unknown provider (e.g. ollama — skip for now)
+    if (!endpoint) return { status: 'skipped' };
 
     const apiKey = (config as Record<string, unknown>)[endpoint.keyEnv] as string | undefined || process.env[endpoint.keyEnv];
     if (!apiKey) {
       logger.debug(`[ModelAvailability] No API key for ${provider}, skipping scan`);
-      return null;
+      return { status: 'skipped' };
     }
 
     try {
@@ -188,14 +190,14 @@ class ModelAvailabilityService {
 
       if (!response.ok) {
         logger.warn(`[ModelAvailability] ${provider} returned ${response.status}`);
-        return null;
+        return { status: 'error' };
       }
 
       const data = await response.json() as ModelListResponse;
-      return endpoint.parseModels(data);
+      return { status: 'ok', models: endpoint.parseModels(data) };
     } catch (err: unknown) {
       logger.warn(`[ModelAvailability] Failed to fetch ${provider} models:`, err instanceof Error ? err.message : String(err));
-      return null;
+      return { status: 'error' };
     }
   }
 
@@ -208,24 +210,25 @@ class ModelAvailabilityService {
     const scanErrors: string[] = [];
     const now = Date.now();
 
-    // Fetch model lists from all providers in parallel — but skip providers
-    // whose cached list is still inside the TTL window. Saves redundant
-    // round-trips when scan() is called frequently (e.g. on every settings
-    // change).
     const providers = [...new Set([...presetModels.values()].map(m => m.provider))];
     await Promise.all(
       providers.map(async (provider) => {
         const cached = this.providerModelCache.get(provider);
         if (cached && now - cached.fetchedAt < PROVIDER_CACHE_TTL_MS) {
-          return { provider, models: [...cached.models] };
+          return;
         }
-        const models = await this.fetchProviderModels(provider);
-        if (models === null) {
+        const res = await this.fetchProviderModels(provider);
+        if (res.status === 'skipped') {
+          if (cached) this.providerModelCache.delete(provider);
+          return;
+        }
+        if (res.status === 'error') {
+          // Drop expired cache entry rather than evaluating stale model lists as live
+          if (cached) this.providerModelCache.delete(provider);
           scanErrors.push(provider);
-          return { provider, models: null };
+          return;
         }
-        this.providerModelCache.set(provider, { models: new Set(models), fetchedAt: Date.now() });
-        return { provider, models };
+        this.providerModelCache.set(provider, { models: new Set(res.models), fetchedAt: Date.now() });
       })
     );
 

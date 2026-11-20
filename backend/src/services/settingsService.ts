@@ -43,6 +43,15 @@ export interface PublicSettings {
 export class SettingsService {
   private static readonly SETTINGS_FILE = './settings.json';
   private settings: Settings | null = null;
+  private saveChain: Promise<void> = Promise.resolve();
+  private validationLocks = new Map<string, Promise<void>>();
+
+  private getSettingsPath(pathMod: typeof import('path')): string {
+    if (process.env.SOLVENT_DATA_DIR) {
+      return pathMod.resolve(process.env.SOLVENT_DATA_DIR, 'settings.json');
+    }
+    return pathMod.resolve(__dirname, '../../', SettingsService.SETTINGS_FILE);
+  }
 
   async initialize(): Promise<void> {
     await this.loadSettings();
@@ -52,8 +61,8 @@ export class SettingsService {
     try {
       const fs = await import('fs/promises');
       const path = await import('path');
-      
-      const settingsPath = path.resolve(__dirname, '../../', SettingsService.SETTINGS_FILE);
+
+      const settingsPath = this.getSettingsPath(path);
       const data = await fs.readFile(settingsPath, 'utf8');
       this.settings = JSON.parse(data);
     } catch (error) {
@@ -66,25 +75,45 @@ export class SettingsService {
         this.settings = this.getDefaultSettings();
       }
     }
-    
-    return this.settings!;
+
+    return this.cloneSettings(this.settings!);
+  }
+
+  private cloneSettings(s: Settings): Settings {
+    return {
+      ...s,
+      providers: Object.fromEntries(
+        Object.entries(s.providers).map(([k, v]) => [k, { ...v }])
+      ),
+    };
   }
 
   async saveSettings(): Promise<void> {
     if (!this.settings) {
       throw new Error('Settings not initialized');
     }
-    
-    try {
+
+    const snapshot = JSON.stringify(this.settings, null, 2);
+    const writeOp = async () => {
       const fs = await import('fs/promises');
       const path = await import('path');
-      
-      const settingsPath = path.resolve(__dirname, '../../', SettingsService.SETTINGS_FILE);
-      await fs.writeFile(settingsPath, JSON.stringify(this.settings, null, 2), 'utf8');
-    } catch (error) {
-      logger.error('[SettingsService] Error saving settings:', error);
-      throw error;
-    }
+      const { randomUUID } = await import('node:crypto');
+
+      const settingsPath = this.getSettingsPath(path);
+      const tempPath = `${settingsPath}.tmp.${Date.now()}.${randomUUID()}`;
+      try {
+        await fs.writeFile(tempPath, snapshot, { encoding: 'utf8', mode: 0o600 });
+        await fs.rename(tempPath, settingsPath);
+      } catch (error) {
+        await fs.unlink(tempPath).catch(() => {});
+        logger.error('[SettingsService] Error saving settings:', error);
+        throw error;
+      }
+    };
+
+    const next = this.saveChain.then(writeOp, writeOp);
+    this.saveChain = next.catch(() => {});
+    return next;
   }
 
   getDefaultSettings(): Settings {
@@ -109,7 +138,7 @@ export class SettingsService {
     if (!this.settings) {
       await this.loadSettings();
     }
-    return { ...this.settings! };
+    return this.cloneSettings(this.settings!);
   }
 
   private toPublicProviderConfig(providerConfig: ProviderConfig): PublicProviderConfig {
@@ -148,9 +177,10 @@ export class SettingsService {
     if (!this.settings) {
       await this.loadSettings();
     }
-    
-    // Merge the new settings with existing ones
+
+    // Merge the new settings with existing ones, blocking prototype keys
     const { providers, ...rest } = newSettings;
+    const forbidden = new Set(['__proto__', 'constructor', 'prototype']);
     this.settings = {
       ...this.settings!,
       ...rest,
@@ -158,37 +188,56 @@ export class SettingsService {
         ? {
             ...this.settings!.providers,
             ...Object.fromEntries(
-            Object.entries(providers).map(([id, config]) => [
-              id,
-              { ...(this.settings!.providers[id] || { enabled: true }), ...config }
-            ])
+              Object.entries(providers)
+                .filter(([id]) => !forbidden.has(id))
+                .map(([id, config]) => {
+                  const prev: ProviderConfig = Object.prototype.hasOwnProperty.call(this.settings!.providers, id) && this.settings!.providers[id]
+                    ? this.settings!.providers[id]!
+                    : { enabled: true };
+                  const merged: ProviderConfig = {
+                    ...prev,
+                    ...config,
+                    enabled: config.enabled ?? prev.enabled,
+                  };
+                  return [id, merged] as const;
+                })
             )
           }
         : this.settings!.providers
     };
-    
+
     await this.saveSettings();
-    return { ...this.settings! };
+    return this.cloneSettings(this.settings!);
   }
 
   async getProviderConfig(providerId: string): Promise<ProviderConfig | null> {
     if (!this.settings) {
       await this.loadSettings();
     }
-    
-    return this.settings!.providers[providerId] || null;
+
+    if (!Object.prototype.hasOwnProperty.call(this.settings!.providers, providerId)) {
+      return null;
+    }
+    const cfg = this.settings!.providers[providerId];
+    return cfg ? { ...cfg } : null;
   }
 
   async updateProviderConfig(providerId: string, config: Partial<ProviderConfig>): Promise<ProviderConfig> {
+    if (providerId === '__proto__' || providerId === 'constructor' || providerId === 'prototype') {
+      throw new Error(`Invalid provider ID: ${providerId}`);
+    }
     if (!this.settings) {
       await this.loadSettings();
     }
-    
-    const existingConfig = this.settings!.providers[providerId] || { enabled: true };
-    this.settings!.providers[providerId] = { ...existingConfig, ...config };
-    
+
+    const existingConfig = Object.prototype.hasOwnProperty.call(this.settings!.providers, providerId)
+      ? this.settings!.providers[providerId]!
+      : { enabled: true };
+    const merged = { ...existingConfig, ...config };
+    this.settings!.providers[providerId] = merged;
+
     await this.saveSettings();
-    return this.settings!.providers[providerId];
+    return { ...merged };
   }
 
   async getAvailableProviders(): Promise<IProviderPlugin[]> {
@@ -218,51 +267,57 @@ export class SettingsService {
       throw new Error(`Provider ${providerId} not found`);
     }
 
-    // Snapshot the previously-configured key so we can restore the singleton
-    // after the test call. Without this, a successful validate-key call leaks
-    // the caller's apiKey into the live provider used by every subsequent
-    // request, and a failed call leaves the provider broken.
-    const originalConfig = await this.getProviderConfig(providerId);
-    const originalApiKey = originalConfig?.apiKey;
+    // Ollama cloud: key is stored and used when :cloud models are called — skip completion test
+    if (providerId === 'ollama') {
+      return apiKey.trim().length > 0;
+    }
 
+    // Prefer non-mutating per-call apiKey validation whenever the provider
+    // implements complete(). This avoids racing or leaking the test key onto
+    // the shared live provider singleton used by concurrent requests.
+    if (provider.complete) {
+      try {
+        const testMessages = [{ role: 'user' as const, content: 'hi' }];
+        await provider.complete(testMessages, {
+          model: provider.defaultModel || '',
+          maxTokens: 1,
+          apiKey,
+        });
+        return true;
+      } catch (error: unknown) {
+        const err = error as { message?: string };
+        logger.error(`[SettingsService] API key validation failed for ${providerId}: ${err?.message || String(error)}`);
+        return false;
+      }
+    }
+
+    // Non-chat providers (no complete()): serialize initialization checks per provider
+    // and restore the full prior config (including baseUrl/defaultModel) in finally.
+    const prevLock = this.validationLocks.get(providerId) ?? Promise.resolve();
+    let releaseLock!: () => void;
+    const myLock = new Promise<void>(resolve => { releaseLock = resolve; });
+    this.validationLocks.set(providerId, prevLock.then(() => myLock));
+    await prevLock;
+
+    const originalConfig = await this.getProviderConfig(providerId);
     try {
       if (provider.initialize) {
-        await provider.initialize({ apiKey });
+        await provider.initialize({ ...originalConfig, apiKey });
       }
-
-      if (!provider.isReady()) return false;
-
-      // For non-chat providers (serper, huggingface image), init check is enough
-      if (!provider.complete) {
-        return true;
-      }
-
-      // Ollama cloud: key is stored and used when :cloud models are called — skip completion test
-      if (providerId === 'ollama') {
-        return true;
-      }
-
-      // Make a real API call to verify the key works (1 token max)
-      const testMessages = [{ role: 'user' as const, content: 'hi' }];
-      await provider.complete(testMessages, {
-        model: provider.defaultModel || '',
-        maxTokens: 1,
-        apiKey,
-      });
-      return true;
+      return provider.isReady();
     } catch (error: unknown) {
-      // Pass message string only — AxiosError has circular refs that crash logger.scrub()
       const err = error as { message?: string };
       logger.error(`[SettingsService] API key validation failed for ${providerId}: ${err?.message || String(error)}`);
       return false;
     } finally {
       if (provider.initialize) {
         try {
-          await provider.initialize(originalApiKey ? { apiKey: originalApiKey } : {});
+          await provider.initialize(originalConfig ? { ...originalConfig } : {});
         } catch (restoreError) {
           logger.error(`[SettingsService] Failed to restore provider ${providerId} after key validation`, restoreError);
         }
       }
+      releaseLock();
     }
   }
 }

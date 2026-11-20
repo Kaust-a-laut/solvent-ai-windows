@@ -1,10 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import { cn } from '../lib/utils';
-import { History, ChevronDown, Check, Cloud, Cpu, Zap } from 'lucide-react';
+import { History, ChevronDown, Check, Cloud, Cpu } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { SessionHistory } from './SessionHistory';
-import { PROVIDER_GROUPS } from '../lib/allModels';
+import { useLiveProviderGroups } from '../lib/allModels';
 
 interface ChatHeaderProps {
   compact?: boolean;
@@ -20,7 +20,6 @@ export const ChatHeader = ({ compact }: ChatHeaderProps) => {
     setGlobalProvider,
     setSelectedCloudModel,
     setSelectedCloudProvider,
-    thinkingModeEnabled,
     modeConfigs,
     deviceInfo,
     imageProvider
@@ -32,6 +31,7 @@ export const ChatHeader = ({ compact }: ChatHeaderProps) => {
   const [cloudProvider, setCloudProvider] = useState<'groq' | 'gemini' | 'openrouter'>('groq');
   const [dropAlign, setDropAlign] = useState<'left' | 'right'>('left');
   const dropRef = useRef<HTMLDivElement>(null);
+  const providerGroups = useLiveProviderGroups();
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -45,11 +45,15 @@ export const ChatHeader = ({ compact }: ChatHeaderProps) => {
     return () => document.removeEventListener('mousedown', handler);
   }, [showModelDrop]);
 
-  useEffect(() => {
-    if (!showModelDrop || !dropRef.current) return;
-    const rect = dropRef.current.getBoundingClientRect();
-    setDropAlign(rect.left + 640 > window.innerWidth ? 'right' : 'left');
-  }, [showModelDrop]);
+  // Measure at open time (event handler), not in an effect — the trigger is
+  // always mounted, so its rect is available before the panel renders.
+  const toggleModelDrop = () => {
+    if (!showModelDrop && dropRef.current) {
+      const rect = dropRef.current.getBoundingClientRect();
+      setDropAlign(rect.left + 640 > window.innerWidth ? 'right' : 'left');
+    }
+    setShowModelDrop(v => !v);
+  };
 
   type CloudProvider = 'groq' | 'gemini' | 'deepseek' | 'openrouter' | 'puter';
   // Resolve active provider and model for display
@@ -115,8 +119,8 @@ export const ChatHeader = ({ compact }: ChatHeaderProps) => {
           <div className="flex flex-col relative" ref={dropRef}>
             {!compact && <span className="text-[11px] font-black text-slate-300 uppercase tracking-[0.5em] mb-1.5 opacity-60">Model</span>}
             <button
-              onClick={() => setShowModelDrop(v => !v)}
-              className="flex items-center gap-2 group border border-white/[0.08] hover:border-jb-orange/40 bg-white/[0.03] rounded-xl px-2.5 py-1.5 transition-all"
+              onClick={toggleModelDrop}
+              className="flex items-center gap-2 group border border-white/[0.18] hover:border-jb-orange/50 bg-white/[0.06] hover:bg-white/[0.09] rounded-xl px-2.5 py-1.5 transition-all"
             >
               <span className={cn("font-extrabold text-jb-accent uppercase tracking-[0.2em]", compact ? "text-[11px]" : "text-[12px]")}>{displayProvider}</span>
               {!isMobile && (
@@ -175,7 +179,7 @@ export const ChatHeader = ({ compact }: ChatHeaderProps) => {
                       <>
                         {/* Cloud provider sub-tabs */}
                         <div className="flex gap-1 mb-2 bg-white/[0.03] rounded-lg p-0.5">
-                          {PROVIDER_GROUPS.map(g => (
+                          {providerGroups.map(g => (
                             <button
                               key={g.id}
                               onClick={() => setCloudProvider(g.id as 'groq' | 'gemini' | 'openrouter')}
@@ -192,7 +196,7 @@ export const ChatHeader = ({ compact }: ChatHeaderProps) => {
                         </div>
                         {/* Models for selected provider — 3-column grid */}
                         <div className="grid grid-cols-3 gap-1.5">
-                          {PROVIDER_GROUPS.find(g => g.id === cloudProvider)?.models.map(m => {
+                          {providerGroups.find(g => g.id === cloudProvider)?.models.map(m => {
                             const isSelected = selectedCloudModel === m.value && selectedCloudProvider === cloudProvider;
                             return (
                               <button
@@ -229,7 +233,7 @@ export const ChatHeader = ({ compact }: ChatHeaderProps) => {
         {/* Right: History button */}
         <button
           onClick={() => setShowHistory(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white/[0.03] border border-white/5 hover:border-jb-accent/20 hover:bg-jb-accent/5 transition-all group"
+          className="cta-secondary flex items-center gap-1.5 px-3 py-1.5 group"
           title="Session History"
         >
           <History size={12} className="text-slate-300 group-hover:text-jb-accent transition-colors" />

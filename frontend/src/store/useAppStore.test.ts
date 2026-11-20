@@ -25,7 +25,7 @@ describe('useAppStore', () => {
     useAppStore.setState({
       messages: [],
       sessions: {},
-      isProcessing: false,
+      isProcessingByMode: {},
     });
     vi.clearAllMocks();
   });
@@ -46,7 +46,7 @@ describe('useAppStore', () => {
     const state = useAppStore.getState();
     expect(state.messages).toHaveLength(2); // User + Assistant
     expect(state.messages[1].content).toBe('AI Response');
-    expect(state.isProcessing).toBe(false);
+    expect(state.isProcessingByMode[state.currentMode]).toBe(false);
   });
 
   it('should handle sendMessage failure', async () => {

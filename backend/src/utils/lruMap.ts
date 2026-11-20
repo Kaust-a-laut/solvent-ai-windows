@@ -50,6 +50,18 @@ export class LRUMap<K, V> {
     return this.map.size;
   }
 
+  keys(): IterableIterator<K> {
+    return this.map.keys();
+  }
+
+  values(): IterableIterator<V> {
+    return this.map.values();
+  }
+
+  entries(): IterableIterator<[K, V]> {
+    return this.map.entries();
+  }
+
   clear(): void {
     this.map.clear();
   }

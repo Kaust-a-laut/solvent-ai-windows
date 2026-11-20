@@ -122,9 +122,96 @@
     @apply bg-white/[0.01] backdrop-blur-2xl border border-white/[0.06] rounded-2xl;
   }
 
+  /* Elevation tokens — raise interactive surfaces above the #020205 base
+     so cards and buttons read as distinct without changing the palette.
+     Borders use a 1px border + 1px inset ring to read as a confident 2px
+     edge without the visual heaviness of an actual `border-2`. */
+  .surface-1 {
+    @apply bg-white/[0.06] border border-white/[0.22] rounded-2xl;
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.06) inset,
+      0 1px 0 rgba(255, 255, 255, 0.08) inset,
+      0 10px 28px -12px rgba(0, 0, 0, 0.7);
+  }
+  .surface-2 {
+    @apply bg-white/[0.09] border border-white/[0.28] rounded-xl;
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.08) inset,
+      0 1px 0 rgba(255, 255, 255, 0.1) inset,
+      0 6px 20px -8px rgba(0, 0, 0, 0.75);
+  }
+  .surface-interactive {
+    @apply bg-white/[0.06] border border-white/[0.22] rounded-xl transition-all duration-200;
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.06) inset,
+      0 1px 0 rgba(255, 255, 255, 0.08) inset;
+  }
+  .surface-interactive:hover {
+    @apply bg-white/[0.1] border-white/[0.34];
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.1) inset,
+      0 1px 0 rgba(255, 255, 255, 0.12) inset;
+  }
+
+  /* Scanline sweep — reinforces the "active system" feel on hover. A faint
+     diagonal highlight passes across the card. Uses ::after so it doesn't
+     interfere with the row's own background/box-shadow. */
+  .preset-scan {
+    position: relative;
+    overflow: hidden;
+  }
+  .preset-scan::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: linear-gradient(
+      115deg,
+      transparent 30%,
+      rgba(157, 91, 210, 0.08) 50%,
+      transparent 70%
+    );
+    transform: translateX(-100%);
+    transition: transform 0.7s ease;
+    pointer-events: none;
+  }
+  .preset-scan:hover::after {
+    transform: translateX(100%);
+  }
+
+  /* CTA tokens — primary uses filled accent for unmistakable importance;
+     secondary stays ghost but lifted enough to read as a button. */
+  .cta-primary {
+    @apply bg-jb-accent/20 border border-jb-accent/60 text-white rounded-xl
+           transition-all duration-200;
+    box-shadow:
+      0 0 0 1px rgba(60, 113, 247, 0.25) inset,
+      0 1px 0 rgba(255, 255, 255, 0.1) inset,
+      0 6px 24px -8px rgba(60, 113, 247, 0.4);
+  }
+  .cta-primary:hover {
+    @apply bg-jb-accent/30 border-jb-accent/80;
+    box-shadow:
+      0 0 0 1px rgba(60, 113, 247, 0.4) inset,
+      0 1px 0 rgba(255, 255, 255, 0.14) inset,
+      0 8px 30px -8px rgba(60, 113, 247, 0.55);
+  }
+  .cta-primary:disabled {
+    @apply opacity-40 cursor-not-allowed;
+  }
+  .cta-secondary {
+    @apply bg-white/[0.07] border border-white/[0.26] text-white rounded-xl
+           transition-all duration-200 hover:bg-white/[0.11] hover:border-white/[0.38];
+    box-shadow:
+      0 0 0 1px rgba(255, 255, 255, 0.08) inset,
+      0 1px 0 rgba(255, 255, 255, 0.1) inset;
+  }
+
   .text-vibrant {
     @apply bg-gradient-to-r from-jb-accent via-jb-purple to-jb-orange bg-clip-text text-transparent inline-block;
-    filter: drop-shadow(0 0 15px rgba(60, 113, 247, 0.3));
+    /* Tight halo only — a wide drop-shadow at 15px blur bled into the letter edges
+       and softened glyph contrast against the dark background. */
+    filter: drop-shadow(0 0 6px rgba(60, 113, 247, 0.18));
     padding-right: 0.1em;
     padding-left: 0.02em;
     padding-bottom: 0.15em;

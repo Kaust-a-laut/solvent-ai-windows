@@ -12,7 +12,7 @@ export class FireworksProviderPlugin extends BaseOpenAIService implements IProvi
   id = 'fireworks';
   description = 'Fireworks AI — fast inference for open models via OpenAI-compatible API';
   version = '1.0.0';
-  defaultModel = 'accounts/fireworks/models/llama-v3p3-70b-instruct';
+  defaultModel = 'accounts/fireworks/models/kimi-k2p6';
   capabilities = {
     supportsVision: false,
     supportsStreaming: true,
@@ -20,7 +20,7 @@ export class FireworksProviderPlugin extends BaseOpenAIService implements IProvi
     contextWindow: 131072,
     maxOutputTokens: 16384,
     supportsFunctionCalling: true,
-    costPer1k: { input: 0.0, output: 0.0 },
+    costPer1k: { input: 0.0002, output: 0.0006 },
   };
 
   private isInitialized = false;
@@ -33,6 +33,10 @@ export class FireworksProviderPlugin extends BaseOpenAIService implements IProvi
 
   isReady(): boolean {
     return this.isInitialized;
+  }
+
+  hasConfiguredKey(): boolean {
+    return this.isInitialized && !!this.apiKey;
   }
 
   async healthCheck(): Promise<boolean> {

@@ -9,11 +9,16 @@ export interface MemoryMaintenanceJobData {
 
 export async function memoryMaintenanceJob(job: Job<MemoryMaintenanceJobData>): Promise<unknown> {
   const jobType = job.data?.type || job.name;
+  // BullMQ passes `{ type, data }` while standalone TaskService passes `data` directly
+  const payload = (
+    job.data && typeof job.data === 'object' && 'data' in job.data && job.data.data && typeof job.data.data === 'object'
+      ? job.data.data
+      : job.data
+  ) as Record<string, unknown> | undefined;
 
   // Route to the appropriate handler based on job type
   switch (jobType) {
     case 'memory-consolidation': {
-      const payload = job.data?.data as Record<string, unknown> | undefined;
       const mode = payload?.mode as string | undefined;
       const messages = (payload?.messages ?? []) as import('../types/ai').ChatMessage[];
       logger.info(`[MemoryMaintenanceJob] Running consolidation for mode: ${mode}`);
@@ -22,7 +27,6 @@ export async function memoryMaintenanceJob(job: Job<MemoryMaintenanceJobData>): 
     }
 
     case 'memory-extraction': {
-      const payload = job.data?.data as Record<string, unknown> | undefined;
       const content = payload?.content as string | undefined;
       logger.info('[MemoryMaintenanceJob] Running knowledge extraction');
       await memoryConsolidationService.extractKnowledge(content ?? '');
@@ -30,14 +34,12 @@ export async function memoryMaintenanceJob(job: Job<MemoryMaintenanceJobData>): 
     }
 
     default: {
-      // Original maintenance flow
+      // Original maintenance flow (runAmnesiaCycle already runs compressOlderMemories internally)
       logger.info('[MemoryMaintenanceJob] Starting memory maintenance...');
 
       try {
         await job.updateProgress(10);
         await memoryConsolidationService.runAmnesiaCycle();
-        await job.updateProgress(70);
-        await memoryConsolidationService.compressOlderMemories();
         await job.updateProgress(100);
 
         logger.info('[MemoryMaintenanceJob] Completed memory maintenance');

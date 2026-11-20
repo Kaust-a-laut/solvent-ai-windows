@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import { toast } from 'sonner';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -34,7 +34,10 @@ export const WaterfallArea = () => {
   } = useAppStore();
 
   const [input, setInput] = useState('');
-  const [selectedStage, setSelectedStage] = useState<StageKey | null>(null);
+  // Manual stage selection (card clicks). The displayed selection is derived:
+  // override wins until the pipeline moves, then it snaps back to the active
+  // stage — see selectedStage below.
+  const [stageOverride, setStageOverride] = useState<StageKey | null>(null);
 
   const { unavailableModels, upgradeSuggestions } = useModelAvailability();
   const [dismissedKeys, setDismissedKeys] = useState<Set<string>>(() => getDismissedUpgrades());
@@ -47,6 +50,14 @@ export const WaterfallArea = () => {
   const handleSwapModel = (stage: StageKey, model: string, provider: string) => {
     setWaterfallCustomStage(stage, { model, provider });
   };
+
+  // Stop an in-flight waterfall run when the user navigates away from this
+  // mode — otherwise the SSE stream keeps running and mutating the store in
+  // the background with no visible UI. No-op if nothing is running.
+  useEffect(() => {
+    return () => { cancelWaterfall(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Toast notifications for model upgrades ────────────────────────────────
   useEffect(() => {
@@ -71,33 +82,31 @@ export const WaterfallArea = () => {
     }, 1500);
 
     return () => clearTimeout(timer);
-  }, [upgradeSuggestions]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [upgradeSuggestions]);
 
   const stageTimings = useStageTimings(waterfall.steps);
 
   // ── Auto-select the most relevant stage ────────────────────────────────────
-  useEffect(() => {
-    // Auto-select: pick the stage currently processing, or the last completed one
+  // Derived, not effect-driven: the stage currently processing, else paused,
+  // else the last completed one.
+  const autoStage = useMemo<StageKey | null>(() => {
     const processing = STAGE_ORDER.find((s) => waterfall.steps[s].status === 'processing');
-    if (processing) {
-      setSelectedStage(processing);
-      return;
-    }
+    if (processing) return processing;
     const paused = STAGE_ORDER.find((s) => waterfall.steps[s].status === 'paused');
-    if (paused) {
-      setSelectedStage(paused);
-      return;
-    }
-    // Find last completed stage
+    if (paused) return paused;
     const completedStages = STAGE_ORDER.filter((s) => waterfall.steps[s].status === 'completed');
-    if (completedStages.length > 0) {
-      setSelectedStage(completedStages[completedStages.length - 1] ?? null);
-    }
-  }, [
-    waterfall.steps.planner.status,
-    waterfall.steps.executor.status,
-    waterfall.steps.reviewer.status,
-  ]);
+    return completedStages[completedStages.length - 1] ?? null;
+  }, [waterfall.steps]);
+
+  // When the pipeline moves, drop any manual selection so the view snaps back
+  // to the active stage (render-adjust idiom, matches the old effect).
+  const [prevAutoStage, setPrevAutoStage] = useState(autoStage);
+  if (autoStage !== prevAutoStage) {
+    setPrevAutoStage(autoStage);
+    setStageOverride(null);
+  }
+
+  const selectedStage = stageOverride ?? autoStage;
 
   // ── Derived state ──────────────────────────────────────────────────────────
   const isStreaming   = waterfallAbortController !== null;
@@ -109,7 +118,7 @@ export const WaterfallArea = () => {
   // ── Handlers ───────────────────────────────────────────────────────────────
   const handleSubmit = async () => {
     if (!input.trim() || isStreaming) return;
-    setSelectedStage(null);
+    setStageOverride(null);
     await runFullWaterfall(input);
   };
 
@@ -147,7 +156,7 @@ export const WaterfallArea = () => {
         allCompleted={allCompleted}
         onCancel={cancelWaterfall}
         onExportAll={handleExportAll}
-        onReset={() => { resetWaterfall(); setSelectedStage(null); }}
+        onReset={() => { resetWaterfall(); setStageOverride(null); }}
       />
 
       {/* ── Workspace ──────────────────────────────────────────────────────── */}
@@ -339,7 +348,7 @@ export const WaterfallArea = () => {
                               timing={stageTimings[stageKey]}
                               compact
                               isSelected={selectedStage === stageKey}
-                              onSelect={() => setSelectedStage(stageKey)}
+                              onSelect={() => setStageOverride(stageKey)}
                               modelLabel={getStageModelLabel(waterfallModelSelection[stageKey])}
                             />
 

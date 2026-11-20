@@ -245,7 +245,7 @@ export const SupervisorHistory = () => {
                       <Clock size={10} className="animate-pulse" />
                       Pending Approval
                     </div>
-                    {pendingDecisions.map((decision, i) => {
+                    {pendingDecisions.map((decision) => {
                       const remaining = Math.max(0, (timeRemaining[decision.id] || 0) - Date.now());
                       const isExpiring = remaining > 0 && remaining < 30000;
                       

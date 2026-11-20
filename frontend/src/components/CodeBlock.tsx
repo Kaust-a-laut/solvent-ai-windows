@@ -17,9 +17,14 @@ export const CodeBlock: React.FC<CodeBlockProps> = ({ language, code }) => {
   const { addMessage } = useAppStore();
 
   const handleCopy = async () => {
-    await navigator.clipboard.writeText(code);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (error) {
+      console.error('Copy failed:', error);
+      addMessage({ role: 'assistant', content: '❌ Failed to copy code to clipboard.' });
+    }
   };
 
   const handleSave = async () => {

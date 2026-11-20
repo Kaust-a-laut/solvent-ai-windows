@@ -2,8 +2,7 @@ import React, { useState } from 'react';
 import {
   FilePen, FilePlus, FileX, Replace, FlaskConical, Hammer,
   GitCommit, Package, Terminal, ChevronDown, ChevronRight,
-  Loader2, Check, AlertCircle, FileCode, Search, FileSymlink,
-  FolderSearch, GitBranch, GitCompare,
+  Loader2, Check, AlertCircle,
 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import type { ToolEvent } from '../../store/codingSlice';
@@ -13,8 +12,6 @@ interface Props {
   resultEvent?: ToolEvent;
   previousContent?: string;
 }
-
-const WRITE_TOOL_NAMES = new Set(['write_file', 'edit_file', 'create_file', 'replace_in_files']);
 
 const LOG_TOOLS = new Set([
   'read_file', 'list_files', 'get_file_outline', 'grep_files',
@@ -183,7 +180,7 @@ const FileDeleteCard: React.FC<Props & { expanded: boolean; onToggle: () => void
   );
 };
 
-const TestRunnerCard: React.FC<Props & { expanded: boolean; onToggle: () => void }> = ({ startEvent, resultEvent, expanded, onToggle }) => {
+const TestRunnerCard: React.FC<Props & { expanded: boolean; onToggle: () => void }> = ({ resultEvent, expanded, onToggle }) => {
   const isPending = !resultEvent;
   const isError = resultEvent?.type === 'tool_error';
   const result = resultEvent?.result as string | undefined;
@@ -278,7 +275,7 @@ const GitCommitCard: React.FC<Props> = ({ startEvent, resultEvent }) => {
         <Check size={12} className="text-emerald-400 shrink-0" />
         <GitCommit size={12} className="text-emerald-400 shrink-0" />
         <span className="font-mono truncate flex-1 text-white/70">git commit</span>
-        <span className="text-emerald-400 shrink-0">"{message}"</span>
+        <span className="text-emerald-400 shrink-0">&ldquo;{message}&rdquo;</span>
         {sha && <span className="text-white/30 font-mono shrink-0">({sha})</span>}
       </div>
     </div>
@@ -388,7 +385,7 @@ export const AgentActionCard: React.FC<Props> = ({ startEvent, resultEvent, prev
     case 'create_file':
       return <FileCreateCard {...props} />;
     case 'delete_file':
-      return <FileDeleteCard {...(props as any)} />;
+      return <FileDeleteCard {...props} />;
     case 'run_tests':
       return <TestRunnerCard {...props} />;
     case '__build_check__':

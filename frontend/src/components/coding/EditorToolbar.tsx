@@ -36,7 +36,6 @@ export const EditorToolbar: React.FC<EditorToolbarProps> = ({
   setTerminalVisible,
   bootStatus,
   isRunning,
-  activeFile,
   currentProject,
   onBootWebContainer,
   onRetryBoot,
@@ -46,7 +45,7 @@ export const EditorToolbar: React.FC<EditorToolbarProps> = ({
   onOpenFolder,
 }) => {
   return (
-    <div className="h-11 flex items-center px-4 gap-3 border-b border-white/[0.04] shrink-0">
+    <div className="h-11 flex items-center px-4 gap-3 border-b border-white/[0.12] shrink-0 bg-white/[0.02]">
       <button
         type="button"
         onClick={() => setFileTreeVisible(!fileTreeVisible)}
@@ -91,7 +90,7 @@ export const EditorToolbar: React.FC<EditorToolbarProps> = ({
         <button
           type="button"
           onClick={onBootWebContainer}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-orange-500/30 bg-orange-500/5 text-orange-400 text-[11px] font-bold hover:bg-orange-500/10 transition-colors"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-orange-500/60 bg-orange-500/15 text-orange-300 text-[11px] font-bold hover:bg-orange-500/25 hover:border-orange-500/80 transition-colors shadow-[inset_0_0_0_1px_rgba(251,146,60,0.2),0_4px_16px_-6px_rgba(251,146,60,0.4)]"
         >
           <Box size={12} aria-hidden="true" /> Sandbox
         </button>
@@ -102,7 +101,7 @@ export const EditorToolbar: React.FC<EditorToolbarProps> = ({
         </div>
       )}
       {bootStatus === 'ready' && (
-        <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/5 text-emerald-400 text-[11px] font-bold">
+        <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-emerald-500/60 bg-emerald-500/15 text-emerald-300 text-[11px] font-bold shadow-[inset_0_0_0_1px_rgba(16,185,129,0.2),0_4px_16px_-6px_rgba(16,185,129,0.4)]">
           <span className="relative flex h-2 w-2">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
             <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
@@ -114,7 +113,7 @@ export const EditorToolbar: React.FC<EditorToolbarProps> = ({
         <button
           type="button"
           onClick={onRetryBoot}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-rose-500/30 bg-rose-500/5 text-rose-400 text-[11px] font-bold hover:bg-rose-500/10 transition-colors"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-rose-500/60 bg-rose-500/15 text-rose-300 text-[11px] font-bold hover:bg-rose-500/25 hover:border-rose-500/80 transition-colors shadow-[inset_0_0_0_1px_rgba(244,63,94,0.2)]"
         >
           <Box size={12} aria-hidden="true" /> Retry Sandbox
         </button>
@@ -123,7 +122,7 @@ export const EditorToolbar: React.FC<EditorToolbarProps> = ({
       <NativeBackendChip currentProject={currentProject} />
 
       {/* Separator between runtime-mode group (Sandbox/Native) and action group (Save/Run) */}
-      <div className="h-5 w-px bg-white/[0.06] mx-1" />
+      <div className="h-5 w-px bg-white/[0.18] mx-1" />
 
       <button
         type="button"
@@ -147,7 +146,7 @@ export const EditorToolbar: React.FC<EditorToolbarProps> = ({
       </button>
 
       {/* Separator between action group (Save/Run) and view-toggle group (Chat/Terminal/Hide) */}
-      <div className="h-5 w-px bg-white/[0.06] mx-1" />
+      <div className="h-5 w-px bg-white/[0.18] mx-1" />
 
       <button
         type="button"

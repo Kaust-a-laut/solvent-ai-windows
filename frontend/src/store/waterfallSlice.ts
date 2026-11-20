@@ -4,6 +4,7 @@ import { fetchWithRetry, getSecret } from '../lib/api-client';
 import { API_BASE_URL } from '../lib/config';
 import { waterfallStateMachine } from '../lib/waterfallStateMachine';
 import { WATERFALL_PRESETS_BY_KEY } from '../lib/waterfallPresets';
+import { streamSSE } from '../lib/sse';
 
 export type WaterfallModelChoice = 'A' | 'B' | { model: string; provider: string };
 export interface WaterfallModelSelection {
@@ -215,14 +216,10 @@ export const createWaterfallSlice: StateCreator<AppState, [], [], WaterfallSlice
       });
 
       if (!response.body) throw new Error('No response body');
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let sseBuffer = '';
 
-      const processSSELine = (line: string) => {
-        if (!line.startsWith('data: ')) return;
+      const processSSEPayload = (raw: string) => {
         try {
-          const payload = JSON.parse(line.slice(6));
+          const payload = JSON.parse(raw);
           const { phase, message, estimate } = payload;
 
           if (phase === 'retrying') {
@@ -327,25 +324,8 @@ export const createWaterfallSlice: StateCreator<AppState, [], [], WaterfallSlice
         }
       };
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-
-        // Accumulate chunks — SSE events can span multiple TCP frames
-        sseBuffer += decoder.decode(value, { stream: true });
-
-        // Split by newlines, keep last (possibly incomplete) line in buffer
-        const lines = sseBuffer.split('\n');
-        sseBuffer = lines.pop() || '';
-
-        for (const line of lines) {
-          processSSELine(line);
-        }
-      }
-
-      // Process any remaining buffered data after stream ends
-      if (sseBuffer.trim()) {
-        processSSELine(sseBuffer.trim());
+      for await (const payload of streamSSE(response.body)) {
+        processSSEPayload(payload);
       }
     } catch (error: unknown) {
       const err = error as { name?: string; message?: string };

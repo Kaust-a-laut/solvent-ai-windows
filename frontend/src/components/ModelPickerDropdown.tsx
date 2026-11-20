@@ -54,11 +54,16 @@ export const ModelPickerDropdown = ({
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
-  useEffect(() => {
-    if (!open || !ref.current) return;
-    const rect = ref.current.getBoundingClientRect();
-    setAlign(rect.left + 640 > window.innerWidth ? 'right' : 'left');
-  }, [open]);
+  // Measure at open time (event handler), not in an effect — the trigger is
+  // always mounted, so its rect is available before the panel renders.
+  const toggleOpen = () => {
+    if (disabled) return;
+    if (!open && ref.current) {
+      const rect = ref.current.getBoundingClientRect();
+      setAlign(rect.left + 640 > window.innerWidth ? 'right' : 'left');
+    }
+    setOpen(v => !v);
+  };
 
   const handleSelect = (m: ModelEntry) => {
     onChange(toKey(m.provider, m.model));
@@ -74,7 +79,7 @@ export const ModelPickerDropdown = ({
       )}
       <div className="relative">
         <button
-          onClick={() => !disabled && setOpen(v => !v)}
+          onClick={toggleOpen}
           disabled={disabled}
           className={cn(
             "flex items-center gap-2 appearance-none bg-black/60 border border-white/10 rounded-2xl pl-4 pr-9 py-3 text-[11px] font-bold uppercase tracking-wider outline-none transition-all",

@@ -87,7 +87,7 @@ export const TraceList: React.FC = () => {
     setLoading(true);
     try {
       const results = await getTraces(f);
-      setTraces(results);
+      setTraces(results as TraceRow[]);
     } catch {
       setTraces([]);
     } finally {

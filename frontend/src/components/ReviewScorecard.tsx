@@ -1,6 +1,6 @@
 import React from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { ShieldCheck, AlertTriangle, CheckCircle2, XCircle, Search } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, XCircle, Search } from 'lucide-react';
 import { cn } from '../lib/utils';
 
 interface ScorecardProps {

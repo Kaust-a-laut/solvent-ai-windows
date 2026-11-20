@@ -24,7 +24,6 @@ const DEFAULT_KEY_LIMITS: Record<string, number> = {
 };
 
 const DATA_DIR = path.resolve(__dirname, '../..');
-const SESSION_ID_REGEX = /^[a-zA-Z0-9\-_]+$/;
 
 export class CoreMemory {
   private entries: Map<string, CoreEntry> = new Map();
@@ -110,14 +109,6 @@ export class CoreMemory {
 }
 
 export class CoreMemoryFactory {
-  static createForSession(sessionId: string, options?: CoreMemoryOptions): CoreMemory {
-    if (!SESSION_ID_REGEX.test(sessionId)) {
-      throw new Error(`Invalid sessionId: "${sessionId}". Only alphanumeric characters, hyphens, and underscores are allowed.`);
-    }
-    const filePath = path.join(DATA_DIR, `.solvent_core_memory_${sessionId}.json`);
-    return new CoreMemory(filePath, options?.maxSlots ?? 50);
-  }
-
   static createGlobal(options?: CoreMemoryOptions): CoreMemory {
     const filePath = path.join(DATA_DIR, '.solvent_core_memory.json');
     return new CoreMemory(filePath, options?.maxSlots ?? 50);

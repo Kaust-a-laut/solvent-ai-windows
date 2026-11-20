@@ -50,24 +50,30 @@ export const HarnessOptimizerPanel: React.FC = () => {
     const results = await listOptimizationRuns() as unknown as LocalOptimizationRun[];
     setRuns(results);
     const running = results.find((r: LocalOptimizationRun) => r.status === 'running');
-    if (running) setActiveRun(running);
-    else if (!activeRun || activeRun.status !== 'running') setActiveRun(null);
+    // Functional update: reading activeRun here would be a stale closure
+    // (deps are intentionally empty so refreshRuns stays stable).
+    setActiveRun(prev => running ?? (prev && prev.status === 'running' ? prev : null));
   }, []);
 
-  useEffect(() => { refreshRuns(); }, [refreshRuns]);
+  // Initial fetch on mount — the state updates land after the await inside
+  // refreshRuns, not synchronously in the effect body.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
+  useEffect(() => { void refreshRuns(); }, [refreshRuns]);
 
-  // Poll active run every 2 seconds
+  // Poll the active run every 2 seconds while it's running. Deriving the id
+  // keeps the effect deps exact: it re-arms only when the running run changes.
+  const runningRunId = activeRun?.status === 'running' ? activeRun.id : null;
   useEffect(() => {
-    if (!activeRun || activeRun.status !== 'running') return;
+    if (!runningRunId) return;
     const interval = setInterval(async () => {
-      const updated = await getOptimizationRun(activeRun.id) as unknown as LocalOptimizationRun | null;
+      const updated = await getOptimizationRun(runningRunId) as unknown as LocalOptimizationRun | null;
       if (updated) {
         setActiveRun(updated);
         setRuns(prev => prev.map(r => r.id === updated.id ? updated : r));
       }
     }, 2000);
     return () => clearInterval(interval);
-  }, [activeRun?.id, activeRun?.status]);
+  }, [runningRunId]);
 
   const handleStart = async () => {
     setLoading(true);

@@ -1,7 +1,41 @@
 import Store from 'electron-store';
-import { net, BrowserWindow } from 'electron';
+import { BrowserWindow } from 'electron';
 
 const store = new Store();
+
+let secretGetter: () => string | null = () => process.env.BACKEND_INTERNAL_SECRET ?? null;
+let cachedDevSecret: string | null = null;
+
+async function resolveBackendSecret(): Promise<string> {
+  const fromProvider = secretGetter();
+  if (fromProvider) return fromProvider;
+  if (cachedDevSecret) return cachedDevSecret;
+
+  // Dev fallback: fetch secret from localhost backend (same mechanism as renderer)
+  try {
+    const res = await fetch('http://127.0.0.1:3001/dev-secret', {
+      headers: { Origin: 'http://localhost:5173' }
+    });
+    if (res.ok) {
+      const data = await res.json() as { secret?: string };
+      if (data.secret) {
+        cachedDevSecret = data.secret;
+        return cachedDevSecret;
+      }
+    }
+  } catch {
+    // Backend may still be booting — let caller see the 401/connection error
+  }
+  return '';
+}
+
+function broadcastModelStatus(payload: { status: string; model: string }) {
+  BrowserWindow.getAllWindows().forEach(w => {
+    if (!w.isDestroyed()) {
+      w.webContents.send('model-status', payload);
+    }
+  });
+}
 
 // Helper to calculate cost (rough estimation)
 const calculateCost = (model: string, tokens: number) => {
@@ -13,14 +47,18 @@ const calculateCost = (model: string, tokens: number) => {
 
 const API = {
   call: async (modelStr: string, messages: any[]) => {
-    // Parse provider/model from string "provider/model"
+    // Parse provider/model from string "provider/model" — split on the FIRST
+    // slash only so multi-slash IDs like "openrouter/anthropic/claude-3-opus"
+    // keep the full downstream model slug ("anthropic/claude-3-opus").
     let provider = 'gemini';
     let modelName = modelStr;
 
-    if (modelStr.includes('/')) {
-      [provider, modelName] = modelStr.split('/');
+    const firstSlash = modelStr.indexOf('/');
+    if (firstSlash !== -1) {
+      provider = modelStr.slice(0, firstSlash);
+      modelName = modelStr.slice(firstSlash + 1);
     } else if (modelStr.startsWith('gpt') || modelStr.startsWith('o1')) {
-        provider = 'openrouter'; // Assume openrouter for openai models if not specified
+      provider = 'openrouter'; // Assume openrouter for openai models if not specified
     }
 
     // Adjust provider for backend compatibility
@@ -33,13 +71,18 @@ const API = {
       smartRouter: false // We are doing the routing here
     };
 
+    const secret = await resolveBackendSecret();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (secret) {
+      headers['x-solvent-secret'] = secret;
+    }
+
     // Use built-in fetch (Node 18+)
-    const response = await fetch('http://localhost:3001/api/v1/chat', {
+    const response = await fetch('http://127.0.0.1:3001/api/v1/chat', {
       method: 'POST',
-      headers: { 
-        'Content-Type': 'application/json',
-        'x-solvent-secret': 'solvent_internal_dev_secret' 
-      },
+      headers,
       body: JSON.stringify(payload)
     });
 
@@ -50,7 +93,7 @@ const API = {
         try {
             const errBody = await response.json();
             if (errBody.error) error.message = errBody.error;
-        } catch (e) {
+        } catch {
             // Body not parseable — continue with default error message
         }
         throw error;
@@ -67,6 +110,11 @@ const API = {
 };
 
 export const ModelManager = {
+  setSecretProvider: (getter: () => string | null) => {
+    secretGetter = getter;
+    cachedDevSecret = null;
+  },
+
   // 1. Persistent Storage for Preferences
   getPreference: (tier: 'planner' | 'executor') => {
     return store.get(`model_prefs.${tier}`, {
@@ -89,13 +137,13 @@ export const ModelManager = {
       console.log(`[ModelManager] Executing ${tier} with primary: ${pref.primary}`);
       const result = await API.call(pref.primary, messages);
       // Broadcast success (primary)
-      BrowserWindow.getAllWindows().forEach(w => w.webContents.send('model-status', { status: 'primary', model: pref.primary }));
+      broadcastModelStatus({ status: 'primary', model: pref.primary });
       return result;
     } catch (err: any) {
       if (pref.autoShift && ModelManager.isRecoverable(err)) {
         console.warn(`[ModelManager] Primary ${pref.primary} failed. Shifting to ${pref.fallback}`);
         // Broadcast failover
-        BrowserWindow.getAllWindows().forEach(w => w.webContents.send('model-status', { status: 'fallback', model: pref.fallback }));
+        broadcastModelStatus({ status: 'fallback', model: pref.fallback });
         return await API.call(pref.fallback, messages);
       }
       throw err;
@@ -103,8 +151,9 @@ export const ModelManager = {
   },
 
   isRecoverable: (err: any) => {
-    // 429 = Rate Limit, 503 = Service Down
-    return [429, 503, 504].includes(err.status) || err.code === 'ECONNREFUSED';
+    // 429 = Rate Limit, 503/504 = Service Down; Node undici fetch puts ECONNREFUSED on err.cause.code
+    const code = err?.code ?? err?.cause?.code;
+    return [429, 503, 504].includes(err?.status) || code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'ETIMEDOUT';
   },
 
   // 3. Usage Tracking

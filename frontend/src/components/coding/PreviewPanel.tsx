@@ -1,7 +1,8 @@
 import React from 'react';
 import { motion } from 'framer-motion';
+import { toast } from 'sonner';
 import { Globe, X, RefreshCw, PanelRightClose, Camera, Wrench } from 'lucide-react';
-import { API_BASE_URL } from '../../lib/config';
+import { API_BASE_URL, BASE_URL } from '../../lib/config';
 import { useAppStore } from '../../store/useAppStore';
 
 interface PreviewPanelProps {
@@ -28,8 +29,19 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({ iframeUrl, onClose, 
   const handleCaptureScreenshot = async () => {
     if (!iframeRef.current?.contentWindow) return;
 
+    let targetOrigin: string;
+    try {
+      targetOrigin = new URL(iframeUrl).origin;
+    } catch {
+      return;
+    }
+
     const screenshotPromise = new Promise<string>((resolve, reject) => {
       const handler = (e: MessageEvent) => {
+        // Only trust messages that actually came from our preview iframe at
+        // its known origin — otherwise any other window/frame on the page
+        // could forge a 'solvent:screenshot-ready' response.
+        if (e.source !== iframeRef.current?.contentWindow || e.origin !== targetOrigin) return;
         if (e.data?.type === 'solvent:screenshot-ready') {
           window.removeEventListener('message', handler);
           resolve(e.data.dataUrl);
@@ -45,7 +57,7 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({ iframeUrl, onClose, 
       }, 10000);
     });
 
-    iframeRef.current.contentWindow.postMessage({ type: 'solvent:capture-screenshot' }, '*');
+    iframeRef.current.contentWindow.postMessage({ type: 'solvent:capture-screenshot' }, targetOrigin);
 
     try {
       const dataUrl = await screenshotPromise;
@@ -57,10 +69,14 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({ iframeUrl, onClose, 
         method: 'POST',
         body: formData,
       });
+      if (!res.ok) throw new Error(`Screenshot upload failed (${res.status})`);
       const data = await res.json();
-      useAppStore.getState().setPreviewScreenshotUrl(data.url);
-    } catch {
-      // Silently fail — user can retry
+      if (!data?.filename) throw new Error('Screenshot upload returned no filename');
+      // Upload response carries `filename`/`path`, not a full URL — build the
+      // same absolute /files/... URL other upload call sites construct.
+      useAppStore.getState().setPreviewScreenshotUrl(`${BASE_URL}/files/${data.filename}`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Screenshot capture failed');
     }
   };
 

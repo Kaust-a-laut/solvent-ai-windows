@@ -6,7 +6,7 @@ import { STAGE_CONFIGS, type StageKey } from './WaterfallStageCard';
 import type { WaterfallStepPayload } from '../../store/waterfallSlice';
 import {
   AlertCircle, FileCode, ListChecks, Lightbulb, ShieldAlert,
-  CheckCircle2, XCircle, GitBranch, HelpCircle, Layers,
+  CheckCircle2, XCircle, HelpCircle, Layers,
   Code, Download, Copy, Check,
 } from 'lucide-react';
 

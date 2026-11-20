@@ -1,8 +1,13 @@
 export class ProviderSemaphore {
   private running = 0;
   private queue: Array<() => void> = [];
+  private readonly maxConcurrent: number;
 
-  constructor(private readonly maxConcurrent: number) {}
+  constructor(maxConcurrent: number) {
+    this.maxConcurrent = Number.isFinite(maxConcurrent) && maxConcurrent >= 1
+      ? Math.floor(maxConcurrent)
+      : 1;
+  }
 
   get pending(): number {
     return this.queue.length;

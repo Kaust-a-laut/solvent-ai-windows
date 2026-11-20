@@ -14,12 +14,12 @@ export class OpenRouterProviderPlugin extends BaseOpenAIService implements IProv
   defaultModel = 'openai/gpt-4o-mini';
   capabilities = {
     supportsVision: false,
-    supportsStreaming: false,
+    supportsStreaming: true,
     supportsEmbeddings: false,
     contextWindow: 128000,
     maxOutputTokens: 8192,
     supportsFunctionCalling: true,
-    costPer1k: { input: 0.0, output: 0.0 },
+    costPer1k: { input: 0.00015, output: 0.0006 },
   };
 
   private isInitialized = false;
@@ -31,6 +31,10 @@ export class OpenRouterProviderPlugin extends BaseOpenAIService implements IProv
 
   isReady(): boolean {
     return this.isInitialized;
+  }
+
+  hasConfiguredKey(): boolean {
+    return this.isInitialized && !!this.apiKey;
   }
 
   async healthCheck(): Promise<boolean> {

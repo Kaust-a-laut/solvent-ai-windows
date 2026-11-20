@@ -1,7 +1,10 @@
 import { Router } from 'express';
+import { randomUUID } from 'node:crypto';
 import fs from 'fs/promises';
+import { createReadStream } from 'fs';
 import path from 'path';
 import multer from 'multer';
+import { z } from 'zod';
 
 import mammoth from 'mammoth';
 import { config } from '../config';
@@ -11,69 +14,111 @@ import { PathSecurityError, resolveSecureChildPath, resolveSecurePath } from '..
 
 const router = Router();
 // Allow dynamic project root, but default to a dedicated 'projects' or empty directory
-const rootDir = process.env.PROJECT_ROOT || path.resolve(__dirname, '../../../projects');
+const rootDir = path.resolve(process.env.PROJECT_ROOT || path.resolve(__dirname, '../../../projects'));
+const uploadDir = path.resolve(
+  process.env.SOLVENT_DATA_DIR
+    ? path.join(process.env.SOLVENT_DATA_DIR, 'uploads')
+    : path.resolve(__dirname, '../../uploads')
+);
 
 // Security: Define permitted root paths for file access
 // SOLVENT_INTERNAL_DEV bypass is removed for security - all access must go through secure path validation
 const permittedRoots: string[] = [
-  path.resolve(rootDir),
-  path.resolve(__dirname, '../../uploads')
-].map(p => path.resolve(p)); // Ensure all paths are resolved
+  rootDir,
+  uploadDir,
+].map(p => path.resolve(p));
 
-// Auto-create projects directory on server boot
-void fs.mkdir(path.resolve(__dirname, '../../../projects'), { recursive: true });
+// Auto-create projects and uploads directories on server boot (catch errors so read-only roots never cause unhandled rejections)
+void fs.mkdir(rootDir, { recursive: true }).catch((err) => {
+  logger.warn('[fileRoutes] Failed to ensure projects directory:', err);
+});
+void fs.mkdir(uploadDir, { recursive: true }).catch((err) => {
+  logger.warn('[fileRoutes] Failed to ensure uploads directory:', err);
+});
 
 router.get('/projects', async (_req, res) => {
   try {
-    const projectsDir = path.resolve(__dirname, '../../../projects');
-    const entries = await fs.readdir(projectsDir, { withFileTypes: true });
-    const subdirs: Array<{ name: string; path: string; lastModified: number }> = [];
-
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        const fullPath = path.join(projectsDir, entry.name);
-        const stats = await fs.stat(fullPath);
-        subdirs.push({
+    const entries = await fs.readdir(rootDir, { withFileTypes: true });
+    const dirEntries = entries.filter(e => e.isDirectory());
+    const statsList = await Promise.all(dirEntries.map(async (entry) => {
+      try {
+        const stats = await fs.stat(path.join(rootDir, entry.name));
+        return {
           name: entry.name,
           path: entry.name,
-          lastModified: stats.mtimeMs
-        });
+          lastModified: stats.mtimeMs,
+        };
+      } catch {
+        return null;
       }
-    }
+    }));
 
-    subdirs.sort((a, b) => b.lastModified - a.lastModified);
+    const subdirs = statsList
+      .filter((item): item is { name: string; path: string; lastModified: number } => item !== null)
+      .sort((a, b) => b.lastModified - a.lastModified);
     res.json(subdirs);
-  } catch (error) {
+  } catch {
     res.status(500).json({ error: 'Failed to list projects' });
   }
 });
 
 // Multer configuration
-const uploadDir = path.resolve(__dirname, '../../uploads');
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => {
     cb(null, uploadDir);
   },
   filename: (_req, file, cb) => {
-    // Strip directory components from the original name to prevent path traversal
-    const safeName = path.basename(file.originalname);
-    const uniqueName = `${Date.now()}-${safeName}`;
+    // Strip directory components and sanitize special/Windows-illegal filename characters
+    const rawBase = path.basename(file.originalname);
+    const safeName = rawBase.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 128) || 'upload';
+    const uniqueName = `${Date.now()}-${randomUUID().slice(0, 8)}-${safeName}`;
     cb(null, uniqueName);
   },
 });
 
+// Allowlist of extensions we actually need to accept: text-extraction formats
+// (see the extension switch in POST /upload below) plus the raster image types
+// used for chat attachments and preview screenshots. Deliberately excludes
+// .html/.svg/.js-as-served-content and any other type that a browser would
+// execute or render as a document when loaded directly from the /files static
+// mount (see server.ts's Content-Disposition/nosniff headers for defense in depth).
+const ALLOWED_UPLOAD_EXTENSIONS = new Set([
+  '.pdf', '.docx', '.doc', '.txt', '.ts', '.js', '.py', '.json', '.md', '.tsx', '.jsx',
+  '.png', '.jpg', '.jpeg', '.gif', '.webp',
+]);
+
 const upload = multer({
   storage,
-  limits: { fileSize: 50 * 1024 * 1024 } // 50MB limit
+  limits: { fileSize: 50 * 1024 * 1024 }, // 50MB limit
+  fileFilter: (_req, file, cb) => {
+    const extension = path.extname(file.originalname).toLowerCase();
+    if (!ALLOWED_UPLOAD_EXTENSIONS.has(extension)) {
+      const err = new Error(`Unsupported file type: ${extension || '(none)'}`) as Error & { status?: number };
+      err.status = 400;
+      return cb(err);
+    }
+    cb(null, true);
+  },
 });
 
-router.post('/upload', upload.single('file'), async (req, res) => {
+const uploadSingleFile: import('express').RequestHandler = (req, res, next) => {
+  upload.single('file')(req, res, (err: unknown) => {
+    if (!err) return next();
+    const multerErr = err as { code?: string; status?: number; message?: string };
+    if (multerErr.code === 'LIMIT_FILE_SIZE') {
+      return res.status(413).json({ error: 'Uploaded file exceeds 50MB size limit' });
+    }
+    return res.status(multerErr.status || 400).json({ error: multerErr.message || 'File upload failed' });
+  });
+};
+
+router.post('/upload', uploadSingleFile, async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No file uploaded' });
   }
 
+  const filePath = req.file.path;
   try {
-    const filePath = req.file.path;
     const extension = path.extname(req.file.originalname).toLowerCase();
     let content = '';
 
@@ -98,6 +143,8 @@ router.post('/upload', upload.single('file'), async (req, res) => {
       content: content.substring(0, 50000) // Limit content size for prompt safety
     });
   } catch (error) {
+    // Clean up orphaned upload on extraction failure
+    await fs.unlink(filePath).catch(() => {});
     handleRouteError({ res, error, context: 'file-upload' });
   }
 });
@@ -135,7 +182,7 @@ async function getFileTree(dir: string, base: string = ''): Promise<Array<{ name
       if (a.type === b.type) return a.name.localeCompare(b.name);
       return a.type === 'directory' ? -1 : 1;
     });
-  } catch (e) {
+  } catch {
     return [];
   }
 }
@@ -148,13 +195,14 @@ router.get('/list', async (req, res) => {
     }
     let targetDir = root;
     let projectBase = '';
-    if (req.query.project) {
-      const projectName = req.query.project as string;
-      targetDir = await resolveSecureChildPath(root, projectName, permittedRoots);
-      projectBase = projectName;
-      await fs.mkdir(targetDir, { recursive: true });
+    if (req.query.project !== undefined) {
+      if (typeof req.query.project !== 'string') {
+        return res.status(400).json({ error: 'Invalid project parameter' });
+      }
+      targetDir = await resolveSecureChildPath(root, req.query.project, permittedRoots);
+      projectBase = path.relative(root, targetDir).replace(/\\/g, '/');
     }
-    // Pass projectBase so returned paths include the project folder prefix
+    // Pass normalized projectBase so returned paths include the project folder prefix
     // (e.g. "myApp/src/index.ts" not just "src/index.ts"), keeping list/read/write consistent.
     const tree = await getFileTree(targetDir, projectBase);
     res.json(tree);
@@ -168,17 +216,6 @@ router.get('/list', async (req, res) => {
 
 /**
  * Validates and resolves a user-provided path to a secure absolute path.
- * 
- * Security measures:
- * 1. Resolves the path to an absolute path
- * 2. Resolves symlinks to their real paths (prevents symlink attacks)
- * 3. Validates the path starts with a permitted root (with trailing separator to prevent prefix attacks)
- * 4. Checks against an allowlist of permitted root directories
- * 
- * @param userPath - The user-provided relative path
- * @param root - The root directory to resolve against
- * @returns The validated absolute path
- * @throws {Error} If the path is outside permitted roots or doesn't exist
  */
 async function getSecurePath(userPath: string, root: string): Promise<string> {
   return resolveSecurePath(userPath, root, permittedRoots);
@@ -191,18 +228,40 @@ const MIME_TYPES: Record<string, string> = {
   '.pdf': 'application/pdf', '.mp4': 'video/mp4', '.mp3': 'audio/mpeg',
 };
 
+const MAX_RAW_FILE_BYTES = 100 * 1024 * 1024; // 100MB safety cap
+
 router.get('/raw', async (req, res) => {
-  const { path: filePath } = req.query;
-  if (!filePath) return res.status(400).json({ error: 'Path required' });
+  const filePath = req.query.path;
+  if (!filePath || typeof filePath !== 'string') {
+    return res.status(400).json({ error: 'Path required' });
+  }
   const root = permittedRoots[0];
   if (!root) return res.status(500).json({ error: 'No permitted roots configured' });
   try {
-    const fullPath = await getSecurePath(filePath as string, root);
-    const data = await fs.readFile(fullPath);
+    const fullPath = await getSecurePath(filePath, root);
+    const stats = await fs.stat(fullPath);
+    if (!stats.isFile()) {
+      return res.status(400).json({ error: 'Path is not a regular file' });
+    }
+    if (stats.size > MAX_RAW_FILE_BYTES) {
+      return res.status(413).json({ error: 'File too large' });
+    }
     const ext = path.extname(fullPath).toLowerCase();
     res.setHeader('Content-Type', MIME_TYPES[ext] || 'application/octet-stream');
+    res.setHeader('Content-Length', String(stats.size));
     res.setHeader('Cache-Control', 'public, max-age=300');
-    res.send(data);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    // Defense-in-depth against inline SVG / active content script execution
+    res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+    const stream = createReadStream(fullPath);
+    stream.on('error', (err) => {
+      if (!res.headersSent) {
+        handleRouteError({ res, error: err, context: 'file-raw-stream' });
+      } else {
+        res.destroy(err);
+      }
+    });
+    stream.pipe(res);
   } catch (error: unknown) {
     const err = error as { message?: string; code?: string };
     if (error instanceof PathSecurityError || err.message?.includes('Access denied')) {
@@ -216,12 +275,14 @@ router.get('/raw', async (req, res) => {
 });
 
 router.get('/read', async (req, res) => {
-  const { path: filePath } = req.query;
-  if (!filePath) return res.status(400).json({ error: 'Path required' });
+  const filePath = req.query.path;
+  if (!filePath || typeof filePath !== 'string') {
+    return res.status(400).json({ error: 'Path required' });
+  }
   const root = permittedRoots[0];
   if (!root) return res.status(500).json({ error: 'No permitted roots configured' });
   try {
-    const fullPath = await getSecurePath(filePath as string, root);
+    const fullPath = await getSecurePath(filePath, root);
     const content = await fs.readFile(fullPath, 'utf-8');
     res.json({ content });
   } catch (error: unknown) {
@@ -236,10 +297,18 @@ router.get('/read', async (req, res) => {
   }
 });
 
+const writeFileSchema = z.object({
+  path: z.string().trim().min(1, 'Path required').max(4096),
+  content: z.string(),
+});
+
 router.post('/write', async (req, res) => {
-  const { path: filePath, content } = req.body;
+  const parsed = writeFileSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: parsed.error.issues[0]?.message || 'Path and string content required' });
+  }
+  const { path: filePath, content } = parsed.data;
   logger.debug(`[file/write] Received: ${filePath}`);
-  if (!filePath) return res.status(400).json({ error: 'Path required' });
   const root = permittedRoots[0];
   logger.debug(`[file/write] Root: ${root}`);
   if (!root) return res.status(500).json({ error: 'No permitted roots configured' });

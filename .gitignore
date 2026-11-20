@@ -16,6 +16,7 @@ electron/preload.js
 # Runtime data (Solvent agent state)
 .solvent_audit.jsonl
 .solvent_telemetry.jsonl
+.solvent_model_registry.json
 .solvent_memory.json
 .solvent_memory.sqlite
 .solvent_memory.sqlite-journal
@@ -42,6 +43,7 @@ yarn-error.log*
 .vscode/
 .idea/
 .claude/
+.antigravitycli/
 *.swp
 *.swo
 
@@ -58,3 +60,6 @@ coverage/
 .cache/
 .parcel-cache/
 .turbo/
+
+# Generated lint reports
+frontend/.eslint-report.json

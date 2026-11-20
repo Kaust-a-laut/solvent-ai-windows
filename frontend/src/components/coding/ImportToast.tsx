@@ -48,7 +48,7 @@ export const ImportToast: React.FC<ImportToastProps> = ({
     >
       <CheckCircle2 size={15} className="text-emerald-400 shrink-0" />
       <p className="flex-1 min-w-0 text-[11px] font-bold text-white/80 truncate">
-        <span className="font-mono text-white">"{fileName}"</span>
+        <span className="font-mono text-white">&ldquo;{fileName}&rdquo;</span>
         {' '}imported to{' '}
         <span className="font-mono">{folderDisplay}</span>
       </p>

@@ -31,7 +31,24 @@ export class SocketBatcher {
       if (items.length === 1) {
         this.io.emit(event, items[0]);
       } else {
-        this.io.emit(`${event}:batch`, items);
+        // Coalesce burst updates per jobId when present so listeners subscribed
+        // to `event` receive the latest state without missing updates under an
+        // unlisted `:batch` event name.
+        const byJobId = new Map<string, unknown>();
+        const unkeyed: unknown[] = [];
+        for (const item of items) {
+          if (item && typeof item === 'object' && 'jobId' in item && typeof (item as { jobId: unknown }).jobId === 'string') {
+            byJobId.set((item as { jobId: string }).jobId, item);
+          } else {
+            unkeyed.push(item);
+          }
+        }
+        for (const latest of byJobId.values()) {
+          this.io.emit(event, latest);
+        }
+        for (const item of unkeyed) {
+          this.io.emit(event, item);
+        }
       }
     }
     this.pending.clear();
@@ -42,7 +59,10 @@ export class SocketBatcher {
   }
 
   destroy() {
-    if (this.timer) clearTimeout(this.timer);
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
     this.pending.clear();
   }
 }

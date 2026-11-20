@@ -88,8 +88,8 @@ export const NotepadDocList: React.FC = () => {
               className={cn(
                 'group rounded-lg border transition-colors px-2 py-2 cursor-pointer relative',
                 isActive
-                  ? 'border-jb-accent/40 bg-jb-accent/[0.06]'
-                  : 'border-transparent hover:border-white/10 hover:bg-white/[0.02]'
+                  ? 'border-jb-accent/50 bg-jb-accent/[0.12] shadow-[0_0_16px_-6px_rgba(60,113,247,0.35)]'
+                  : 'border-white/[0.08] bg-white/[0.025] hover:border-white/[0.2] hover:bg-white/[0.05]'
               )}
               onClick={() => !isEditing && open(doc.id)}
             >

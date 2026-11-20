@@ -9,7 +9,7 @@ interface SessionHistoryModalProps {
 }
 
 export const SessionHistory = ({ isOpen, onClose }: SessionHistoryModalProps) => {
-  const { messages, setMessages, sessions } = useAppStore();
+  const { setMessages, sessions } = useAppStore();
   const [searchTerm, setSearchTerm] = useState('');
 
   // Close on Escape
@@ -20,7 +20,14 @@ export const SessionHistory = ({ isOpen, onClose }: SessionHistoryModalProps) =>
     return () => window.removeEventListener('keydown', handler);
   }, [isOpen, onClose]);
 
-  useEffect(() => { if (!isOpen) setSearchTerm(''); }, [isOpen]);
+  // Clear the search on the open transition (render-adjust idiom; the term
+  // is invisible while closed, so clearing on open is equivalent to the old
+  // clear-on-close without setState inside an effect).
+  const [wasOpen, setWasOpen] = useState(isOpen);
+  if (isOpen !== wasOpen) {
+    setWasOpen(isOpen);
+    if (isOpen) setSearchTerm('');
+  }
 
   const allSessions = Object.keys(sessions).map(id => {
     const msgs = sessions[id] ?? [];

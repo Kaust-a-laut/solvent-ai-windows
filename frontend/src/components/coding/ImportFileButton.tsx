@@ -317,7 +317,7 @@ export const ImportFileButton: React.FC<ImportFileButtonProps> = ({ onImported }
             <Loader2 size={14} className="text-indigo-400 shrink-0 animate-spin" />
             <p className="flex-1 min-w-0 text-[11px] text-white/70">
               Uploading{' '}
-              <span className="font-mono text-white">"{folderUploading.name}"</span>
+              <span className="font-mono text-white">&ldquo;{folderUploading.name}&rdquo;</span>
               {' '}—{' '}
               <span className="text-indigo-400">{folderUploading.total} file{folderUploading.total !== 1 ? 's' : ''}…</span>
             </p>
@@ -337,7 +337,7 @@ export const ImportFileButton: React.FC<ImportFileButtonProps> = ({ onImported }
           >
             <CheckCircle2 size={15} className="text-emerald-400 shrink-0" />
             <p className="flex-1 min-w-0 text-[11px] font-bold text-white/80">
-              <span className="font-mono text-white">"{folderToast.folderName}"</span>
+              <span className="font-mono text-white">&ldquo;{folderToast.folderName}&rdquo;</span>
               {' '}imported —{' '}
               <span className="text-emerald-400">{folderToast.fileCount} file{folderToast.fileCount !== 1 ? 's' : ''}</span>
             </p>

@@ -1,6 +1,7 @@
 import { fetchWithRetry } from '../lib/api-client';
 import { API_BASE_URL, BASE_URL } from '../lib/config';
 import { parseGraphData } from '../lib/graph-parser';
+import { streamSSE } from '../lib/sse';
 import type { SearchResultSet, PageContent } from '../store/types';
 
 const THINKING_MODEL_LOCAL = 'deepseek-r1:8b';
@@ -162,12 +163,17 @@ export class ChatService {
         }));
         puterMessages.push({ role: 'user', content });
 
-        const response = await window.puter.ai.chat(puterMessages, { 
-          model: model || 'deepseek-chat' 
+        const response = await window.puter.ai.chat(puterMessages, {
+          model: model || 'deepseek-chat'
         });
-        
+
+        // Puter responses vary by model: plain string or { message: { content } }
+        const responseText = typeof response === 'string'
+          ? response
+          : (response as { message?: { content?: string } })?.message?.content || String(response);
+
         return {
-          response: typeof response === 'string' ? response : response.message?.content || response.toString(),
+          response: responseText,
           updatedNotepad: null,
           newGraphData: { nodes: [], edges: [] },
           model: model || 'deepseek-chat',
@@ -310,45 +316,24 @@ export class ChatService {
       throw new Error(`Stream failed (${response.status}): ${text || 'no body'}`);
     }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder('utf-8');
-    let buffer = '';
     let collected = '';
 
-    try {
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        let sep: number;
-        while ((sep = buffer.indexOf('\n\n')) !== -1) {
-          const block = buffer.slice(0, sep);
-          buffer = buffer.slice(sep + 2);
-          for (const line of block.split('\n')) {
-            if (!line.startsWith('data:')) continue;
-            const payload = line.slice(5).trim();
-            if (!payload) continue;
-            try {
-              const evt = JSON.parse(payload);
-              if (evt.type === 'token' && typeof evt.value === 'string') {
-                collected += evt.value;
-                handlers.onToken(evt.value);
-              } else if (evt.type === 'done') {
-                handlers.onDone?.({ model: evt.model, provider: evt.provider, traceId: evt.traceId });
-              } else if (evt.type === 'error') {
-                handlers.onError?.(evt.message || 'stream error');
-                throw new Error(evt.message || 'stream error');
-              }
-            } catch (e) {
-              // Ignore split-JSON noise; only re-throw when we authored the error above.
-              if ((e as Error).message?.startsWith('stream error') || (e as Error).message?.startsWith('Stream failed')) throw e;
-            }
-          }
+    for await (const payload of streamSSE(response.body)) {
+      try {
+        const evt = JSON.parse(payload);
+        if (evt.type === 'token' && typeof evt.value === 'string') {
+          collected += evt.value;
+          handlers.onToken(evt.value);
+        } else if (evt.type === 'done') {
+          handlers.onDone?.({ model: evt.model, provider: evt.provider, traceId: evt.traceId });
+        } else if (evt.type === 'error') {
+          handlers.onError?.(evt.message || 'stream error');
+          throw new Error(evt.message || 'stream error');
         }
+      } catch (e) {
+        // Ignore split-JSON noise; only re-throw when we authored the error above.
+        if ((e as Error).message?.startsWith('stream error') || (e as Error).message?.startsWith('Stream failed')) throw e;
       }
-    } finally {
-      try { reader.releaseLock(); } catch { /* already released */ }
     }
 
     return collected;

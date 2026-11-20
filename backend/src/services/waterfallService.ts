@@ -1,6 +1,7 @@
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
+import { spawn } from 'child_process';
 import { randomUUID } from 'node:crypto';
 import { AIProviderFactory } from './aiProviderFactory';
 import { WATERFALL_CONFIG, WATERFALL_DEFAULT_SELECTION, capMaxTokens } from '../constants/models';
@@ -100,12 +101,32 @@ export class WaterfallService {
         const err = error as { response?: { data?: { error?: { message?: string } } }; message?: string };
         const retryMatch = (err?.response?.data?.error?.message ?? err?.message ?? '')
           .match(/try again in ([\d.]+)s/i);
-        const delay = retryMatch && retryMatch[1]
-          ? Math.ceil(parseFloat(retryMatch[1]) * 1000) + 2000  // parsed + 2s buffer
-          : this.exponentialBackoff(attempt, baseDelay);
+        const parsedDelay = retryMatch && retryMatch[1]
+          ? Math.ceil(parseFloat(retryMatch[1]) * 1000) + 2000
+          : null;
+        // Fail fast to fallback provider if upstream requests a wait > 60s (e.g. daily quota)
+        if (parsedDelay !== null && parsedDelay > 60_000) {
+          logger.warn(`[Waterfall:${label}] 429 requested ${(parsedDelay / 1000).toFixed(0)}s wait (>60s cap) — failing fast to fallback`);
+          throw error;
+        }
+        const delay = parsedDelay ?? this.exponentialBackoff(attempt, baseDelay);
 
         logger.info(`[Waterfall:${label}] 429 rate-limited, retrying`, { delay: (delay / 1000).toFixed(1), attempt: attempt + 1, maxRetries });
-        await new Promise(r => setTimeout(r, delay));
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = () => {
+            clearTimeout(timer);
+            reject(new SolventError('Waterfall cancelled by user.', SolventErrorCode.OPERATION_CANCELLED));
+          };
+          const timer = setTimeout(() => {
+            signal?.removeEventListener('abort', onAbort);
+            resolve();
+          }, delay);
+          if (signal?.aborted) {
+            onAbort();
+          } else {
+            signal?.addEventListener('abort', onAbort, { once: true });
+          }
+        });
       }
     }
     throw new Error('Unreachable');
@@ -217,12 +238,12 @@ ${fullPrompt}`;
     if (signal?.aborted) throw new SolventError('Waterfall cancelled by user.', SolventErrorCode.OPERATION_CANCELLED);
 
     yield { phase: 'executing', message: 'Generating production-ready code...' };
-    let executor = await this.runExecutorWithContext(planner, sessionContext, plannerHandoff, undefined, signal, modelSelection, apiKeys);
+    let executor = await this.runExecutorWithContext(planner, sessionContext, plannerHandoff, undefined, signal, modelSelection, apiKeys, globalProvider);
 
     if (signal?.aborted) throw new SolventError('Waterfall cancelled by user.', SolventErrorCode.OPERATION_CANCELLED);
 
     yield { phase: 'reviewing', message: 'Auditing the full decision chain...', attempts: 1 };
-    let reviewer = await this.runReviewWithContext(planner, executor, sessionContext, signal, modelSelection, apiKeys);
+    let reviewer = await this.runReviewWithContext(planner, executor, sessionContext, signal, modelSelection, apiKeys, globalProvider);
 
     logger.debug('[Waterfall:Reviewer] Review results', {
       score: reviewer.score ?? 'MISSING',
@@ -306,12 +327,12 @@ ${fullPrompt}`;
         data: { issues: reviewer.issues, reviewer, attempt: attempts, criticalCount: criticalIssues.length, majorCount: majorIssues.length, compilationPassed: reviewer._compilationPassed }
       };
 
-      executor = await this.runExecutorWithContext(planner, sessionContext, plannerHandoff, feedback, signal, modelSelection, apiKeys);
+      executor = await this.runExecutorWithContext(planner, sessionContext, plannerHandoff, feedback, signal, modelSelection, apiKeys, globalProvider);
 
       decisionLog.push(`Attempt ${attempts}: addressed ${criticalIssues.length} critical + ${majorIssues.length} major issues (score was ${reviewer.score})`);
 
       yield { phase: 'reviewing', message: 'Reviewing refined code...', attempts: attempts + 1 };
-      reviewer = await this.runReviewWithContext(planner, executor, sessionContext, signal, modelSelection, apiKeys);
+      reviewer = await this.runReviewWithContext(planner, executor, sessionContext, signal, modelSelection, apiKeys, globalProvider);
 
       history.push({ executor, reviewer });
 
@@ -347,7 +368,13 @@ ${fullPrompt}`;
       if (done) {
         return value as WaterfallResult;
       }
-      onProgress?.(value.phase, value.data || { message: value.message, estimate: value.estimate, score: value.score });
+      onProgress?.(value.phase, {
+        ...(value.data ?? {}),
+        ...(value.message !== undefined ? { message: value.message } : {}),
+        ...(value.estimate !== undefined ? { estimate: value.estimate } : {}),
+        ...(value.score !== undefined ? { score: value.score } : {}),
+        ...(value.attempts !== undefined ? { attempts: value.attempts } : {}),
+      });
     }
   }
 
@@ -380,8 +407,6 @@ ${fullPrompt}`;
 
   private async runPlannerWithContext(userPrompt: string, globalProvider: string, signal?: AbortSignal, modelSelection: WaterfallModelSelection = WATERFALL_DEFAULT_SELECTION, apiKeys?: Record<string, string>): Promise<PlannerOutput> {
     const phase = this.resolvePhase(WATERFALL_CONFIG.PHASE_1_PLANNER!, modelSelection.planner);
-    const providerName = globalProvider === 'local' ? 'ollama' : phase.primary.provider;
-    const provider = await AIProviderFactory.getProvider(providerName);
 
     const prompt = [{
       role: 'user' as const,
@@ -426,8 +451,22 @@ Example step: {"title": "Rate limiter module", "description": "FILE: src/rateLim
     const inputTokens = this.estimateTokens(prompt);
     const plannerMaxTokens = 6144;
 
+    if (globalProvider === 'local') {
+      const localProvider = await AIProviderFactory.getProvider('ollama', { allowFallback: false });
+      const res = await localProvider.complete(prompt, {
+        model: phase.local,
+        shouldSearch: false,
+        jsonMode: true,
+        maxTokens: capMaxTokens(phase.local, inputTokens, plannerMaxTokens),
+        signal,
+        apiKey: apiKeys?.ollama,
+      });
+      return this.parseJSONResponse(res) as PlannerOutput;
+    }
+
     try {
-      const response = await this.completeWithRetry(provider, prompt, {
+      const primaryProvider = await AIProviderFactory.getProvider(phase.primary.provider, { allowFallback: false });
+      const response = await this.completeWithRetry(primaryProvider, prompt, {
         model: phase.primary.model,
         shouldSearch: false,
         jsonMode: true,
@@ -437,20 +476,20 @@ Example step: {"title": "Rate limiter module", "description": "FILE: src/rateLim
       return this.parseJSONResponse(response) as PlannerOutput;
     } catch (error: unknown) {
       if (signal?.aborted) throw error;
-      const fbProvider = await AIProviderFactory.getProvider(phase.fallback.provider);
       try {
-        const res = await this.completeWithRetry(fbProvider, prompt, { model: phase.fallback.model, jsonMode: true, maxTokens: capMaxTokens(phase.fallback.model, inputTokens, plannerMaxTokens), apiKey: apiKeys?.[phase.fallback.provider] }, { label: 'Planner-FB', signal });
+        const fbProvider = await AIProviderFactory.getProvider(phase.fallback.provider, { allowFallback: false });
+        const res = await this.completeWithRetry(fbProvider, prompt, { model: phase.fallback.model, shouldSearch: false, jsonMode: true, maxTokens: capMaxTokens(phase.fallback.model, inputTokens, plannerMaxTokens), apiKey: apiKeys?.[phase.fallback.provider] }, { label: 'Planner-FB', signal });
         return this.parseJSONResponse(res) as PlannerOutput;
       } catch (e: unknown) {
         if (signal?.aborted) throw e;
-        const localProvider = await AIProviderFactory.getProvider('ollama');
-        const res = await localProvider.complete(prompt, { model: phase.local, jsonMode: true, maxTokens: capMaxTokens(phase.local, inputTokens, plannerMaxTokens), signal, apiKey: apiKeys?.ollama });
+        const localProvider = await AIProviderFactory.getProvider('ollama', { allowFallback: false });
+        const res = await localProvider.complete(prompt, { model: phase.local, shouldSearch: false, jsonMode: true, maxTokens: capMaxTokens(phase.local, inputTokens, plannerMaxTokens), signal, apiKey: apiKeys?.ollama });
         return this.parseJSONResponse(res) as PlannerOutput;
       }
     }
   }
 
-  private async runExecutorWithContext(planData: PlannerOutput | Record<string, unknown> | string, _sessionContext: WaterfallSessionContext, plannerHandoff: StageHandoff, feedback?: string, signal?: AbortSignal, modelSelection: WaterfallModelSelection = WATERFALL_DEFAULT_SELECTION, apiKeys?: Record<string, string>): Promise<ExecutorOutput> {
+  private async runExecutorWithContext(planData: PlannerOutput | Record<string, unknown> | string, _sessionContext: WaterfallSessionContext, plannerHandoff: StageHandoff, feedback?: string, signal?: AbortSignal, modelSelection: WaterfallModelSelection = WATERFALL_DEFAULT_SELECTION, apiKeys?: Record<string, string>, globalProvider: string = 'auto'): Promise<ExecutorOutput> {
     const phase = this.resolvePhase(WATERFALL_CONFIG.PHASE_2_EXECUTOR!, modelSelection.executor);
     const planStr = typeof planData === 'string' ? planData : JSON.stringify(planData);
 
@@ -502,26 +541,63 @@ Output JSON:
     const inputTokens = this.estimateTokens(messages);
     const executorMaxTokens = 16384;
 
+    if (globalProvider === 'local') {
+      const localProvider = await AIProviderFactory.getProvider('ollama', { allowFallback: false });
+      const res = await localProvider.complete(messages, { model: phase.local, shouldSearch: false, jsonMode: true, maxTokens: capMaxTokens(phase.local, inputTokens, executorMaxTokens), signal, apiKey: apiKeys?.ollama });
+      return this.parseJSONResponse(res) as ExecutorOutput;
+    }
+
     try {
-      const primaryProvider = await AIProviderFactory.getProvider(phase.primary.provider);
-      const response = await this.completeWithRetry(primaryProvider, messages, { model: phase.primary.model, jsonMode: true, maxTokens: capMaxTokens(phase.primary.model, inputTokens, executorMaxTokens), apiKey: apiKeys?.[phase.primary.provider] }, { label: 'Executor', signal });
+      const primaryProvider = await AIProviderFactory.getProvider(phase.primary.provider, { allowFallback: false });
+      const response = await this.completeWithRetry(primaryProvider, messages, { model: phase.primary.model, shouldSearch: false, jsonMode: true, maxTokens: capMaxTokens(phase.primary.model, inputTokens, executorMaxTokens), apiKey: apiKeys?.[phase.primary.provider] }, { label: 'Executor', signal });
       return this.parseJSONResponse(response) as ExecutorOutput;
     } catch (error: unknown) {
       if (signal?.aborted) throw error;
-      const fbProvider = await AIProviderFactory.getProvider(phase.fallback.provider);
       try {
-        const res = await this.completeWithRetry(fbProvider, messages, { model: phase.fallback.model, jsonMode: true, maxTokens: capMaxTokens(phase.fallback.model, inputTokens, executorMaxTokens), apiKey: apiKeys?.[phase.fallback.provider] }, { label: 'Executor-FB', signal });
+        const fbProvider = await AIProviderFactory.getProvider(phase.fallback.provider, { allowFallback: false });
+        const res = await this.completeWithRetry(fbProvider, messages, { model: phase.fallback.model, shouldSearch: false, jsonMode: true, maxTokens: capMaxTokens(phase.fallback.model, inputTokens, executorMaxTokens), apiKey: apiKeys?.[phase.fallback.provider] }, { label: 'Executor-FB', signal });
         return this.parseJSONResponse(res) as ExecutorOutput;
       } catch (err: unknown) {
         if (signal?.aborted) throw err;
-        const localProvider = await AIProviderFactory.getProvider('ollama');
-        const res = await localProvider.complete(messages, { model: phase.local, jsonMode: true, maxTokens: capMaxTokens(phase.local, inputTokens, executorMaxTokens), signal, apiKey: apiKeys?.ollama });
+        const localProvider = await AIProviderFactory.getProvider('ollama', { allowFallback: false });
+        const res = await localProvider.complete(messages, { model: phase.local, shouldSearch: false, jsonMode: true, maxTokens: capMaxTokens(phase.local, inputTokens, executorMaxTokens), signal, apiKey: apiKeys?.ollama });
         return this.parseJSONResponse(res) as ExecutorOutput;
       }
     }
   }
 
-  private async runReviewWithContext(plan: PlannerOutput | Record<string, unknown> | string, executorData: ExecutorOutput | Record<string, unknown> | string, sessionContext: WaterfallSessionContext, signal?: AbortSignal, modelSelection: WaterfallModelSelection = WATERFALL_DEFAULT_SELECTION, apiKeys?: Record<string, string>): Promise<ReviewerOutput> {
+  private async runTscInTempDir(tempDir: string): Promise<{ code: number | null; output: string; spawnError?: string }> {
+    return new Promise((resolve) => {
+      let output = '';
+      let settled = false;
+      const proc = spawn('npx', ['tsc', '--noEmit', '--pretty', 'false', '--project', path.join(tempDir, 'tsconfig.json')], {
+        cwd: tempDir,
+        shell: process.platform === 'win32',
+      });
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try { proc.kill(); } catch { /* ignore */ }
+        resolve({ code: null, output, spawnError: 'TypeScript check timed out after 30s' });
+      }, 30_000);
+      proc.stdout.on('data', (d: Buffer) => { output += d.toString(); });
+      proc.stderr.on('data', (d: Buffer) => { output += d.toString(); });
+      proc.on('close', (code) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ code, output });
+      });
+      proc.on('error', (err) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve({ code: null, output, spawnError: err.message });
+      });
+    });
+  }
+
+  private async runReviewWithContext(plan: PlannerOutput | Record<string, unknown> | string, executorData: ExecutorOutput | Record<string, unknown> | string, sessionContext: WaterfallSessionContext, signal?: AbortSignal, modelSelection: WaterfallModelSelection = WATERFALL_DEFAULT_SELECTION, apiKeys?: Record<string, string>, globalProvider: string = 'auto'): Promise<ReviewerOutput> {
     const phase = this.resolvePhase(WATERFALL_CONFIG.PHASE_3_REVIEWER!, modelSelection.reviewer);
     // Narrow plan/executorData from union-with-string to structured form
     const planObj = typeof plan === 'string' ? { plan } as PlannerOutput : (plan as PlannerOutput);
@@ -533,17 +609,31 @@ Output JSON:
       if (signal?.aborted) throw new SolventError('Waterfall cancelled by user.', SolventErrorCode.OPERATION_CANCELLED);
 
       // Split multi-file code blocks into separate temp files so cross-file
-      // imports resolve correctly. Falls back to single-file for non-split code.
-      const tempDir = path.join(os.tmpdir(), `solvent_review_${randomUUID()}`);
+      // imports resolve correctly. Strictly contain every LLM-generated path inside tempDir.
+      const tempDir = path.resolve(os.tmpdir(), `solvent_review_${randomUUID()}`);
+      const tempDirPrefix = tempDir.endsWith(path.sep) ? tempDir : tempDir + path.sep;
+      const normPrefix = process.platform === 'win32' ? tempDirPrefix.toLowerCase() : tempDirPrefix;
 
       try {
         await fs.mkdir(tempDir, { recursive: true });
         const fileBlocks = this.splitCodeBlocks(execObj.code);
+        let writtenCount = 0;
 
         for (const block of fileBlocks) {
-          const filePath = path.join(tempDir, block.filename);
+          const cleanName = block.filename.replace(/\0/g, '').trim();
+          if (!cleanName || path.isAbsolute(cleanName) || /^[a-zA-Z]:/.test(cleanName)) {
+            logger.warn(`[Waterfall:TSC] Skipping unsafe generated filename: ${block.filename}`);
+            continue;
+          }
+          const filePath = path.resolve(tempDir, cleanName);
+          const normFilePath = process.platform === 'win32' ? filePath.toLowerCase() : filePath;
+          if (!normFilePath.startsWith(normPrefix)) {
+            logger.warn(`[Waterfall:TSC] Blocked path traversal in generated filename: ${block.filename}`);
+            continue;
+          }
           await fs.mkdir(path.dirname(filePath), { recursive: true });
           await fs.writeFile(filePath, block.code, 'utf-8');
+          writtenCount++;
         }
 
         // Minimal tsconfig for the temp directory
@@ -553,53 +643,38 @@ Output JSON:
             module: 'commonjs', target: 'ES2020', moduleResolution: 'node',
             resolveJsonModule: true, allowJs: true
           },
-          include: ['**/*.ts']
+          include: ['**/*.ts', '**/*.tsx']
         }), 'utf-8');
 
-        const check = await toolService.executeTool('run_shell', { command: `npx tsc --noEmit --project ${tempDir}/tsconfig.json` });
-        if (check.stderr) {
-          // Filter out "Cannot find module" errors — expected since temp dir has no node_modules
-          const lines = check.stderr.split('\n');
-          const realErrors = lines.filter((l: string) =>
-            l.includes('error TS') &&
-            !l.includes('TS2307') &&  // Cannot find module
-            !l.includes('TS2304') &&  // Cannot find name (global types like NodeJS, Buffer)
-            !l.includes('TS2305') &&  // Module has no exported member (partial type info)
-            !l.includes('TS7016')     // Could not find declaration file
-          );
-          if (realErrors.length > 0) {
-            compilationStatus = `Type Error: ${realErrors.join('\n')}`;
-            compilationPassed = false;
-          } else {
-            const moduleErrors = lines.filter((l: string) => l.includes('TS2307') || l.includes('TS2304') || l.includes('TS2305') || l.includes('TS7016')).length;
-            compilationStatus = `Syntax Validated (tsc --noEmit, ${fileBlocks.length} files${moduleErrors > 0 ? `, ${moduleErrors} import-only errors ignored` : ''})`;
-          }
-        } else {
-          compilationStatus = `Syntax Validated (tsc --noEmit, ${fileBlocks.length} files)`;
-        }
-      } catch (e: unknown) {
-        // tsc exits with code 1 on type errors — extract stderr and filter
-        const err = e as { stderr?: string; stdout?: string; message?: string };
-        const errOutput: string = err.stderr || err.stdout || err.message || '';
-        logger.debug('[Waterfall:TSC] Caught error, filtering', { errOutput: errOutput.substring(0, 500) });
-        const lines = errOutput.split('\n');
+        const tscResult = await this.runTscInTempDir(tempDir);
+        const lines = tscResult.output.split(/\r?\n/);
         const realErrors = lines.filter((l: string) =>
           l.includes('error TS') &&
           !l.includes('TS2307') &&  // Cannot find module
-          !l.includes('TS2304') &&  // Cannot find name
-          !l.includes('TS2305') &&  // Module has no exported member
+          !l.includes('TS2304') &&  // Cannot find name (global types like NodeJS, Buffer)
+          !l.includes('TS2305') &&  // Module has no exported member (partial type info)
           !l.includes('TS7016')     // Could not find declaration file
         );
-        if (realErrors.length > 0) {
-          compilationStatus = `Type Error: ${realErrors.slice(0, 5).join('\n')}`;
+        const moduleErrors = lines.filter((l: string) =>
+          l.includes('TS2307') || l.includes('TS2304') || l.includes('TS2305') || l.includes('TS7016')
+        ).length;
+
+        if (tscResult.spawnError) {
+          compilationStatus = `Compilation check error: ${tscResult.spawnError}`;
+          compilationPassed = false;
+        } else if (realErrors.length > 0) {
+          compilationStatus = `Type Error: ${realErrors.slice(0, 10).join('\n')}`;
+          compilationPassed = false;
+        } else if (tscResult.code !== 0 && moduleErrors === 0) {
+          compilationStatus = `TypeScript exited with code ${tscResult.code}: ${tscResult.output.slice(0, 400)}`;
           compilationPassed = false;
         } else {
-          // Only import/module resolution errors — code structure is fine
-          const moduleErrors = lines.filter((l: string) => l.includes('TS2307') || l.includes('TS2304') || l.includes('TS2305') || l.includes('TS7016')).length;
-          compilationStatus = moduleErrors > 0
-            ? `Syntax Validated (${moduleErrors} import-only errors ignored — no node_modules in sandbox)`
-            : 'Syntax Validated';
+          compilationStatus = `Syntax Validated (tsc --noEmit, ${writtenCount} files${moduleErrors > 0 ? `, ${moduleErrors} import-only errors ignored` : ''})`;
         }
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        compilationStatus = `Compilation check failed: ${msg}`;
+        compilationPassed = false;
       } finally {
         await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
       }
@@ -661,9 +736,18 @@ Output JSON:
     const inputTokens = this.estimateTokens(prompt);
     const reviewerMaxTokens = 16384;
 
+    if (globalProvider === 'local') {
+      const localProvider = await AIProviderFactory.getProvider('ollama', { allowFallback: false });
+      const res = await localProvider.complete(prompt, { model: phase.local, shouldSearch: false, jsonMode: true, maxTokens: capMaxTokens(phase.local, inputTokens, reviewerMaxTokens), signal, apiKey: apiKeys?.ollama });
+      const parsed = this.parseJSONResponse(res) as ReviewerOutput;
+      parsed._compilationPassed = compilationPassed;
+      parsed._testsPassed = true;
+      return parsed;
+    }
+
     try {
-      const primaryProvider = await AIProviderFactory.getProvider(phase.primary.provider);
-      const response = await this.completeWithRetry(primaryProvider, prompt, { model: phase.primary.model, jsonMode: true, maxTokens: capMaxTokens(phase.primary.model, inputTokens, reviewerMaxTokens), apiKey: apiKeys?.[phase.primary.provider] }, { label: 'Reviewer', signal });
+      const primaryProvider = await AIProviderFactory.getProvider(phase.primary.provider, { allowFallback: false });
+      const response = await this.completeWithRetry(primaryProvider, prompt, { model: phase.primary.model, shouldSearch: false, jsonMode: true, maxTokens: capMaxTokens(phase.primary.model, inputTokens, reviewerMaxTokens), apiKey: apiKeys?.[phase.primary.provider] }, { label: 'Reviewer', signal });
       const parsed = this.parseJSONResponse(response) as ReviewerOutput;
       parsed._compilationPassed = compilationPassed;
       parsed._testsPassed = true; // String-based Executor can't run real tests yet; Phase C+ will upgrade to tool-using Executor
@@ -686,9 +770,9 @@ Output JSON:
       const err = error as Error;
       logger.error(`[Waterfall:Reviewer] Primary (${phase.primary.provider}/${phase.primary.model}) failed`, { message: err.message });
       if (signal?.aborted) throw error;
-      const fbProvider = await AIProviderFactory.getProvider(phase.fallback.provider);
       try {
-        const res = await this.completeWithRetry(fbProvider, prompt, { model: phase.fallback.model, jsonMode: true, maxTokens: capMaxTokens(phase.fallback.model, inputTokens, reviewerMaxTokens), apiKey: apiKeys?.[phase.fallback.provider] }, { label: 'Reviewer-FB', signal });
+        const fbProvider = await AIProviderFactory.getProvider(phase.fallback.provider, { allowFallback: false });
+        const res = await this.completeWithRetry(fbProvider, prompt, { model: phase.fallback.model, shouldSearch: false, jsonMode: true, maxTokens: capMaxTokens(phase.fallback.model, inputTokens, reviewerMaxTokens), apiKey: apiKeys?.[phase.fallback.provider] }, { label: 'Reviewer-FB', signal });
         const parsed = this.parseJSONResponse(res) as ReviewerOutput;
         parsed._compilationPassed = compilationPassed;
         parsed._testsPassed = true;
@@ -697,8 +781,8 @@ Output JSON:
         const err2 = e as Error;
         logger.error(`[Waterfall:Reviewer] Fallback (${phase.fallback.provider}/${phase.fallback.model}) failed`, { message: err2.message });
         if (signal?.aborted) throw e;
-        const localProvider = await AIProviderFactory.getProvider('ollama');
-        const res = await localProvider.complete(prompt, { model: phase.local, jsonMode: true, maxTokens: capMaxTokens(phase.local, inputTokens, reviewerMaxTokens), signal, apiKey: apiKeys?.ollama });
+        const localProvider = await AIProviderFactory.getProvider('ollama', { allowFallback: false });
+        const res = await localProvider.complete(prompt, { model: phase.local, shouldSearch: false, jsonMode: true, maxTokens: capMaxTokens(phase.local, inputTokens, reviewerMaxTokens), signal, apiKey: apiKeys?.ollama });
         const parsed = this.parseJSONResponse(res) as ReviewerOutput;
         parsed._compilationPassed = compilationPassed;
         parsed._testsPassed = true;
@@ -772,18 +856,38 @@ Output JSON:
       const pos = typeof err.message === 'string' && err.message.match(/position (\d+)/)?.[1];
       logger.warn('[WaterfallService] JSON parse failed', { position: pos ?? '?', length: jsonToParse.length, message: err.message });
 
-      // Attempt 2: repair common LLM JSON issues
+      // Attempt 2: repair common LLM JSON issues (only escape control chars INSIDE string literals!)
       try {
-        let repaired = jsonToParse
-          // Fix unescaped control characters inside string values
-          .replace(/[\x00-\x1f]/g, (ch: string) => {
-            if (ch === '\n') return '\\n';
-            if (ch === '\r') return '\\r';
-            if (ch === '\t') return '\\t';
-            return '';
-          })
-          // Remove trailing commas before } or ]
-          .replace(/,\s*([}\]])/g, '$1');
+        let inString = false;
+        let escaped = false;
+        let repaired = '';
+        for (let i = 0; i < jsonToParse.length; i++) {
+          const ch = jsonToParse[i]!;
+          if (escaped) {
+            repaired += ch;
+            escaped = false;
+            continue;
+          }
+          if (ch === '\\' && inString) {
+            repaired += ch;
+            escaped = true;
+            continue;
+          }
+          if (ch === '"') {
+            inString = !inString;
+            repaired += ch;
+            continue;
+          }
+          if (inString && ch.charCodeAt(0) < 0x20) {
+            if (ch === '\n') repaired += '\\n';
+            else if (ch === '\r') repaired += '\\r';
+            else if (ch === '\t') repaired += '\\t';
+            continue;
+          }
+          repaired += ch;
+        }
+        // Remove trailing commas before } or ]
+        repaired = repaired.replace(/,\s*([}\]])/g, '$1');
         return JSON.parse(repaired);
       } catch (e2) {
         // Attempt 3: truncation repair — close unclosed strings/brackets

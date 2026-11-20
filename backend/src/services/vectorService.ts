@@ -2,15 +2,17 @@ import { GoogleGenerativeAI } from '@google/generative-ai';
 import { LRUCache } from 'lru-cache';
 import { config } from '../config';
 import fs from 'fs/promises';
-import { statSync } from 'fs';
 import path from 'path';
 import { logger } from '../utils/logger';
 import { CrystallizedMemory, CrystallizedRule, SuccessPattern, SupervisoryInsight } from '../types/memory';
 import { BackupManager } from '../utils/backupManager';
+import { AtomicFileSystem } from '../utils/fileSystem';
 import { HNSWIndex } from '../utils/hnswIndex';
 import { memoryMetrics } from '../utils/memoryMetrics';
 import { OllamaService } from './ollamaService';
 import { sqliteService } from './db/sqliteService';
+import { BM25Index, reciprocalRankFusion } from '../utils/bm25';
+import { isExcludedFromIndex } from '../utils/sensitivePaths';
 
 interface VectorLink {
   targetId: string;
@@ -64,6 +66,10 @@ export class VectorService {
   // read MAX_CACHE_SIZE without depending on field-initializer ordering.
   private embeddingCache!: LRUCache<string, CachedEmbedding>;
   private embeddingCacheLoaded: Promise<void>;
+  // Resolves when the SQLite-backed memory array has been loaded; async entry
+  // points await this so early requests don't observe an empty store.
+  private memoryLoaded: Promise<void>;
+  private hnswReady: Promise<void>;
   private newEntriesSinceLastDream: number = 0;
   private readonly SATURATION_THRESHOLD = 200;
   private cacheWriteCounter: number = 0;
@@ -80,13 +86,16 @@ export class VectorService {
   // LRU Cache Configuration
   private readonly MAX_CACHE_SIZE = config.MEMORY_CACHE_SIZE;
 
-  // Embedding circuit breakers
-  private geminiEmbedFailed = false;
+  // Embedding circuit breaker: after a Gemini failure, skip it for a cooldown
+  // window rather than for the rest of the process lifetime, then retry.
+  private geminiEmbedFailedAt: number | null = null;
+  private readonly GEMINI_EMBED_RETRY_MS = 5 * 60_000;
 
   // Secondary Indices
   public typeIndex: Map<string, Set<string>> = new Map();
   public tagIndex: Map<string, Set<string>> = new Map();
   public symbolIndex: Map<string, string> = new Map(); // symbol -> entryId
+  private bm25Index = new BM25Index();
 
   constructor() {
     this.embeddingCache = new LRUCache({
@@ -118,40 +127,80 @@ export class VectorService {
       5
     );
     this.hnswIndexPath = process.env.SOLVENT_HNSW_PATH || path.resolve(__dirname, '../../../.solvent_hnsw.bin');
-    this.loadMemory();
-    this.embeddingCacheLoaded = this.loadEmbeddingCache();
-    this.initHNSWIndex();
+    // Sequenced startup: memory first, then the embedding cache (no concurrent
+    // SQLite readers), and the HNSW index decides load-vs-rebuild only once
+    // memory is known — avoiding the load/rebuild clobber race.
+    this.memoryLoaded = this.loadMemory();
+    this.embeddingCacheLoaded = this.memoryLoaded
+      .catch(() => { /* loadMemory handles its own errors */ })
+      .then(() => this.loadEmbeddingCache());
+    this.hnswReady = this.initHNSWIndex().catch((e: unknown) => {
+      logger.warn('[VectorService] HNSW initialization failed, using brute force.', e);
+      this.useHNSW = false;
+    });
+  }
+
+  /** Resolves once memory, embedding cache, and HNSW index have finished loading. */
+  async waitUntilReady(): Promise<void> {
+    await Promise.all([
+      this.memoryLoaded.catch(() => undefined),
+      this.embeddingCacheLoaded.catch(() => undefined),
+      this.hnswReady,
+    ]);
+  }
+
+  private createEmptyHnswIndex(): HNSWIndex {
+    return new HNSWIndex(768, Math.max(config.MEMORY_MAX_ENTRIES + 500, this.memory.length + 500));
   }
 
   private async initHNSWIndex() {
     try {
-      this.hnswIndex = new HNSWIndex(768, config.MEMORY_MAX_ENTRIES + 500);
-
-      // Try to load existing index
-      try {
-        await this.hnswIndex.load(this.hnswIndexPath);
-        logger.info('[VectorService] Loaded existing HNSW index.');
-      } catch {
-        // No existing index, rebuild from memory once it's loaded
-        // We wait for memory to be loaded in loadMemory()
-      }
+      this.hnswIndex = this.createEmptyHnswIndex();
     } catch (e) {
       logger.warn('[VectorService] HNSW initialization failed, using brute force.', e);
       this.useHNSW = false;
+      return;
+    }
+
+    await this.memoryLoaded.catch(() => undefined);
+
+    let loaded = false;
+    try {
+      await fs.access(this.hnswIndexPath);
+      const candidate = this.createEmptyHnswIndex();
+      await candidate.load(this.hnswIndexPath);
+      this.hnswIndex = candidate;
+      loaded = true;
+    } catch {
+      // No (valid) persisted index — fall through to rebuild from memory.
+    }
+
+    // Reconcile: a persisted index that disagrees with SQLite memory is stale.
+    if (!loaded || this.hnswIndex.size() !== this.memory.length) {
+      if (this.memory.length > 0 || loaded) {
+        await this.rebuildHNSWIndex();
+      }
+    } else {
+      logger.info('[VectorService] Loaded existing HNSW index.');
     }
   }
 
   private async rebuildHNSWIndex() {
-    if (!this.hnswIndex) return;
+    if (!this.useHNSW) return;
 
     logger.info('[VectorService] Rebuilding HNSW index from memory...');
+    // Build into a fresh index so stale labels from a previous index never survive.
+    const fresh = this.createEmptyHnswIndex();
     for (const entry of this.memory) {
-      this.hnswIndex.add(entry.id, entry.vector);
+      if (Array.isArray(entry.vector) && entry.vector.length === 768) {
+        fresh.add(entry.id, entry.vector);
+      }
     }
+    this.hnswIndex = fresh;
 
     try {
-      await this.hnswIndex.save(this.hnswIndexPath);
-      logger.info(`[VectorService] HNSW index rebuilt with ${this.memory.length} entries.`);
+      await fresh.save(this.hnswIndexPath);
+      logger.info(`[VectorService] HNSW index rebuilt with ${fresh.size()} entries.`);
     } catch (e) {
       logger.error('[VectorService] Failed to save rebuilt HNSW index', e);
     }
@@ -164,6 +213,14 @@ export class VectorService {
     return this.genAI;
   }
 
+  // Half-open circuit breaker: skip Gemini while cooling down after a failure,
+  // then allow one retry. Also false when no API key is configured.
+  private geminiEmbedAvailable(): boolean {
+    if (!this.genAI) return false;
+    if (this.geminiEmbedFailedAt === null) return true;
+    return Date.now() - this.geminiEmbedFailedAt > this.GEMINI_EMBED_RETRY_MS;
+  }
+
   private async loadMemory() {
     try {
       // Use the async, chunked loader so a large memory store doesn't block
@@ -172,11 +229,7 @@ export class VectorService {
       this.memory = (await sqliteService.getAllMemoriesAsync()) as VectorEntry[];
       this.rebuildIndices();
       logger.info(`Loaded ${this.memory.length} vectors from SQLite memory and rebuilt indices.`);
-      
-      // If HNSW index is empty but we have memory, rebuild it
-      if (this.useHNSW && this.hnswIndex && this.hnswIndex.size() === 0 && this.memory.length > 0) {
-        this.rebuildHNSWIndex();
-      }
+      // HNSW load-vs-rebuild is decided in initHNSWIndex() after this resolves.
     } catch (e: unknown) {
       const err = e as Error;
       logger.error(`[VectorService] Failed to load memory from SQLite: ${err.message}`);
@@ -199,8 +252,18 @@ export class VectorService {
         const data = await fs.readFile(this.dbPath, 'utf-8');
         this.memory = JSON.parse(data);
         this.rebuildIndices();
+
+        // Re-persist into SQLite so the recovery survives the next restart —
+        // without this the heal is RAM-only and the broken store wins again.
+        try {
+          sqliteService.insertMemories(this.memory);
+        } catch (persistErr) {
+          logger.warn('[VectorService] Could not re-persist recovered entries to SQLite (in-memory recovery only)', persistErr);
+        }
+
         logger.info(`[VectorService] Recovery successful. Loaded ${this.memory.length} vectors.`);
-        if (this.useHNSW) this.rebuildHNSWIndex();
+        // When recovery runs during startup, initHNSWIndex() rebuilds after memoryLoaded resolves.
+        if (this.useHNSW && this.hnswIndex) await this.rebuildHNSWIndex();
         return true;
       } catch (e) {
         logger.error('[VectorService] Failed to load restored data');
@@ -303,10 +366,13 @@ export class VectorService {
     this.tagIndex.clear();
     this.symbolIndex.clear();
     this.memoryById.clear();
+    const docs: Array<{ id: string, text: string }> = [];
     for (const entry of this.memory) {
       this.memoryById.set(entry.id, entry);
       this.addToIndices(entry);
+      docs.push({ id: entry.id, text: entry.metadata.text || '' });
     }
+    this.bm25Index.build(docs);
   }
 
   // Single insertion point for new entries — keeps this.memory and
@@ -315,6 +381,7 @@ export class VectorService {
   private trackEntry(entry: VectorEntry): void {
     this.memory.push(entry);
     this.memoryById.set(entry.id, entry);
+    this.bm25Index.addDocument({ id: entry.id, text: entry.metadata.text || '' });
   }
 
   // Removes a single entry from the in-memory array + id map. Returns the
@@ -327,6 +394,7 @@ export class VectorService {
     if (idx === -1) return -1;
     this.memory.splice(idx, 1);
     this.memoryById.delete(id);
+    this.bm25Index.removeDocument(id);
     return idx;
   }
 
@@ -357,12 +425,16 @@ export class VectorService {
   }
 
   private removeFromIndices(id: string) {
-    const entry = this.memoryById.get(id);
-    if (!entry) return;
-
     if (this.hnswIndex && this.useHNSW) {
       this.hnswIndex.markDeleted(id);
     }
+    this.removeFromSecondaryIndices(id);
+  }
+
+  // Type/tag/symbol indices only — leaves HNSW and BM25 untouched.
+  private removeFromSecondaryIndices(id: string) {
+    const entry = this.memoryById.get(id);
+    if (!entry) return;
 
     if (entry.metadata.type) {
       this.typeIndex.get(entry.metadata.type)?.delete(id);
@@ -420,9 +492,12 @@ export class VectorService {
    * Delete entries by file path (for incremental indexing)
    */
   async deleteByFilePath(filePath: string) {
+    await this.memoryLoaded;
     const entriesToDelete = this.memory.filter(e => e.metadata.filePath === filePath);
+    if (entriesToDelete.length === 0) return 0;
     for (const entry of entriesToDelete) {
       this.removeFromIndices(entry.id);
+      this.bm25Index.removeDocument(entry.id);
       sqliteService.deleteMemory(entry.id);
       this.memoryById.delete(entry.id);
     }
@@ -435,6 +510,7 @@ export class VectorService {
    * Add links to an existing entry
    */
   async addLinks(entryId: string, links: Array<{ targetId: string; type: string }>) {
+    await this.memoryLoaded;
     const entry = this.memoryById.get(entryId);
     if (!entry) return false;
 
@@ -473,7 +549,9 @@ export class VectorService {
 
         let evicted: VectorEntry[] = [];
         if (critical.length >= MAX_ENTRIES) {
-           evicted = disposable;
+           // Overflowing critical entries must be evicted from SQLite/HNSW too,
+           // otherwise they silently reappear on the next restart.
+           evicted = [...disposable, ...critical.slice(0, critical.length - MAX_ENTRIES)];
            this.memory = critical.slice(-MAX_ENTRIES);
         } else {
            const slotsLeft = MAX_ENTRIES - critical.length;
@@ -482,23 +560,30 @@ export class VectorService {
            this.memory = [...critical, ...keptDisposable];
         }
         
-        // Remove evicted from SQLite
+        // Remove evicted from SQLite and the HNSW index (rebuildIndices below
+        // resets the other indices, but HNSW retains ids unless marked deleted
+        // — stale ids would keep consuming searchFast's candidate budget).
         for (const e of evicted) {
           sqliteService.deleteMemory(e.id);
+          if (this.hnswIndex && this.useHNSW) {
+            this.hnswIndex.markDeleted(e.id);
+          }
         }
-        
+
         this.rebuildIndices();
       }
 
       this.updateMetrics();
 
-      // Periodic backup
+      // Periodic backup. BackupManager snapshots dbPath (the legacy JSON
+      // file); since V4 the live store is SQLite, so dump current memory to
+      // that JSON file first — otherwise rotation re-archives a stale file.
       this.saveCounter++;
       if (this.saveCounter >= this.BACKUP_INTERVAL) {
         this.saveCounter = 0;
-        this.backupManager.createBackup().catch(e =>
-          logger.error('[VectorService] Backup creation failed', e)
-        );
+        AtomicFileSystem.writeJson(this.dbPath, this.memory)
+          .then(() => this.backupManager.createBackup())
+          .catch(e => logger.error('[VectorService] Backup creation failed', e));
       }
 
       // Debounced HNSW index persistence
@@ -569,8 +654,9 @@ export class VectorService {
       this.embeddingCache.delete(text);
     }
 
-    // Try Gemini first (fast API, <1s for chat queries; skip if circuit breaker tripped)
-    if (!this.geminiEmbedFailed) {
+    // Try Gemini first (fast API, <1s for chat queries; skip while the
+    // circuit breaker is cooling down)
+    if (this.geminiEmbedAvailable()) {
       try {
         const genAI = this.getGenAI();
         const model = genAI.getGenerativeModel(
@@ -580,13 +666,14 @@ export class VectorService {
         // gemini-embedding-001 outputs 3072 dims; truncate to 768 (Matryoshka embeddings)
         const values = result.embedding.values.slice(0, 768);
 
+        this.geminiEmbedFailedAt = null;
         memoryMetrics.recordCacheMiss();
         this.cacheEmbedding(text, values);
 
         return values;
       } catch (err: unknown) {
-        this.geminiEmbedFailed = true;
-        logger.warn('[VectorService] Gemini embedding failed (will skip future attempts), trying Ollama fallback:', err instanceof Error ? err.message : String(err));
+        this.geminiEmbedFailedAt = Date.now();
+        logger.warn(`[VectorService] Gemini embedding failed (cooling down ${this.GEMINI_EMBED_RETRY_MS / 60_000} min), trying Ollama fallback:`, err instanceof Error ? err.message : String(err));
       }
     }
 
@@ -606,6 +693,7 @@ export class VectorService {
   }
 
   async batchGetEmbeddings(texts: string[]): Promise<number[][]> {
+    await this.embeddingCacheLoaded.catch(() => undefined);
     const results: number[][] = new Array(texts.length);
     const missingIndices: number[] = [];
     const missingTexts: string[] = [];
@@ -642,8 +730,8 @@ export class VectorService {
         logger.warn('[VectorService] Ollama batch embedding failed, trying Gemini fallback:', msg);
       }
 
-      // Fallback to Gemini batch (skip if previously failed)
-      if (!ollamaBatchOk && !this.geminiEmbedFailed) {
+      // Fallback to Gemini batch (skip while the circuit breaker is cooling down)
+      if (!ollamaBatchOk && this.geminiEmbedAvailable()) {
         try {
           const genAI = this.getGenAI();
           const model = genAI.getGenerativeModel(
@@ -675,9 +763,10 @@ export class VectorService {
               this.cacheEmbedding(chunk[j]!, values);
             });
           }
+          this.geminiEmbedFailedAt = null;
         } catch (err: unknown) {
-          this.geminiEmbedFailed = true;
-          logger.warn('[VectorService] Gemini batch embedding also failed (will skip future attempts):', err instanceof Error ? err.message : String(err));
+          this.geminiEmbedFailedAt = Date.now();
+          logger.warn(`[VectorService] Gemini batch embedding also failed (cooling down ${this.GEMINI_EMBED_RETRY_MS / 60_000} min):`, err instanceof Error ? err.message : String(err));
         }
       }
 
@@ -713,6 +802,8 @@ export class VectorService {
 
   async addEntry(text: string, metadata: VectorMetadata) {
     if (!text) return;
+    await this.memoryLoaded;
+    await this.hnswReady;
     const vector = await this.getEmbedding(text);
     
     // Normalize links if present
@@ -755,9 +846,12 @@ export class VectorService {
 
   async addEntriesBatch(entries: { text: string, metadata: VectorMetadata }[]) {
     if (entries.length === 0) return [];
+    await this.memoryLoaded;
+    await this.hnswReady;
 
     const embeddings = await this.batchGetEmbeddings(entries.map(e => e.text));
     const ids: string[] = [];
+    const toPersist: VectorEntry[] = [];
 
     entries.forEach((e, i) => {
       // Normalize links if present
@@ -782,7 +876,7 @@ export class VectorService {
         }
       };
       this.trackEntry(entry);
-      sqliteService.insertMemory(entry.id, entry.vector, entry.metadata);
+      toPersist.push(entry);
       this.addToIndices(entry);
       if (this.hnswIndex && this.useHNSW) {
         this.hnswIndex.add(entry.id, entry.vector);
@@ -790,575 +884,409 @@ export class VectorService {
       ids.push(entry.id);
     });
 
+    // Single transaction instead of N implicit fsyncs
+    sqliteService.insertMemories(toPersist);
+
     this.newEntriesSinceLastDream += entries.length;
     if (this.newEntriesSinceLastDream >= this.SATURATION_THRESHOLD) {
       this.triggerAmnesiaCycle();
     }
 
-        await this.saveMemory();
-
-        return ids;
-
-      }
-
-    
-
-      async indexProject(rootPath: string) {
-
-        if (this.isIndexing) {
-
-          logger.warn('Indexing already in progress.');
-
-          return;
-
-        }
-
-        this.isIndexing = true;
-
-        logger.info(`Starting project indexing: ${rootPath}`);
-
-        
-
-        try {
-
-          const ignoredDirs = ['node_modules', '.git', 'dist', 'build', '.next', 'out', 'generated_images'];
-
-          const extensions = ['.ts', '.tsx', '.js', '.jsx', '.md', '.txt', '.py', '.json'];
-
-          const pendingEntries: { text: string, metadata: VectorMetadata }[] = [];
-
-    
-
-          const scan = async (dir: string) => {
-
-            const entries = await fs.readdir(dir, { withFileTypes: true });
-
-            for (const entry of entries) {
-
-              const fullPath = path.join(dir, entry.name);
-
-              if (entry.isDirectory()) {
-
-                if (!ignoredDirs.includes(entry.name)) {
-
-                  await scan(fullPath);
-
-                }
-
-              } else {
-
-                const ext = path.extname(entry.name).toLowerCase();
-
-                if (extensions.includes(ext)) {
-
-                  const content = await fs.readFile(fullPath, 'utf-8');
-
-                  if (content.trim().length > 10) {
-
-                    // Collect chunks for batching
-
-                    const chunks = this.chunkFile(content, fullPath);
-
-                    pendingEntries.push(...chunks);
-
-                    
-
-                    // Process in batches of 20 to avoid memory/API limits
-
-                    if (pendingEntries.length >= 20) {
-
-                      await this.addEntriesBatch(pendingEntries.splice(0, 20));
-
-                    }
-
-                  }
-
-                }
-
-              }
-
-            }
-
-          };
-
-    
-
-                    await scan(rootPath);
-
-    
-
-                    
-
-    
-
-                    // Final flush
-
-    
-
-                    if (pendingEntries.length > 0) {
-
-    
-
-                      const addedIds = await this.addEntriesBatch(pendingEntries);
-
-    
-
-                      
-
-    
-
-                      // Second Pass: Resolve links for the newly added entries
-
-    
-
-                      logger.info('[VectorService] Resolving semantic relationships...');
-
-    
-
-                      for (const id of addedIds) {
-
-
-
-                        const entry = this.memoryById.get(id);
-
-    
-
-                        if (entry && entry.metadata.type === 'code_block') {
-
-    
-
-                          const links = this.findReferenceTargets(entry.metadata.text || '', id);
-
-    
-
-                          if (links.length > 0) {
-
-    
-
-                            entry.metadata.links = links;
-
-    
-
-                          }
-
-    
-
-                        }
-
-    
-
-                      }
-
-    
-
-                    }
-
-    
-
-                    
-
-    
-
-                    logger.info('Project indexing completed.');
-
-    
-
-                  } catch (error) {
-
-    
-
-                    logger.error('Error during project indexing', error);
-
-    
-
-                  } finally {
-
-    
-
-                    this.isIndexing = false;
-
-    
-
-                  }
-
-    
-
-                }
-
-    
-
-          
-
-    
-
-                private findReferenceTargets(text: string, sourceId: string): { targetId: string, type: string }[] {
-
-    
-
-                  const links: { targetId: string, type: string }[] = [];
-
-    
-
-                  
-
-    
-
-                  for (const [symbol, targetId] of this.symbolIndex.entries()) {
-
-    
-
-                    // Avoid self-references
-
-    
-
-                    if (targetId === sourceId) continue;
-
-    
-
-          
-
-    
-
-                    // match whole words only
-
-    
-
-                    const symbolRegex = new RegExp(`\\b${symbol}\\b`);
-
-    
-
-                    if (symbolRegex.test(text)) {
-
-    
-
-                      // Rudimentary check for 'implements' or 'extends'
-
-    
-
-                      const depRegex = new RegExp(`(extends|implements|new|import|from)\\s+${symbol}\\b`);
-
-    
-
-                      if (depRegex.test(text)) {
-
-    
-
-                        links.push({ targetId, type: 'depends_on' });
-
-    
-
-                      } else {
-
-    
-
-                        links.push({ targetId, type: 'references' });
-
-    
-
-                      }
-
-    
-
-                    }
-
-    
-
-                  }
-
-    
-
-          
-
-    
-
-                  return links;
-
-    
-
-                }
-
-    
-
-          
-
-    
-
-      private chunkFile(content: string, filePath: string): { text: string, metadata: VectorMetadata }[] {
-        const maxChunkSize = 1200;
-        const overlapSize = 200;
-        const relativePath = path.relative(process.cwd(), filePath);
-        const ext = path.extname(filePath).toLowerCase();
-        const isCodeFile = ['.ts', '.tsx', '.js', '.jsx', '.py'].includes(ext);
-
-        // Get file modification time for stale detection
-        let fileModifiedAt: number | undefined;
-        try {
-          fileModifiedAt = statSync(filePath).mtimeMs;
-        } catch { /* ignore */ }
-
-        // For code files, try to split at declaration boundaries first
-        let blocks: string[];
-        if (isCodeFile) {
-          // Split at top-level declarations (class, function, export, interface)
-          const declPattern = /\n(?=(?:export\s+)?(?:class|function|interface|const|let|var|type|enum)\s)/g;
-          const declBlocks = content.split(declPattern).filter(b => b.trim().length > 0);
-          // Use declaration-based splitting if it produces reasonable chunks
-          blocks = declBlocks.length > 1 ? declBlocks : content.split(/\n\n+/);
-        } else {
-          blocks = content.split(/\n\n+/);
-        }
-
-        const chunks: { text: string, metadata: VectorMetadata }[] = [];
-        let currentChunk = "";
-
-        for (const block of blocks) {
-          if ((currentChunk + block).length > maxChunkSize && currentChunk.length > 0) {
-            chunks.push({
-              text: currentChunk,
-              metadata: {
-                filePath: relativePath,
-                type: 'code_block',
-                tier: 'episodic',
-                symbols: this.extractSymbols(currentChunk),
-                fileModifiedAt
-              }
-            });
-            // Keep overlap from end of current chunk for context continuity
-            currentChunk = currentChunk.slice(-overlapSize);
-          }
-          currentChunk += (currentChunk ? "\n\n" : "") + block;
-        }
-
-        if (currentChunk.trim().length > 0) {
-          chunks.push({
-            text: currentChunk,
-            metadata: {
-              filePath: relativePath,
-              type: 'code_block',
-              tier: 'episodic',
-              symbols: this.extractSymbols(currentChunk),
-              fileModifiedAt
-            }
-          });
-        }
-
-        return chunks;
-      }
-
-    
-
-      private triggerAmnesiaCycle() {
-        this.newEntriesSinceLastDream = 0;
-        // Use task service to schedule maintenance instead of running inline
-        import('./taskService').then(({ taskService }) => {
-          taskService.scheduleMaintenance().catch((e: unknown) =>
-            logger.error('[VectorService] Maintenance scheduling failed', e)
-          );
-        }).catch((e: unknown) =>
-          logger.error('[VectorService] Failed to import taskService', e)
-        );
-      }
-
-    async updateEntry(id: string, updates: Partial<VectorMetadata>) {
-      const entry = this.memoryById.get(id);
-      if (!entry) return false;
-
-      this.removeFromIndices(id);
-
-      entry.metadata = {
-        ...entry.metadata,
-        ...updates
+    await this.saveMemory();
+
+    return ids;
+  }
+
+  async indexProject(rootPath: string) {
+    if (this.isIndexing) {
+      logger.warn('Indexing already in progress.');
+      return;
+    }
+    this.isIndexing = true;
+    logger.info(`Starting project indexing: ${rootPath}`);
+
+    try {
+      const ignoredDirs = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'out', 'generated_images', 'uploads', 'coverage', '.vitest-tmp']);
+      const extensions = new Set(['.ts', '.tsx', '.js', '.jsx', '.md', '.txt', '.py', '.json']);
+      const MAX_FILE_BYTES = 1024 * 1024; // skip generated/minified blobs
+      const BATCH_SIZE = 20;
+      const pendingEntries: { text: string, metadata: VectorMetadata }[] = [];
+      const addedIds: string[] = [];
+
+      const flush = async (count: number) => {
+        const batch = pendingEntries.splice(0, count);
+        if (batch.length === 0) return;
+        const ids = await this.addEntriesBatch(batch);
+        addedIds.push(...ids);
       };
 
-      this.addToIndices(entry);
-      sqliteService.insertMemory(entry.id, entry.vector, entry.metadata);
-      await this.saveMemory();      return true;
+      const scan = async (dir: string) => {
+        const entries = await fs.readdir(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          const fullPath = path.join(dir, entry.name);
+          if (entry.isSymbolicLink()) continue; // never follow links out of the project
+          if (entry.isDirectory()) {
+            const lower = entry.name.toLowerCase();
+            if (ignoredDirs.has(entry.name) || lower.startsWith('.solvent_')) continue;
+            if (isExcludedFromIndex(fullPath)) continue;
+            await scan(fullPath);
+          } else if (entry.isFile()) {
+            const ext = path.extname(entry.name).toLowerCase();
+            if (!extensions.has(ext)) continue;
+            // Never embed secrets (settings.json, .env*, .solvent_* stores, keys, lockfiles)
+            if (isExcludedFromIndex(fullPath)) continue;
+
+            const stat = await fs.stat(fullPath);
+            if (stat.size > MAX_FILE_BYTES) continue;
+
+            const content = await fs.readFile(fullPath, 'utf-8');
+            if (content.trim().length > 10) {
+              pendingEntries.push(...this.chunkFile(content, fullPath, stat.mtimeMs));
+              while (pendingEntries.length >= BATCH_SIZE) {
+                await flush(BATCH_SIZE);
+              }
+            }
+          }
+        }
+      };
+
+      await scan(rootPath);
+      await flush(pendingEntries.length);
+
+      // Second pass: resolve links for ALL newly added entries (not just the last batch) and persist them
+      if (addedIds.length > 0) {
+        logger.info('[VectorService] Resolving semantic relationships...');
+        const linked: VectorEntry[] = [];
+        for (const id of addedIds) {
+          const entry = this.memoryById.get(id);
+          if (entry && entry.metadata.type === 'code_block') {
+            const links = this.findReferenceTargets(entry.metadata.text || '', id);
+            if (links.length > 0) {
+              entry.metadata.links = links;
+              linked.push(entry);
+            }
+          }
+        }
+        if (linked.length > 0) {
+          sqliteService.insertMemories(linked);
+        }
+      }
+
+      logger.info(`Project indexing completed (${addedIds.length} chunks).`);
+    } catch (error) {
+      logger.error('Error during project indexing', error);
+      // Propagate so callers (indexProjectJob, routes) mark the run as failed
+      throw error;
+    } finally {
+      this.isIndexing = false;
+    }
+  }
+
+  private findReferenceTargets(text: string, sourceId: string): { targetId: string, type: string }[] {
+    const links: { targetId: string, type: string }[] = [];
+    // Single tokenization pass instead of compiling a \b-regex per indexed
+    // symbol (O(symbols × text) before). Symbols are plain identifiers, so
+    // exact token membership is equivalent to the old \bsymbol\b test.
+    const tokens = new Set(text.match(/[A-Za-z_$][A-Za-z0-9_$]*/g) ?? []);
+
+    for (const [symbol, targetId] of this.symbolIndex.entries()) {
+      // Avoid self-references
+      if (targetId === sourceId) continue;
+      if (!tokens.has(symbol)) continue;
+
+      // Rudimentary check for 'implements' or 'extends'
+      const depRegex = new RegExp(`(extends|implements|new|import|from)\\s+${symbol}\\b`);
+      if (depRegex.test(text)) {
+        links.push({ targetId, type: 'depends_on' });
+      } else {
+        links.push({ targetId, type: 'references' });
+      }
     }
 
-    async deprecateEntry(id: string, reason: string) {
-      const entry = this.memoryById.get(id);
-      if (!entry) return false;
+    return links;
+  }
 
+  private chunkFile(content: string, filePath: string, mtimeMs?: number): { text: string, metadata: VectorMetadata }[] {
+    const maxChunkSize = 1200;
+    const overlapSize = 200;
+    const relativePath = path.relative(process.cwd(), filePath);
+    const ext = path.extname(filePath).toLowerCase();
+    const isCodeFile = ['.ts', '.tsx', '.js', '.jsx', '.py'].includes(ext);
+
+    // File modification time for stale detection (passed in from the async scan; no blocking stat)
+    const fileModifiedAt: number | undefined = mtimeMs;
+
+    // For code files, try to split at declaration boundaries first
+    let blocks: string[];
+    if (isCodeFile) {
+      // Split at top-level declarations (class, function, export, interface)
+      const declPattern = /\n(?=(?:export\s+)?(?:class|function|interface|const|let|var|type|enum)\s)/g;
+      const declBlocks = content.split(declPattern).filter(b => b.trim().length > 0);
+      // Use declaration-based splitting if it produces reasonable chunks
+      blocks = declBlocks.length > 1 ? declBlocks : content.split(/\n\n+/);
+    } else {
+      blocks = content.split(/\n\n+/);
+    }
+
+    const chunks: { text: string, metadata: VectorMetadata }[] = [];
+    let currentChunk = "";
+
+    for (const block of blocks) {
+      if ((currentChunk + block).length > maxChunkSize && currentChunk.length > 0) {
+        chunks.push({
+          text: currentChunk,
+          metadata: {
+            filePath: relativePath,
+            type: 'code_block',
+            tier: 'episodic',
+            symbols: this.extractSymbols(currentChunk),
+            fileModifiedAt
+          }
+        });
+        // Keep overlap from end of current chunk for context continuity
+        currentChunk = currentChunk.slice(-overlapSize);
+      }
+      currentChunk += (currentChunk ? "\n\n" : "") + block;
+    }
+
+    if (currentChunk.trim().length > 0) {
+      chunks.push({
+        text: currentChunk,
+        metadata: {
+          filePath: relativePath,
+          type: 'code_block',
+          tier: 'episodic',
+          symbols: this.extractSymbols(currentChunk),
+          fileModifiedAt
+        }
+      });
+    }
+
+    return chunks;
+  }
+
+  private triggerAmnesiaCycle() {
+    this.newEntriesSinceLastDream = 0;
+    // Use task service to schedule maintenance instead of running inline
+    import('./taskService').then(({ taskService }) => {
+      taskService.scheduleMaintenance().catch((e: unknown) =>
+        logger.error('[VectorService] Maintenance scheduling failed', e)
+      );
+    }).catch((e: unknown) =>
+      logger.error('[VectorService] Failed to import taskService', e)
+    );
+  }
+
+  async updateEntry(id: string, updates: Partial<VectorMetadata>) {
+    await this.memoryLoaded;
+    await this.hnswReady;
+    const entry = this.memoryById.get(id);
+    if (!entry) return false;
+
+    const oldText = entry.metadata.text || '';
+    const textChanged = typeof updates.text === 'string' && updates.text !== oldText;
+
+    // Only touch secondary indices; the HNSW entry stays valid unless the vector changes.
+    this.removeFromSecondaryIndices(id);
+
+    entry.metadata = {
+      ...entry.metadata,
+      ...updates
+    };
+
+    if (textChanged) {
+      entry.vector = await this.getEmbedding(entry.metadata.text || '');
+      if (this.hnswIndex && this.useHNSW) {
+        this.hnswIndex.add(entry.id, entry.vector); // add() replaces the old label
+      }
+      this.bm25Index.addDocument({ id: entry.id, text: entry.metadata.text || '' });
+    }
+
+    this.addToIndices(entry);
+    sqliteService.insertMemory(entry.id, entry.vector, entry.metadata);
+    await this.saveMemory();
+    return true;
+  }
+
+  /** Soft-deletes every active entry in a single SQLite transaction. */
+  async deprecateAll(reason: string): Promise<number> {
+    await this.memoryLoaded;
+    const deprecatedAt = new Date().toISOString();
+    const changed: VectorEntry[] = [];
+    for (const entry of this.memory) {
+      if (entry.metadata.status === 'deprecated') continue;
       entry.metadata = {
         ...entry.metadata,
         status: 'deprecated',
         deprecationReason: reason,
-        deprecatedAt: new Date().toISOString()
+        deprecatedAt,
       };
-      
-      logger.info(`[Gardening] Deprecated entry ${id}. Reason: ${reason}`);
-      sqliteService.insertMemory(entry.id, entry.vector, entry.metadata);
+      changed.push(entry);
+    }
+    if (changed.length > 0) {
+      sqliteService.insertMemories(changed);
+      logger.info(`[Gardening] Deprecated ${changed.length} entries. Reason: ${reason}`);
       await this.saveMemory();
-          return true;
-        }
-      
-        async searchFast(query: string, limit: number = 5): Promise<(VectorEntry & { score: number })[]> {
-          if (!this.hnswIndex || !this.useHNSW) {
-            return this.search(query, limit);
-          }
-      
-          const queryVector = await this.getEmbedding(query);
-          const results = this.hnswIndex.search(queryVector, limit * 2);
-      
-          // Map back to full entries and apply filters
-          const entries: (VectorEntry & { score: number })[] = [];
-          for (const { id, distance } of results) {
-            const entry = this.memoryById.get(id);
-            if (entry && entry.metadata.status !== 'deprecated') {
-              entries.push({ ...entry, score: 1 - distance }); // Convert distance to similarity
-            }
-          }
-      
-          return entries.slice(0, limit);
-        }
-      
-          async search(query: string, limit: number = 5, filter?: { type?: string, tier?: MemoryTier, tags?: string[], includeDeprecated?: boolean }) {
-      
-            const startTime = Date.now();
-      
-            try {
-      
-              const queryVector = await this.getEmbedding(query);
-      
-              let candidates: VectorEntry[] = [];
-      
-        
+    }
+    return changed.length;
+  }
 
-      // Use indices if filter is specific enough
-      if (filter?.type && this.typeIndex.has(filter.type)) {
-        const ids = this.typeIndex.get(filter.type)!;
-        candidates = this.memory.filter(m => ids.has(m.id));
-      } else if (filter?.tags && filter.tags.length > 0) {
-        // Find intersection or union of tags. Using union for broader recall.
-        const candidateIds = new Set<string>();
-        for (const tag of filter.tags) {
-          if (this.tagIndex.has(tag)) {
-            this.tagIndex.get(tag)!.forEach(id => candidateIds.add(id));
-          }
-        }
-        candidates = this.memory.filter(m => candidateIds.has(m.id));
-      } else {
-        candidates = this.memory;
-      }
+  async deprecateEntry(id: string, reason: string) {
+    await this.memoryLoaded;
+    const entry = this.memoryById.get(id);
+    if (!entry) return false;
 
-      if (!filter?.includeDeprecated) {
-        candidates = candidates.filter(m => m.metadata.status !== 'deprecated');
-      }
+    entry.metadata = {
+      ...entry.metadata,
+      status: 'deprecated',
+      deprecationReason: reason,
+      deprecatedAt: new Date().toISOString()
+    };
 
-      if (filter) {
-        if (filter.type && candidates.length === this.memory.length) {
-            candidates = candidates.filter(m => m.metadata.type === filter.type);
-        }
-        if (filter.tier) candidates = candidates.filter(m => m.metadata.tier === filter.tier);
-        if (filter.tags && filter.tags.length > 0 && candidates.length === this.memory.length) {
-          candidates = candidates.filter(m => 
-            m.metadata.tags && filter.tags!.some(t => m.metadata.tags!.includes(t))
-          );
-        }
-      }
+    logger.info(`[Gardening] Deprecated entry ${id}. Reason: ${reason}`);
+    sqliteService.insertMemory(entry.id, entry.vector, entry.metadata);
+    await this.saveMemory();
+    return true;
+  }
 
-      const DECAY_LAMBDA = 0.05; // Relevance halves every ~14 days
-
-
-
-      const results = candidates.map(entry => {
-
-        const similarity = this.cosineSimilarity(queryVector, entry.vector);
-
-        
-
-        // --- TEMPORAL DECAY VS ANCHOR FORMULA ---
-
-        const createdAt = new Date(entry.metadata.createdAt || Date.now());
-
-        const ageInDays = (Date.now() - createdAt.getTime()) / (1000 * 60 * 60 * 24);
-
-        
-
-        const isAnchor = entry.metadata.isAnchor === true || entry.metadata.tier === 'meta-summary';
-
-        const decay = isAnchor ? 1.0 : Math.exp(-DECAY_LAMBDA * ageInDays);
-
-        const boost = isAnchor ? 0.3 : 0;
-
-        
-
-        const score = (similarity * decay) + boost;
-
-
-
-        return { ...entry, score };
-
-            })
-
-                  .sort((a, b) => b.score - a.score)
-
-                  .slice(0, limit);
-
-            
-
-                  // --- GRAPH-AUGMENTED RETRIEVAL (One-hop expansion) ---
-
-                  const expandedResults = [...results];
-
-                  for (const entry of results) {
-
-                    if (entry.metadata.links && Array.isArray(entry.metadata.links)) {
-
-                      for (const link of entry.metadata.links) {
-
-                        // Only add if not already in results
-
-                        const linkId = typeof link === 'string' ? link : link.targetId;
-                        if (!expandedResults.find(r => r.id === linkId)) {
-
-                          const targetEntry = this.memoryById.get(linkId);
-
-                          if (targetEntry) {
-
-                            // Add with slightly lower score than its parent
-
-                            expandedResults.push({ ...targetEntry, score: entry.score * 0.8 });
-
-                          }
-
-                        }
-
-                      }
-
-                    }
-
-                  }
-
-            
-
-                  const finalResults = expandedResults.sort((a, b) => b.score - a.score).slice(0, limit + 2); // Allow small over-retrieval for context
-
-            
-
-                  const latency = Date.now() - startTime;
-
-                  memoryMetrics.recordRetrieval(latency, candidates.length, finalResults.length);
-
-            
-
-                  return finalResults;
-
-                } catch (error) {
-
-            
-
-      
-
-      logger.error('Vector search failed', error);
-
-      return [];
-
+  async searchFast(query: string, limit: number = 5): Promise<(VectorEntry & { score: number })[]> {
+    await this.memoryLoaded;
+    await this.hnswReady;
+    if (!this.hnswIndex || !this.useHNSW) {
+      return this.search(query, limit);
     }
 
+    const queryVector = await this.getEmbedding(query);
+    const results = this.hnswIndex.search(queryVector, limit * 2);
+
+    // Map back to full entries and apply filters
+    const entries: (VectorEntry & { score: number })[] = [];
+    for (const { id, distance } of results) {
+      const entry = this.memoryById.get(id);
+      if (entry && entry.metadata.status !== 'deprecated') {
+        entries.push({ ...entry, score: 1 - distance }); // Convert distance to similarity
+      }
+    }
+
+    return entries.slice(0, limit);
+  }
+
+  private matchesSearchFilter(
+    entry: VectorEntry,
+    filter?: { type?: string, tier?: MemoryTier, tags?: string[], includeDeprecated?: boolean }
+  ): boolean {
+    if (!filter?.includeDeprecated && entry.metadata.status === 'deprecated') return false;
+    if (!filter) return true;
+    if (filter.type && entry.metadata.type !== filter.type) return false;
+    if (filter.tier && entry.metadata.tier !== filter.tier) return false;
+    if (filter.tags && filter.tags.length > 0) {
+      const tags = entry.metadata.tags;
+      if (!Array.isArray(tags) || !filter.tags.some(t => tags.includes(t))) return false;
+    }
+    return true;
+  }
+
+  async search(query: string, limit: number = 5, filter?: { type?: string, tier?: MemoryTier, tags?: string[], includeDeprecated?: boolean }) {
+    const startTime = Date.now();
+
+    try {
+      await this.memoryLoaded;
+      const queryVector = await this.getEmbedding(query);
+
+      // Narrow via secondary indices where possible, then apply EVERY filter unconditionally.
+      let pool: VectorEntry[];
+      if (filter?.type) {
+        const ids = this.typeIndex.get(filter.type);
+        pool = ids ? this.memory.filter(m => ids.has(m.id)) : [];
+      } else if (filter?.tags && filter.tags.length > 0) {
+        const candidateIds = new Set<string>();
+        for (const tag of filter.tags) {
+          this.tagIndex.get(tag)?.forEach(id => candidateIds.add(id));
+        }
+        pool = this.memory.filter(m => candidateIds.has(m.id));
+      } else {
+        pool = this.memory;
+      }
+      const candidates = pool.filter(m => this.matchesSearchFilter(m, filter));
+      if (candidates.length === 0) {
+        memoryMetrics.recordRetrieval(Date.now() - startTime, 0, 0);
+        return [];
+      }
+      const candidateIdSet = new Set(candidates.map(c => c.id));
+
+      const DECAY_LAMBDA = 0.05; // Relevance halves every ~14 days
+      const RRF_K = 60;
+      const KEYWORD_BONUS = 0.1;
+
+      // Semantic score stays on the cosine scale so downstream thresholds
+      // (0.55 / 0.6 / 0.75 / 0.8) keep their meaning.
+      const semanticScore = new Map<string, number>();
+      const semanticResults = candidates.map(entry => {
+        const similarity = this.cosineSimilarity(queryVector, entry.vector);
+        const createdAt = new Date(entry.metadata.createdAt || Date.now());
+        const ageInDays = Math.max(0, (Date.now() - createdAt.getTime()) / (1000 * 60 * 60 * 24));
+        const isAnchor = entry.metadata.isAnchor === true || entry.metadata.tier === 'meta-summary';
+        const decay = isAnchor ? 1.0 : Math.exp(-DECAY_LAMBDA * ageInDays);
+        const boost = isAnchor ? 0.3 : 0;
+        const score = (similarity * decay) + boost;
+        semanticScore.set(entry.id, score);
+        return { id: entry.id, score };
+      })
+      .sort((a, b) => b.score - a.score);
+
+      // BM25 restricted to the filtered candidate set (no deprecated / off-filter leaks)
+      const bm25Results = this.bm25Index
+        .search(query, Math.max(50, limit * 3))
+        .filter(r => candidateIdSet.has(r.id));
+      const bm25RankBonus = new Map<string, number>();
+      bm25Results.forEach((r, rank) => {
+        // Normalized to (0, KEYWORD_BONUS]: rank 0 -> full bonus
+        bm25RankBonus.set(r.id, KEYWORD_BONUS * ((RRF_K + 1) / (RRF_K + rank + 1)));
+      });
+
+      // RRF decides WHICH entries make the cut; the reported score is cosine-scale + keyword bonus.
+      const fusedResults = reciprocalRankFusion(semanticResults, bm25Results, RRF_K);
+
+      const results: (VectorEntry & { score: number })[] = [];
+      for (const { id } of fusedResults.slice(0, limit)) {
+        const entry = this.memoryById.get(id);
+        if (entry) {
+          const score = (semanticScore.get(id) ?? 0) + (bm25RankBonus.get(id) ?? 0);
+          results.push({ ...entry, score });
+        }
+      }
+
+      // --- GRAPH-AUGMENTED RETRIEVAL (One-hop expansion, filter-respecting) ---
+      const seen = new Set(results.map(r => r.id));
+      const expandedResults = [...results];
+      for (const entry of results) {
+        if (!Array.isArray(entry.metadata.links)) continue;
+        for (const link of entry.metadata.links) {
+          const linkId = typeof link === 'string' ? link : link?.targetId;
+          if (!linkId || seen.has(linkId)) continue;
+          const targetEntry = this.memoryById.get(linkId);
+          if (targetEntry && this.matchesSearchFilter(targetEntry, filter)) {
+            seen.add(linkId);
+            // Add with slightly lower score than its parent
+            expandedResults.push({ ...targetEntry, score: entry.score * 0.8 });
+          }
+        }
+      }
+
+      const finalResults = expandedResults.sort((a, b) => b.score - a.score).slice(0, limit + 2); // Allow small over-retrieval for context
+
+      const latency = Date.now() - startTime;
+      memoryMetrics.recordRetrieval(latency, candidates.length, finalResults.length);
+
+      return finalResults;
+    } catch (error) {
+      logger.error('Vector search failed', error);
+      return [];
+    }
   }
 
   async findRelated(id: string, limit: number = 3) {
+    await this.memoryLoaded;
     const target = this.memoryById.get(id);
     if (!target) return [];
 
@@ -1437,6 +1365,7 @@ export class VectorService {
    * Record that entries were retrieved — increments retrievalCount for reinforcement.
    */
   async recordRetrieval(ids: string[]): Promise<void> {
+    await this.memoryLoaded;
     let changed = false;
     for (const id of ids) {
       const entry = this.memoryById.get(id);

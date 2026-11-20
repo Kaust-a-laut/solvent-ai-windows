@@ -7,6 +7,7 @@ import {
   RotateCcw as TransformIcon, Crop, BoxSelect,
 } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
+import { toast } from 'sonner';
 import { cn } from '../lib/utils';
 import { MessageList } from './MessageList';
 import { ChatService } from '../services/ChatService';
@@ -107,9 +108,10 @@ const ToolGridComponent: React.FC<ToolGridProps> = ({ activeTool, setActiveTool,
 
 export const SolventSeeArea = () => {
   const {
-    deviceInfo, sendMessage, isProcessing, generateImageAction,
+    deviceInfo, sendMessage, isProcessingByMode, currentMode, generateImageAction,
     lastGeneratedImage, setLastGeneratedImage,
   } = useAppStore();
+  const isProcessing = isProcessingByMode[currentMode] ?? false;
 
   const [activeTool, setActiveTool]       = useState<ToolId>('analyze');
   const [isHovering, setIsHovering]       = useState(false);
@@ -129,7 +131,6 @@ export const SolventSeeArea = () => {
   const [isDragging, setIsDragging]       = useState(false);
   const [dragStart, setDragStart]         = useState<{ x: number; y: number } | null>(null);
   const [activeAspect, setActiveAspect]   = useState<AspectRatio>('free');
-  const [copiedRegion, setCopiedRegion]   = useState<string | null>(null);
 
   const containerRef  = useRef<HTMLDivElement>(null);
   const fileInputRef  = useRef<HTMLInputElement>(null);
@@ -144,10 +145,14 @@ export const SolventSeeArea = () => {
   const [panelWidth, setPanelWidth] = useState(getInitialWidth);
 
   // ── Sync store-generated images ──────────────────────────────────────────
+  // Adopt the generated image during render (render-adjust idiom); the store
+  // handoff slot is cleared in the effect afterwards.
+  if (lastGeneratedImage && selectedImage !== lastGeneratedImage) {
+    setSelectedImage(lastGeneratedImage);
+    setImageLoading(false);
+  }
   useEffect(() => {
     if (lastGeneratedImage) {
-      setSelectedImage(lastGeneratedImage);
-      setImageLoading(false);
       setLastGeneratedImage(null);
     }
   }, [lastGeneratedImage, setLastGeneratedImage]);
@@ -172,19 +177,22 @@ export const SolventSeeArea = () => {
     if (newWidth > 280 && newWidth < max) setPanelWidth(newWidth);
   }, []);
 
-  const stopResizing = useCallback(() => {
-    isResizing.current = false;
-    document.removeEventListener('mousemove', handleMouseMove);
-    document.removeEventListener('mouseup', stopResizing);
-    document.body.style.cursor = 'default';
-  }, [handleMouseMove]);
-
   const startResizing = useCallback(() => {
     isResizing.current = true;
-    document.addEventListener('mousemove', handleMouseMove);
-    document.addEventListener('mouseup', stopResizing);
     document.body.style.cursor = 'col-resize';
-  }, [handleMouseMove, stopResizing]);
+
+    // Local mouseup closure can reference itself for removal — a useCallback
+    // version of this self-reference reads the binding before initialization.
+    const onMouseUp = () => {
+      isResizing.current = false;
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      document.body.style.cursor = 'default';
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }, [handleMouseMove]);
 
   // ── Image upload ──────────────────────────────────────────────────────────
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -332,7 +340,16 @@ export const SolventSeeArea = () => {
     canvas.height = nat.h;
     const ctx = canvas.getContext('2d')!;
     ctx.drawImage(imgRef.current, nat.x, nat.y, nat.w, nat.h, 0, 0, nat.w, nat.h);
-    setCopiedRegion(canvas.toDataURL('image/png'));
+    // Write the region to the system clipboard (previously it was stored in
+    // state that nothing read, so the Copy button silently did nothing).
+    canvas.toBlob((blob) => {
+      if (blob && navigator.clipboard && 'write' in navigator.clipboard) {
+        navigator.clipboard
+          .write([new ClipboardItem({ 'image/png': blob })])
+          .then(() => toast.success('Selection copied to clipboard'))
+          .catch(() => toast.error('Clipboard copy failed'));
+      }
+    }, 'image/png');
   }, [selection, selectedImage, screenToNaturalCoords]);
 
   // ── Crop / Select overlay mouse handlers ─────────────────────────────────

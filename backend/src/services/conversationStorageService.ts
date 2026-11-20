@@ -210,7 +210,11 @@ export class ConversationStorageService {
       thinking: m.thinking,
       isGeneratedImage: m.isGeneratedImage,
       imageUrl: m.imageUrl,
-      timestamp: Date.now()
+      // Preserve the frontend's own creation time when it sent one (so a
+      // message's displayed time doesn't jump to "now" every time the
+      // session is re-saved); only stamp Date.now() for messages that never
+      // had one (e.g. older sessions saved before this field existed).
+      timestamp: m.createdAt ?? Date.now()
     }));
   }
 
@@ -226,7 +230,8 @@ export class ConversationStorageService {
       image: m.image,
       thinking: m.thinking,
       isGeneratedImage: m.isGeneratedImage,
-      imageUrl: m.imageUrl
+      imageUrl: m.imageUrl,
+      createdAt: m.timestamp
     }));
   }
 

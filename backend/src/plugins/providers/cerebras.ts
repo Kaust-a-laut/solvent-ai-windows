@@ -20,7 +20,7 @@ export class CerebrasProviderPlugin extends BaseOpenAIService implements IProvid
     contextWindow: 128000,
     maxOutputTokens: 8192,
     supportsFunctionCalling: false,
-    costPer1k: { input: 0.0, output: 0.0 },
+    costPer1k: { input: 0.0001, output: 0.0001 },
   };
 
   private isInitialized = false;
@@ -33,6 +33,10 @@ export class CerebrasProviderPlugin extends BaseOpenAIService implements IProvid
 
   isReady(): boolean {
     return this.isInitialized;
+  }
+
+  hasConfiguredKey(): boolean {
+    return this.isInitialized && !!this.apiKey;
   }
 
   async healthCheck(): Promise<boolean> {

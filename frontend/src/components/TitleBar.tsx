@@ -5,24 +5,21 @@ import {
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { useAppStore } from '../store/useAppStore';
-import { motion } from 'framer-motion';
 import { Logo } from './Logo';
 import { CommandPalette } from './CommandPalette';
 
 export const TitleBar = () => {
   const {
-    setSettingsOpen, deviceInfo, isProcessing,
+    setSettingsOpen, deviceInfo, isProcessingByMode, currentMode,
     isCommandCenterOpen, toggleCommandCenter,
     setCurrentMode
   } = useAppStore();
-  const [isElectron, setIsElectron] = useState(false);
+  const isProcessing = isProcessingByMode[currentMode] ?? false;
+  // The preload script runs before any page script, so window.electron is
+  // already settled at first render — derive instead of effect+state (which
+  // painted one browser-style frame before the electron chrome appeared).
+  const isElectron = typeof window !== 'undefined' && !!window.electron;
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-
-  useEffect(() => {
-    if (typeof window !== 'undefined' && window.electron) {
-      setIsElectron(true);
-    }
-  }, []);
 
   // ⌘K / Ctrl+K shortcut
   const handleOpenCommandPalette = useCallback((e: KeyboardEvent) => {

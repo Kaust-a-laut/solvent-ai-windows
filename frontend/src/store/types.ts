@@ -55,6 +55,10 @@ export interface Message {
   imageUrl?: string;
   provenance?: ContextProvenance;
   traceId?: string;
+  /** Epoch ms when the message was created. Set once by addMessage — never
+   *  recomputed at render time, so a message's displayed time stays stable
+   *  across re-renders and reflects when it was actually sent. */
+  createdAt?: number;
 }
 
 export interface OverseerDecision {

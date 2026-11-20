@@ -8,11 +8,36 @@ import { logger } from '../utils/logger';
 import { createSSEWriter } from '../utils/sseWriter';
 import { requestContextStore } from '../utils/requestContext';
 import { PROJECT_ROOT } from '../utils/fileSystem';
+import { PathSecurityError, resolveSecurePath } from '../utils/pathSecurity';
 import { requestBodySummary } from '../utils/redaction';
 import { z } from 'zod';
-import { createReadStream } from 'fs';
 import { access } from 'fs/promises';
 import path from 'path';
+
+function normalizeImageInput(
+  val: string | { data: string; mimeType: string } | null | undefined
+): { data: string; mimeType: string } | null | undefined {
+  if (val === null || val === undefined) return val;
+  if (typeof val !== 'string') return val;
+  const trimmed = val.trim();
+  if (!trimmed) return null;
+  const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,([\s\S]+)$/.exec(trimmed);
+  if (match && match[1] && match[2]) {
+    return { mimeType: match[1], data: match[2] };
+  }
+  return { mimeType: 'image/png', data: trimmed };
+}
+
+function isSafeLoopbackUrl(raw: string): boolean {
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+    const host = u.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+  } catch {
+    return false;
+  }
+}
 
 // Zod schemas for request validation
 const chatMessageSchema = z.object({
@@ -25,7 +50,10 @@ const chatRequestSchema = z.object({
   provider: z.string(),
   model: z.string(),
   messages: z.array(chatMessageSchema),
-  image: z.object({ data: z.string(), mimeType: z.string() }).nullable().optional(),
+  image: z.union([
+    z.string(),
+    z.object({ data: z.string(), mimeType: z.string() }),
+  ]).nullable().optional().transform(normalizeImageInput),
   mode: z.string().optional(),
   smartRouter: z.boolean().optional(),
   fallbackModel: z.string().optional(),
@@ -34,6 +62,7 @@ const chatRequestSchema = z.object({
   maxTokens: z.number().int().min(1).max(200_000).optional(),
   apiKeys: z.record(z.string()).optional(),
   thinkingModeEnabled: z.boolean().optional(),
+  activeFile: z.string().max(4096).nullable().optional().transform(v => v ?? undefined),
   tier: z.enum(['full-agentic', 'code-only']).optional(),
   traits: z.object({
     toolUse: z.enum(['strong', 'basic']),
@@ -179,13 +208,19 @@ export class AIController {
   static async generateImage(req: Request, res: Response) {
     try {
       const imageSchema = z.object({
-        prompt: z.string(),
-        model: z.string().optional(),
-        provider: z.string().optional(),
-        localUrl: z.string().optional(),
+        prompt: z.string().trim().min(1, 'Prompt is required').max(10_000),
+        model: z.string().max(256).optional(),
+        provider: z.string().max(64).optional(),
+        localUrl: z.string().max(2048).refine(isSafeLoopbackUrl, {
+          message: 'localUrl must be a valid loopback http(s) URL (127.0.0.1, localhost, or ::1)',
+        }).optional(),
         apiKeys: z.record(z.string()).optional()
       });
-      const { prompt, model, provider, localUrl, apiKeys } = imageSchema.parse(req.body);
+      const parsed = imageSchema.safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: 'Invalid request body', details: parsed.error.errors });
+      }
+      const { prompt, model, provider, localUrl, apiKeys } = parsed.data;
       const result = await aiService.generateImage(prompt, model, apiKeys?.gemini, provider, { localUrl, apiKeys });
       res.json(result);
     } catch (error: unknown) {
@@ -351,18 +386,18 @@ export class AIController {
       const data = { ...parseResult.data, signal: sse.signal };
 
       // Resolve the per-request project root (chat body) against the repo root,
-      // rejecting anything that escapes. Falls back to global PROJECT_ROOT when
-      // no project is open, preserving legacy behavior.
+      // resolving symlinks/junctions and handling Windows path casing.
       let resolvedProjectRoot: string | undefined;
       if (parseResult.data.projectRoot) {
-        const candidate = path.resolve(PROJECT_ROOT, parseResult.data.projectRoot);
-        const rootWithSep = PROJECT_ROOT.endsWith(path.sep) ? PROJECT_ROOT : PROJECT_ROOT + path.sep;
-        if (candidate === PROJECT_ROOT || candidate.startsWith(rootWithSep)) {
-          resolvedProjectRoot = candidate;
-        } else {
-          sse.send({ type: 'error', message: 'Invalid projectRoot (escapes repo)' });
-          sse.end();
-          return;
+        try {
+          resolvedProjectRoot = await resolveSecurePath(parseResult.data.projectRoot, PROJECT_ROOT, [PROJECT_ROOT]);
+        } catch (err) {
+          if (err instanceof PathSecurityError) {
+            sse.send({ type: 'error', message: 'Invalid projectRoot (escapes repo)' });
+            sse.end();
+            return;
+          }
+          throw err;
         }
       }
 
@@ -439,12 +474,27 @@ export class AIController {
       return;
     }
 
-    const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
-    const queryFilter = (req.query.query as string || '').toLowerCase();
-    const modeFilter = (req.query.mode as string || '');
-    const sinceFilter = req.query.since ? new Date(req.query.since as string).getTime() : 0;
-    const outcomeFilter = req.query.outcome as string || '';
-    const sessionFilter = req.query.sessionId as string || '';
+    const firstString = (v: unknown): string => {
+      if (typeof v === 'string') return v;
+      if (Array.isArray(v) && typeof v[0] === 'string') return v[0];
+      return '';
+    };
+
+    const rawLimit = Number.parseInt(firstString(req.query.limit), 10);
+    const limit = Number.isFinite(rawLimit) ? Math.max(1, Math.min(rawLimit, 200)) : 50;
+    const queryFilter = firstString(req.query.query).toLowerCase();
+    const modeFilter = firstString(req.query.mode);
+    const rawSince = firstString(req.query.since);
+    let sinceFilter = 0;
+    if (rawSince) {
+      sinceFilter = new Date(rawSince).getTime();
+      if (Number.isNaN(sinceFilter)) {
+        res.status(400).json({ error: 'Invalid "since" date parameter.' });
+        return;
+      }
+    }
+    const outcomeFilter = firstString(req.query.outcome);
+    const sessionFilter = firstString(req.query.sessionId);
 
     let filePath = TRACE_FILE_PATH;
     try {

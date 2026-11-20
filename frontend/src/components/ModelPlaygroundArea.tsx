@@ -1,11 +1,11 @@
 import React from 'react';
 import { motion } from 'framer-motion';
-import { 
-  Swords, GitCompare, Users, FlaskConical, 
-  Layers, Zap, Sparkles, Binary
+import {
+  Swords, GitCompare, Users, FlaskConical,
+  Sparkles
 } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
-import { BentoGrid, BentoCard } from './BentoGrid';
+import { BentoCard } from './BentoGrid';
 
 export const ModelPlaygroundArea = () => {
   const { setCurrentMode } = useAppStore();
@@ -91,7 +91,7 @@ export const ModelPlaygroundArea = () => {
                   transition={{ delay: 0.1 }}
                   className="text-slate-300 text-xl md:text-2xl font-medium leading-relaxed tracking-tight"
                 >
-                   A high-fidelity sandbox for stress-testing, comparing, and orchestrating the world's most capable foundation models.
+                   A high-fidelity sandbox for stress-testing, comparing, and orchestrating the world&apos;s most capable foundation models.
                 </motion.p>
               </div>
            </div>

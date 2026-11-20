@@ -36,7 +36,7 @@ export const GlobalSearch: React.FC = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  const { loadSession, setMessages } = useAppStore();
+  const { loadSession } = useAppStore();
 
   // Open on Cmd+K or Ctrl+K
   useEffect(() => {

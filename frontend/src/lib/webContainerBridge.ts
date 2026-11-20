@@ -69,12 +69,10 @@ export async function writeFileToWebContainer(wcRelPath: string, content: string
   }
   await wc.fs.writeFile(wcRelPath, content);
 
-  // Diagnostic probe — confirm the write landed where Vite is watching.
-  // Lists the parent directory after the write so we can see the canonical
-  // WC layout (useful when debugging why HMR didn't pick up a change).
+  // Probe the parent dir so a failed write surfaces immediately (useful when
+  // debugging why HMR didn't pick up a change); success stays silent.
   try {
-    const entries = await wc.fs.readdir(dir);
-    console.info('[WC] wrote', { wcRelPath, bytes: content.length, dir, entries: entries.slice(0, 30) });
+    await wc.fs.readdir(dir);
   } catch (err) {
     console.warn('[WC] readdir failed after write', { wcRelPath, dir, err: err instanceof Error ? err.message : String(err) });
   }

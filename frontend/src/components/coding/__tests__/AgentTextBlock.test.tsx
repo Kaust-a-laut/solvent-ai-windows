@@ -25,7 +25,8 @@ describe('AgentTextBlock', () => {
 
   it('renders empty state gracefully', () => {
     const { container } = render(<AgentTextBlock text="" isStreaming />);
-    expect(container.querySelector('p')).toBeTruthy();
+    // Streaming with no text still shows the typing indicator dots
+    expect(container.querySelector('.animate-bounce')).toBeTruthy();
   });
 
   it('renders empty state when not streaming', () => {

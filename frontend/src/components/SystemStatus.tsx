@@ -4,7 +4,8 @@ import { socket } from '../lib/socket';
 import { cn } from '../lib/utils';
 
 export const SystemStatus = ({ collapsed = false }: { collapsed?: boolean }) => {
-  const { isProcessing } = useAppStore();
+  const { isProcessingByMode, currentMode } = useAppStore();
+  const isProcessing = isProcessingByMode[currentMode] ?? false;
   const [isSocketConnected, setIsSocketConnected] = useState(socket.connected);
 
   useEffect(() => {
@@ -18,32 +19,38 @@ export const SystemStatus = ({ collapsed = false }: { collapsed?: boolean }) => 
     };
   }, []);
 
-  // Collapsed layout: three dots in a row with hover tooltips (unchanged)
+  // Status pip colors: green = healthy, amber = idle/waiting, red = offline/error.
+  const linkPip = isSocketConnected
+    ? 'bg-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.7)]'
+    : 'bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.7)] animate-pulse';
+  const lpuPip = isProcessing
+    ? 'bg-emerald-400 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.7)]'
+    : 'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.6)]';
+  const memoryPip = 'bg-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.6)]';
+
+  const linkValueColor = isSocketConnected ? 'text-emerald-300' : 'text-rose-300';
+  const lpuValueColor = isProcessing ? 'text-emerald-300' : 'text-amber-300';
+
+  // Collapsed layout: three pips with hover tooltips.
   if (collapsed) {
     return (
-      <div className="flex items-center gap-2 justify-center px-0 py-3 rounded-xl transition-all">
+      <div className="flex items-center gap-2.5 justify-center px-0 py-3 rounded-xl transition-all">
         <div className="relative group flex items-center justify-center">
-          <div className={cn(
-            "w-1.5 h-1.5 rounded-full",
-            isSocketConnected ? "bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]" : "bg-rose-500 animate-pulse"
-          )} />
+          <div className={cn('w-2 h-2 rounded-full', linkPip)} />
           <div className="absolute left-full ml-4 px-2 py-1 bg-black border border-white/10 rounded text-[11px] font-bold text-white whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50">
             Link: {isSocketConnected ? 'Online' : 'Offline'}
           </div>
         </div>
 
         <div className="relative group flex items-center justify-center">
-          <div className={cn(
-            "w-1.5 h-1.5 rounded-full",
-            isProcessing ? "bg-jb-accent animate-pulse shadow-[0_0_8px_rgba(60,113,247,0.6)]" : "bg-slate-700"
-          )} />
+          <div className={cn('w-2 h-2 rounded-full', lpuPip)} />
           <div className="absolute left-full ml-4 px-2 py-1 bg-black border border-white/10 rounded text-[11px] font-bold text-white whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50">
             LPU: {isProcessing ? 'Thinking' : 'Idle'}
           </div>
         </div>
 
         <div className="relative group flex items-center justify-center">
-          <div className="w-1.5 h-1.5 rounded-full bg-jb-purple/40 border border-jb-purple/20" />
+          <div className={cn('w-2 h-2 rounded-full', memoryPip)} />
           <div className="absolute left-full ml-4 px-2 py-1 bg-black border border-white/10 rounded text-[11px] font-bold text-white whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50">
             Memory: Active
           </div>
@@ -52,29 +59,23 @@ export const SystemStatus = ({ collapsed = false }: { collapsed?: boolean }) => 
     );
   }
 
-  // Expanded layout: each dot gets an inline label so the meaning is readable at a glance.
+  // Expanded layout: each pip gets an inline label and color-coded value.
   return (
-    <div className="flex flex-col gap-1.5 px-3 py-2.5 rounded-xl bg-white/[0.02] border border-white/5">
-      <div className="flex items-center gap-2">
-        <div className={cn(
-          "w-1.5 h-1.5 rounded-full shrink-0",
-          isSocketConnected ? "bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.5)]" : "bg-rose-500 animate-pulse"
-        )} />
-        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex-1">Link</span>
-        <span className="text-[10px] text-white/40">{isSocketConnected ? 'Online' : 'Offline'}</span>
+    <div className="flex flex-col gap-1.5 px-3 py-2.5 rounded-xl bg-white/[0.04] border border-white/[0.12]">
+      <div className="flex items-center gap-2.5">
+        <div className={cn('w-2 h-2 rounded-full shrink-0', linkPip)} />
+        <span className="text-[10px] font-bold text-slate-300 uppercase tracking-wider flex-1">Link</span>
+        <span className={cn('text-[10px] font-bold uppercase tracking-wider', linkValueColor)}>{isSocketConnected ? 'Online' : 'Offline'}</span>
       </div>
-      <div className="flex items-center gap-2">
-        <div className={cn(
-          "w-1.5 h-1.5 rounded-full shrink-0",
-          isProcessing ? "bg-jb-accent animate-pulse shadow-[0_0_6px_rgba(60,113,247,0.5)]" : "bg-slate-700"
-        )} />
-        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex-1">LPU</span>
-        <span className="text-[10px] text-white/40">{isProcessing ? 'Thinking' : 'Idle'}</span>
+      <div className="flex items-center gap-2.5">
+        <div className={cn('w-2 h-2 rounded-full shrink-0', lpuPip)} />
+        <span className="text-[10px] font-bold text-slate-300 uppercase tracking-wider flex-1">LPU</span>
+        <span className={cn('text-[10px] font-bold uppercase tracking-wider', lpuValueColor)}>{isProcessing ? 'Thinking' : 'Idle'}</span>
       </div>
-      <div className="flex items-center gap-2">
-        <div className="w-1.5 h-1.5 rounded-full shrink-0 bg-jb-purple/50 border border-jb-purple/30" />
-        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex-1">Memory</span>
-        <span className="text-[10px] text-white/40">Active</span>
+      <div className="flex items-center gap-2.5">
+        <div className={cn('w-2 h-2 rounded-full shrink-0', memoryPip)} />
+        <span className="text-[10px] font-bold text-slate-300 uppercase tracking-wider flex-1">Memory</span>
+        <span className="text-[10px] font-bold text-emerald-300 uppercase tracking-wider">Active</span>
       </div>
     </div>
   );

@@ -1,4 +1,5 @@
 import { API_BASE_URL } from './config';
+import { streamSSE } from './sse';
 
 export interface RequestOptions extends RequestInit {
   retries?: number;
@@ -48,8 +49,13 @@ export async function getSecret(): Promise<string> {
 
   // Primary: Electron preload provides the secret
   if (window.electron?.getSessionSecret) {
-    cachedSecret = await window.electron.getSessionSecret();
-    return cachedSecret!;
+    const fromElectron = await window.electron.getSessionSecret();
+    if (fromElectron) {
+      cachedSecret = fromElectron;
+      return cachedSecret;
+    }
+    // Dev desktop: Electron intentionally returns null (the backend owns the
+    // real secret) — fall through to the env/dev-secret paths below.
   }
 
   // Dev mode fallback: read secret from Vite env variable
@@ -137,19 +143,14 @@ export async function fetchWithRetry<T = unknown>(
           errorBody = { message: errorMessage };
         }
 
-        const error = new APIError(
+        // Thrown for all statuses; the catch below decides whether to retry
+        // (4xx never retries, 5xx/network does).
+        throw new APIError(
           errorMessage,
           response.status,
           response.statusText,
           errorBody
         );
-
-        // Don't retry on 4xx errors (client errors)
-        if (response.status >= 400 && response.status < 500) {
-          throw error;
-        }
-
-        throw error;
       }
 
       return await response.json() as T;
@@ -171,7 +172,7 @@ export async function fetchWithRetry<T = unknown>(
         // Check abort signal before sleeping
         if (options.signal?.aborted) throw lastError;
         const delay = backoff * Math.pow(2, attempt);
-        console.log(`[API] Retrying in ${delay}ms...`);
+        console.warn(`[API] Retrying in ${delay}ms...`);
         await new Promise(resolve => setTimeout(resolve, delay));
       }
     }
@@ -189,7 +190,7 @@ export interface TraceFilter {
   sessionId?: string;
 }
 
-export async function getTraces(filter: TraceFilter = {}): Promise<any[]> {
+export async function getTraces(filter: TraceFilter = {}): Promise<unknown[]> {
   const { API_BASE_URL } = await import('./config');
   const params = new URLSearchParams();
   if (filter.limit) params.set('limit', String(filter.limit));
@@ -390,17 +391,35 @@ export async function listOptimizationRuns(): Promise<OptimizationRun[]> {
   }
 }
 
+// fetch-based SSE reader instead of EventSource: the stream route sits behind
+// the X-Solvent-Secret middleware and EventSource cannot send headers — it
+// would always get a 401. Wire format unchanged: `data: <json>\n\n` frames
+// with a literal [DONE] sentinel.
 export function subscribeToOptimizationRun(runId: string, onUpdate: (run: OptimizationRun) => void): () => void {
-  const url = `${API_BASE_URL}/harness/runs/${runId}/stream`;
-  const evtSource = new EventSource(url);
-  evtSource.onmessage = (event) => {
-    if (event.data === '[DONE]') {
-      evtSource.close();
-      return;
-    }
+  const ctrl = new AbortController();
+
+  (async () => {
     try {
-      onUpdate(JSON.parse(event.data));
-    } catch { /* ignore parse errors */ }
-  };
-  return () => evtSource.close();
+      const secret = await getSecret();
+      const res = await fetch(`${API_BASE_URL}/harness/runs/${runId}/stream`, {
+        headers: { 'X-Solvent-Secret': secret, Accept: 'text/event-stream' },
+        signal: ctrl.signal,
+      });
+      if (!res.ok || !res.body) return;
+
+      for await (const data of streamSSE(res.body)) {
+        if (data === '[DONE]') {
+          ctrl.abort();
+          return;
+        }
+        try {
+          onUpdate(JSON.parse(data));
+        } catch { /* ignore parse errors */ }
+      }
+    } catch {
+      // Aborted by caller or network failure — subscription simply ends.
+    }
+  })();
+
+  return () => ctrl.abort();
 }

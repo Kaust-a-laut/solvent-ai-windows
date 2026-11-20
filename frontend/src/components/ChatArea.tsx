@@ -14,8 +14,40 @@ import { SettingsModal } from './SettingsModal';
 import { SupervisorHistory } from './SupervisorHistory';
 import { KnowledgeMapMini } from './KnowledgeMapMini';
 import { cn } from '../lib/utils';
+import { useLiveModels } from '../lib/liveModels';
+import { toast } from 'sonner';
 
 import type { ActivityEvent } from '../store/types';
+
+/**
+ * Validates the persisted cloud model selection against the live registry
+ * once it loads — a model retired while the app was closed gets migrated to
+ * the first live model of the same provider instead of silently failing.
+ */
+const useValidateModelSelection = () => {
+  const live = useLiveModels();
+
+  useEffect(() => {
+    if (!live) return;
+    const { selectedCloudModel, selectedCloudProvider, setSelectedCloudModel } = useAppStore.getState();
+    // Only providers whose endpoint list is the complete live catalog —
+    // openrouter/dashscope serve a curated subset, so a custom user-typed
+    // model there must not be treated as retired (the backend request-time
+    // fallback still covers those).
+    const authoritative = new Set(['groq', 'fireworks', 'cerebras', 'gemini']);
+    if (!authoritative.has(selectedCloudProvider)) return;
+    const list = live[selectedCloudProvider];
+    if (!list || list.length === 0 || !selectedCloudModel) return; // unverifiable provider
+    if (list.includes(selectedCloudModel)) return;
+
+    const replacement = list[0]!;
+    setSelectedCloudModel(replacement);
+    toast.warning(`${selectedCloudModel} was retired by ${selectedCloudProvider}`, {
+      description: `Your selection moved to ${replacement}. Pick a different model in Settings if needed.`,
+      duration: 10_000,
+    });
+  }, [live]);
+};
 
 // Lazy load feature areas to slim down the main bundle
 const DebateArea = lazy(() => import('./DebateArea').then(m => ({ default: m.DebateArea })));
@@ -36,7 +68,7 @@ const LoadingFallback = () => (
 );
 
 export const ChatArea = () => {
-  const { currentMode, setCurrentMode, setDeviceInfo, deviceInfo, setSupervisorInsight, supervisorInsight, addActivity, graphNodes, isProcessing } = useAppStore(
+  const { currentMode, setCurrentMode, setDeviceInfo, deviceInfo, setSupervisorInsight, addActivity, graphNodes, isProcessing } = useAppStore(
     useShallow((state) => ({
       currentMode: state.currentMode,
       setCurrentMode: state.setCurrentMode,
@@ -46,14 +78,17 @@ export const ChatArea = () => {
       supervisorInsight: state.supervisorInsight,
       addActivity: state.addActivity,
       graphNodes: state.graphNodes,
-      isProcessing: state.isProcessing,
+      isProcessing: state.isProcessingByMode[state.currentMode] ?? false,
     }))
   );
   const device = useDevice();
+  useValidateModelSelection();
   // Graph pulse effect - track when new nodes are added
   const prevNodeCount = useRef(graphNodes.length);
   const [graphPulse, setGraphPulse] = useState(false);
   const [newNodeCount, setNewNodeCount] = useState(0);
+  const graphPulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const supervisorInsightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (graphNodes.length > prevNodeCount.current) {
@@ -70,13 +105,24 @@ export const ChatArea = () => {
         source: 'system'
       });
 
-      setTimeout(() => {
+      // Reset any pending pulse-clear so a second update within the window
+      // doesn't get its count wiped by the first timeout firing late.
+      if (graphPulseTimerRef.current) clearTimeout(graphPulseTimerRef.current);
+      graphPulseTimerRef.current = setTimeout(() => {
         setGraphPulse(false);
         setNewNodeCount(0);
       }, 2000);
     }
     prevNodeCount.current = graphNodes.length;
   }, [graphNodes.length, addActivity]);
+
+  // Clear any in-flight pulse/insight timers on unmount.
+  useEffect(() => {
+    return () => {
+      if (graphPulseTimerRef.current) clearTimeout(graphPulseTimerRef.current);
+      if (supervisorInsightTimerRef.current) clearTimeout(supervisorInsightTimerRef.current);
+    };
+  }, []);
 
   useEffect(() => {
     if (window.electron?.onModeChanged) {
@@ -101,11 +147,14 @@ export const ChatArea = () => {
     if (window.electron?.onSupervisorNudge) {
       const cleanup = window.electron.onSupervisorNudge((nudge: { message: string }) => {
         setSupervisorInsight(nudge.message);
-        setTimeout(() => setSupervisorInsight(null), 10000);
+        // Reset any pending clear so a second nudge within the window
+        // doesn't get wiped out by the first nudge's stale timeout.
+        if (supervisorInsightTimerRef.current) clearTimeout(supervisorInsightTimerRef.current);
+        supervisorInsightTimerRef.current = setTimeout(() => setSupervisorInsight(null), 10000);
       });
       return cleanup;
     }
-  }, []);
+  }, [setSupervisorInsight]);
 
   useEffect(() => {
     const electron = window.electron as Record<string, unknown> | undefined;

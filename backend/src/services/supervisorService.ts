@@ -5,43 +5,50 @@ import { logger } from '../utils/logger';
 import { Server } from 'socket.io';
 import { appEventBus } from '../utils/eventBus';
 import { toolService } from './toolService';
+import { LRUMap } from '../utils/lruMap';
 
 /**
  * Provider fallback chains for the Overseer.
  * When the primary provider is rate-limited or unavailable, fall through
- * the chain until a healthy provider is found.
+ * the chain until a healthy provider succeeds.
  */
 const OVERSEER_ANALYSIS_CANDIDATES = [
-  { provider: 'groq', model: 'llama-4-scout-17b-16e-instruct' },
-  { provider: 'fireworks', model: 'accounts/fireworks/models/llama-v3p1-70b-instruct' },
+  { provider: 'groq', model: 'meta-llama/llama-4-scout-17b-16e-instruct' },
+  { provider: 'fireworks', model: 'accounts/fireworks/models/kimi-k2p6' },
   { provider: 'openrouter', model: 'meta-llama/llama-3.1-70b-instruct' },
-  { provider: 'deepseek', model: 'deepseek-chat' },
+  { provider: 'gemini', model: 'gemini-2.5-flash' },
 ];
 
 const OVERSEER_REASONING_CANDIDATES = [
   { provider: 'gemini', model: 'gemini-2.5-flash' },
   { provider: 'openrouter', model: 'google/gemini-2.5-flash' },
-  { provider: 'fireworks', model: 'accounts/fireworks/models/llama-v3p1-70b-instruct' },
-  { provider: 'groq', model: 'llama-4-scout-17b-16e-instruct' },
+  { provider: 'fireworks', model: 'accounts/fireworks/models/glm-5p1' },
+  { provider: 'groq', model: 'meta-llama/llama-4-scout-17b-16e-instruct' },
 ];
 
-interface ProviderModelPair {
-  provider: { complete: (...args: unknown[]) => Promise<string>; isReady?: () => boolean };
-  model: string;
-}
-
-async function getOverseerProvider(candidates: typeof OVERSEER_ANALYSIS_CANDIDATES): Promise<ProviderModelPair> {
+async function completeWithOverseerChain(
+  candidates: typeof OVERSEER_ANALYSIS_CANDIDATES,
+  messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+  opts: { temperature?: number; jsonMode?: boolean }
+): Promise<string> {
+  let lastError: unknown;
   for (const { provider: providerName, model } of candidates) {
     try {
-      const provider = await AIProviderFactory.getProvider(providerName);
-      if (provider.isReady()) {
-        return { provider: provider as ProviderModelPair['provider'], model };
-      }
-    } catch {
-      // Provider unavailable or misconfigured — try next
+      const provider = await AIProviderFactory.getExactProvider(providerName);
+      const hasKey = typeof provider.hasConfiguredKey === 'function'
+        ? provider.hasConfiguredKey()
+        : provider.isReady();
+      if (!provider.isReady() || !hasKey) continue;
+      // Always disable tool-calling on Overseer LLM completions — Overseer enforces its own allowlist/approval
+      return await provider.complete(messages, { ...opts, model, shouldSearch: false });
+    } catch (err) {
+      lastError = err;
+      logger.debug(`[Overseer] Candidate ${providerName}/${model} failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  throw new Error('Overseer: No available provider in fallback chain. Configure at least one API key.');
+  throw new Error(
+    `Overseer: No available provider in fallback chain succeeded. ${lastError instanceof Error ? lastError.message : ''}`.trim()
+  );
 }
 
 // --- Interfaces replacing `any` types ---
@@ -145,9 +152,9 @@ export class SupervisorService {
   private decisionLedger: string[] = [];
   private readonly MAX_LEDGER_ENTRIES = 10;
 
-  // Recent Overseer insights keyed by sessionId — injected into the main agent's
-  // system prompt as [OVERSEER NOTE] so the coding agent benefits from oversight.
-  private recentInsights: Map<string, string[]> = new Map();
+  // Recent Overseer insights keyed by sessionId (LRU-bounded) — injected into
+  // the main agent's system prompt as [OVERSEER NOTE] so the coding agent benefits from oversight.
+  private recentInsights: LRUMap<string, string[]> = new LRUMap(500);
   private readonly MAX_INSIGHTS_PER_SESSION = 3;
 
   // Pending decisions queue for approval flow
@@ -155,6 +162,9 @@ export class SupervisorService {
   private decisionHistory: DecisionRecord[] = [];
   private readonly DECISION_HISTORY_SIZE = 50;
   private readonly APPROVAL_TIMEOUT_MS = 60_000; // 60 seconds
+  private expirationTimer: ReturnType<typeof setInterval> | null = null;
+  private onIncrementToolBudget = () => { this.incrementToolBudget(); };
+  private onEmitEvent = ({ event, data }: { event: string; data: unknown }) => { this.emitEvent(event, data); };
 
   // Auto-approval settings (can be configured via settings)
   private autoApproveReadOnly = true;
@@ -162,17 +172,22 @@ export class SupervisorService {
 
   constructor() {
     // Listen for budget increment events emitted by ToolService (breaks circular import)
-    appEventBus.on('supervisor:increment-tool-budget', () => {
-      this.incrementToolBudget();
-    });
+    appEventBus.on('supervisor:increment-tool-budget', this.onIncrementToolBudget);
 
     // Listen for Socket.io broadcast events emitted by ToolService
-    appEventBus.on('supervisor:emit-event', ({ event, data }: { event: string; data: unknown }) => {
-      this.emitEvent(event, data);
-    });
+    appEventBus.on('supervisor:emit-event', this.onEmitEvent);
 
     // Start expiration checker for pending decisions
     this.startExpirationChecker();
+  }
+
+  shutdown(): void {
+    if (this.expirationTimer) {
+      clearInterval(this.expirationTimer);
+      this.expirationTimer = null;
+    }
+    appEventBus.off('supervisor:increment-tool-budget', this.onIncrementToolBudget);
+    appEventBus.off('supervisor:emit-event', this.onEmitEvent);
   }
 
   setIO(io: Server) {
@@ -193,8 +208,6 @@ export class SupervisorService {
     logger.info('[Supervisor] Analyzing mission delta via Groq LPU...');
 
     try {
-      const { provider: analysisProvider, model: analysisModel } = await getOverseerProvider(OVERSEER_ANALYSIS_CANDIDATES);
-
       // Pull relevant long-term context for supervision
       const relevantMemories = await vectorService.search(noteContent, 2);
       const memoryContext = relevantMemories
@@ -225,10 +238,14 @@ export class SupervisorService {
         "crystallize": { "content": "The rule/fact", "type": "architectural_decision|project_rule" } (OR null)
       }`;
 
-      const response = await analysisProvider.complete([
-        { role: 'system', content: 'You are the Solvent Knowledge Graph Manager. Your job is to keep the project knowledge graph accurate, surface crystallizable architectural insights, and identify when new stable rules emerge from user notes. Respond in strict JSON only — no prose outside the JSON object.' },
-        { role: 'user', content: prompt }
-      ], { model: analysisModel, temperature: 0.1 });
+      const response = await completeWithOverseerChain(
+        OVERSEER_ANALYSIS_CANDIDATES,
+        [
+          { role: 'system', content: 'You are the Solvent Knowledge Graph Manager. Your job is to keep the project knowledge graph accurate, surface crystallizable architectural insights, and identify when new stable rules emerge from user notes. Respond in strict JSON only — no prose outside the JSON object.' },
+          { role: 'user', content: prompt }
+        ],
+        { temperature: 0.1, jsonMode: true }
+      );
 
       const analysis = this.parseResponse(response);
       
@@ -374,8 +391,6 @@ export class SupervisorService {
     this.toolCallsInCycle = 0;
 
     try {
-      const { provider: reasoningProvider, model: reasoningModel } = await getOverseerProvider(OVERSEER_REASONING_CANDIDATES);
-
       // 1. Build enriched live context from all signal sources
       const liveContext = await this.buildLiveContext(context.activity, context.data || {});
 
@@ -414,9 +429,11 @@ RESPONSE FORMAT (strict JSON):
   "mentalMapUpdate": "Brief note on how the knowledge graph should change, or null"
 }`;
 
-      const response = await reasoningProvider.complete([
-        { role: 'user', content: prompt }
-      ], { model: reasoningModel, temperature: 0.1, jsonMode: true });
+      const response = await completeWithOverseerChain(
+        OVERSEER_REASONING_CANDIDATES,
+        [{ role: 'user', content: prompt }],
+        { temperature: 0.1, jsonMode: true }
+      );
 
       const result = this.parseResponse(response);
 
@@ -428,9 +445,12 @@ RESPONSE FORMAT (strict JSON):
             this.decisionLedger.shift(); // rolling window — drop oldest
           }
 
-          // Also push as an insight the main agent can consume via [OVERSEER NOTE]
+          // Push insight under the real sessionId (or 'global' fallback) so getRecentInsights(sessionId) finds it
           if (result.intervention?.needed && result.intervention.message) {
-            this.pushInsight(context.activity, result.intervention.message);
+            const insightSessionKey = typeof context.data?.sessionId === 'string' && context.data.sessionId
+              ? context.data.sessionId
+              : 'global';
+            this.pushInsight(insightSessionKey, result.intervention.message);
           }
         }
 
@@ -447,7 +467,7 @@ RESPONSE FORMAT (strict JSON):
           contextSnapshot: {
             notepadExcerpt: context.data?.notepadContent?.slice(0, 200) || '',
             recentMessages: context.data?.recentMessages?.length || 0,
-            memoriesQueried: 0 // Would need to track this in buildLiveContext
+            memoriesQueried: 0
           },
           relatedDecisions: []
         };
@@ -460,11 +480,14 @@ RESPONSE FORMAT (strict JSON):
         );
 
         if (canAutoApprove && toolName) {
-          // Auto-execute safe tools
+          // Record in history BEFORE execution so executeToolWithResult attaches result onto the record
           logger.info(`[Overseer] Auto-approved tool: ${toolName}`);
-          await this.executeToolWithResult(toolName, result.intervention!.toolToExecute!.args, decisionRecord.id);
           decisionRecord.status = 'auto_approved';
           this.addToHistory(decisionRecord);
+          const execResult = await this.executeToolWithResult(toolName, result.intervention!.toolToExecute!.args, decisionRecord.id);
+          if (decisionRecord.intervention) {
+            decisionRecord.intervention.result = execResult;
+          }
           this.emitEvent('OVERSEER_DECISION', { ...result, status: 'auto_approved', id: decisionRecord.id });
         } else if (result.intervention?.needed && result.intervention.toolToExecute) {
           // Queue for approval
@@ -522,24 +545,25 @@ RESPONSE FORMAT (strict JSON):
    * Start periodic checker for expired pending decisions
    */
   private startExpirationChecker() {
-    setInterval(() => {
+    this.expirationTimer = setInterval(() => {
       const now = Date.now();
       for (const [id, decision] of this.pendingDecisions.entries()) {
         if (decision.expiresAt < now && decision.status === 'pending') {
           decision.status = 'expired';
           this.pendingDecisions.delete(id);
-          
+
           // Update history record
           const historyRecord = this.decisionHistory.find(r => r.id === id);
           if (historyRecord) {
             historyRecord.status = 'expired';
           }
-          
+
           this.emitEvent('DECISION_EXPIRED', { id, decision: decision.decision });
           logger.info(`[Overseer] Decision expired: ${id}`);
         }
       }
     }, 5000); // Check every 5 seconds
+    this.expirationTimer.unref?.();
   }
 
   /**
@@ -597,6 +621,11 @@ RESPONSE FORMAT (strict JSON):
       return { success: false, error: 'Decision already resolved' };
     }
 
+    // Claim the decision atomically BEFORE awaiting async tool execution so
+    // duplicate clicks or the 5s expiration timer cannot race with execution.
+    decision.status = 'approved';
+    this.pendingDecisions.delete(decisionId);
+
     try {
       // Execute the tool
       if (decision.intervention?.toolToExecute) {
@@ -606,10 +635,6 @@ RESPONSE FORMAT (strict JSON):
           decisionId
         );
       }
-
-      // Update status
-      decision.status = 'approved';
-      this.pendingDecisions.delete(decisionId);
 
       // Update history
       const record = this.decisionHistory.find(r => r.id === decisionId);
@@ -666,7 +691,9 @@ RESPONSE FORMAT (strict JSON):
    * Get decision history
    */
   getDecisionHistory(limit: number = 50, offset: number = 0): DecisionRecord[] {
-    return this.decisionHistory.slice(offset, offset + limit);
+    const safeOffset = Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0;
+    const safeLimit = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : 50;
+    return this.decisionHistory.slice(safeOffset, safeOffset + safeLimit);
   }
 
   /**
@@ -675,7 +702,9 @@ RESPONSE FORMAT (strict JSON):
    */
   getRecentInsights(sessionId?: string): string[] {
     if (sessionId) {
-      return this.recentInsights.get(sessionId) ?? [];
+      const perSession = this.recentInsights.get(sessionId) ?? [];
+      const globalInsights = sessionId !== 'global' ? (this.recentInsights.get('global') ?? []) : [];
+      return [...perSession, ...globalInsights].slice(-this.MAX_INSIGHTS_PER_SESSION);
     }
     // If no sessionId, return all insights flattened
     return Array.from(this.recentInsights.values()).flat();
@@ -729,7 +758,6 @@ RESPONSE FORMAT (strict JSON):
 
       if (!memoryContext) return;
 
-      const { provider: guidanceProvider, model: guidanceModel } = await getOverseerProvider(OVERSEER_ANALYSIS_CANDIDATES);
       const prompt = `Act as a Proactive Engineering Guide.
 
       USER CONTEXT: "${contextFocus}"
@@ -743,10 +771,14 @@ RESPONSE FORMAT (strict JSON):
       
       Format: Just the nudge text or "NO_ACTION".`;
 
-      const nudge = await guidanceProvider.complete([
-        { role: 'system', content: 'You are a helpful, non-intrusive assistant.' },
-        { role: 'user', content: prompt }
-      ], { model: guidanceModel, temperature: 0 });
+      const nudge = await completeWithOverseerChain(
+        OVERSEER_ANALYSIS_CANDIDATES,
+        [
+          { role: 'system', content: 'You are a helpful, non-intrusive assistant.' },
+          { role: 'user', content: prompt }
+        ],
+        { temperature: 0 }
+      );
 
       if (nudge && !nudge.includes('NO_ACTION')) {
         if (this.io) {

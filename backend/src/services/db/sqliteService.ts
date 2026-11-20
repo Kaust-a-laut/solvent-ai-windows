@@ -14,11 +14,22 @@ export class SqliteMigrationError extends Error {
 export class SqliteService {
   public db: Database.Database;
 
+  private insertMemoryStmt!: Database.Statement;
+  private upsertEmbeddingStmt!: Database.Statement;
+  private deleteMemoryStmt!: Database.Statement;
+  private deleteEmbeddingStmt!: Database.Statement;
+
   constructor(dbPath = config.SOLVENT_SQLITE_PATH || path.resolve(__dirname, '../../../../.solvent_memory.sqlite')) {
     fs.mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
     this.db = new Database(dbPath);
     try {
+      // WAL: readers don't block the writer and fsyncs batch up.
+      // synchronous=NORMAL is the recommended WAL pairing — an OS crash can
+      // lose the last transactions but cannot corrupt the database.
+      this.db.pragma('journal_mode = WAL');
+      this.db.pragma('synchronous = NORMAL');
       this.initSchema();
+      this.prepareStatements();
     } catch (error) {
       // Release the file handle so callers can retry, inspect, or delete the
       // db file. Without this, the constructor throws but better-sqlite3
@@ -116,15 +127,28 @@ export class SqliteService {
     }
   }
 
+  // Safely decode a Float32 BLOB into number[], copying into an aligned
+  // ArrayBuffer whenever Node's slab-pooled Buffer has byteOffset % 4 !== 0.
+  private decodeFloat32Blob(blob: Buffer): number[] {
+    if (blob.byteLength === 0) return [];
+    if (blob.byteLength % 4 !== 0) {
+      throw new Error(`Invalid float32 vector BLOB byteLength: ${blob.byteLength}`);
+    }
+    if (blob.byteOffset % 4 === 0) {
+      const f32 = new Float32Array(blob.buffer, blob.byteOffset, blob.byteLength / 4);
+      return Array.from(f32);
+    }
+    const aligned = new ArrayBuffer(blob.byteLength);
+    new Uint8Array(aligned).set(blob);
+    return Array.from(new Float32Array(aligned));
+  }
+
   // Prefer the BLOB column when present; fall back to JSON for legacy rows
-  // written before V2. Float32Array view wraps the Buffer in place, then
-  // Array.from copies into a plain number[] so the slice doesn't outlive the
-  // backing Buffer that better-sqlite3 hands us.
+  // written before V2.
   private decodeVector(row: { vector: string; vector_blob: Buffer | null }): number[] {
     const blob = row.vector_blob;
     if (blob && blob.byteLength > 0) {
-      const f32 = new Float32Array(blob.buffer, blob.byteOffset, blob.byteLength / 4);
-      return Array.from(f32);
+      return this.decodeFloat32Blob(blob);
     }
     return JSON.parse(row.vector) as number[];
   }
@@ -133,36 +157,59 @@ export class SqliteService {
     return Buffer.from(new Float32Array(vector).buffer);
   }
 
+  // Statements are prepared once (SQL parse is the dominant cost of these
+  // hot-path calls). Must run after initSchema so the tables exist.
+  private prepareStatements() {
+    this.insertMemoryStmt = this.db.prepare(`
+      INSERT INTO memory_entries (id, vector, vector_blob, metadata, type, tags)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        vector = excluded.vector,
+        vector_blob = excluded.vector_blob,
+        metadata = excluded.metadata,
+        type = excluded.type,
+        tags = excluded.tags
+    `);
+    this.upsertEmbeddingStmt = this.db.prepare(`
+      INSERT INTO embedding_cache (text_key, vector, last_access)
+      VALUES (?, ?, ?)
+      ON CONFLICT(text_key) DO UPDATE SET
+        vector = excluded.vector,
+        last_access = excluded.last_access
+    `);
+    this.deleteMemoryStmt = this.db.prepare(`DELETE FROM memory_entries WHERE id = ?`);
+    this.deleteEmbeddingStmt = this.db.prepare(`DELETE FROM embedding_cache WHERE text_key = ?`);
+  }
+
   public insertMemory(id: string, vector: number[], metadata: unknown) {
-    const transaction = this.db.transaction(() => {
-      const metadataStr = JSON.stringify(metadata);
-      const meta = metadata as any;
-      const type = meta.type || '';
-      const tags = JSON.stringify(meta.tags || []);
-      const vectorBlob = this.encodeVector(vector);
+    const metadataStr = JSON.stringify(metadata);
+    const meta = metadata as Record<string, unknown>;
+    const type = typeof meta?.type === 'string' ? meta.type : '';
+    const tags = JSON.stringify(Array.isArray(meta?.tags) ? meta.tags : []);
+    const vectorBlob = this.encodeVector(vector);
 
-      // `vector` TEXT column still satisfies its NOT NULL constraint with a
-      // placeholder. Future cleanup phase can drop the column once all
-      // legacy rows have been re-written through this path.
-      const insertEntry = this.db.prepare(`
-        INSERT INTO memory_entries (id, vector, vector_blob, metadata, type, tags)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          vector = excluded.vector,
-          vector_blob = excluded.vector_blob,
-          metadata = excluded.metadata,
-          type = excluded.type,
-          tags = excluded.tags
-      `);
+    // `vector` TEXT column still satisfies its NOT NULL constraint with a
+    // placeholder. Future cleanup phase can drop the column once all
+    // legacy rows have been re-written through this path. A single statement
+    // runs in its own implicit transaction — no explicit wrapper needed.
+    this.insertMemoryStmt.run(id, '[]', vectorBlob, metadataStr, type, tags);
+  }
 
-      insertEntry.run(id, '[]', vectorBlob, metadataStr, type, tags);
+  public insertMemories(entries: Array<{ id: string; vector: number[]; metadata: unknown }>): void {
+    if (entries.length === 0) return;
+    const tx = this.db.transaction((rows: Array<{ id: string; vector: number[]; metadata: unknown }>) => {
+      for (const r of rows) {
+        const meta = r.metadata as Record<string, unknown>;
+        const type = typeof meta?.type === 'string' ? meta.type : '';
+        const tags = JSON.stringify(Array.isArray(meta?.tags) ? meta.tags : []);
+        this.insertMemoryStmt.run(r.id, '[]', this.encodeVector(r.vector), JSON.stringify(r.metadata), type, tags);
+      }
     });
-
-    transaction();
+    tx(entries);
   }
 
   public deleteMemory(id: string) {
-    this.db.prepare(`DELETE FROM memory_entries WHERE id = ?`).run(id);
+    this.deleteMemoryStmt.run(id);
   }
 
   public getMemory(id: string) {
@@ -199,35 +246,21 @@ export class SqliteService {
   // --- embedding_cache (V4) ---
 
   public upsertEmbedding(text: string, vector: number[], lastAccess: number): void {
-    const stmt = this.db.prepare(`
-      INSERT INTO embedding_cache (text_key, vector, last_access)
-      VALUES (?, ?, ?)
-      ON CONFLICT(text_key) DO UPDATE SET
-        vector = excluded.vector,
-        last_access = excluded.last_access
-    `);
-    stmt.run(text, this.encodeVector(vector), lastAccess);
+    this.upsertEmbeddingStmt.run(text, this.encodeVector(vector), lastAccess);
   }
 
   // Batch variant — wraps a single transaction around N upserts. Use this for
   // the persist cycle so we don't pay N fsyncs.
   public upsertEmbeddings(entries: Array<{ text: string; vector: number[]; lastAccess: number }>): void {
     if (entries.length === 0) return;
-    const stmt = this.db.prepare(`
-      INSERT INTO embedding_cache (text_key, vector, last_access)
-      VALUES (?, ?, ?)
-      ON CONFLICT(text_key) DO UPDATE SET
-        vector = excluded.vector,
-        last_access = excluded.last_access
-    `);
     const tx = this.db.transaction((rows: Array<{ text: string; vector: number[]; lastAccess: number }>) => {
-      for (const r of rows) stmt.run(r.text, this.encodeVector(r.vector), r.lastAccess);
+      for (const r of rows) this.upsertEmbeddingStmt.run(r.text, this.encodeVector(r.vector), r.lastAccess);
     });
     tx(entries);
   }
 
   public deleteEmbedding(text: string): void {
-    this.db.prepare(`DELETE FROM embedding_cache WHERE text_key = ?`).run(text);
+    this.deleteEmbeddingStmt.run(text);
   }
 
   public countEmbeddings(): number {
@@ -235,23 +268,37 @@ export class SqliteService {
     return row.c;
   }
 
-  // Async chunked load to keep the event loop responsive on large caches.
-  // Mirrors getAllMemoriesAsync's pattern.
+  // Async chunked load via keyset pagination (rowid) so each SQLite statement
+  // completes and closes its cursor BEFORE yielding via setImmediate — never
+  // leaving the better-sqlite3 connection busy across event-loop ticks.
   public async getAllEmbeddingsAsync(chunkSize: number = 500): Promise<Array<{ text: string; vector: number[]; lastAccess: number }>> {
-    const stmt = this.db.prepare(`SELECT text_key, vector, last_access FROM embedding_cache`);
+    const stmt = this.db.prepare(
+      `SELECT rowid, text_key, vector, last_access FROM embedding_cache WHERE rowid > ? ORDER BY rowid ASC LIMIT ?`
+    );
     const out: Array<{ text: string; vector: number[]; lastAccess: number }> = [];
-    let i = 0;
-    for (const row of stmt.iterate() as IterableIterator<{ text_key: string; vector: Buffer; last_access: number }>) {
-      const buf = row.vector;
-      const f32 = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
-      out.push({
-        text: row.text_key,
-        vector: Array.from(f32),
-        lastAccess: row.last_access,
-      });
-      if (++i % chunkSize === 0) {
-        await new Promise<void>(resolve => setImmediate(resolve));
+    const batchSize = Math.max(1, Math.floor(chunkSize));
+    let lastRowId = 0;
+
+    for (;;) {
+      const rows = stmt.all(lastRowId, batchSize) as Array<{
+        rowid: number;
+        text_key: string;
+        vector: Buffer;
+        last_access: number;
+      }>;
+      if (rows.length === 0) break;
+
+      for (const row of rows) {
+        out.push({
+          text: row.text_key,
+          vector: this.decodeFloat32Blob(row.vector),
+          lastAccess: row.last_access,
+        });
+        lastRowId = row.rowid;
       }
+
+      if (rows.length < batchSize) break;
+      await new Promise<void>(resolve => setImmediate(resolve));
     }
     return out;
   }
@@ -259,20 +306,34 @@ export class SqliteService {
   // --- memory_entries async loader ---
 
   public async getAllMemoriesAsync(chunkSize: number = 500): Promise<Array<{ id: string; vector: number[]; metadata: unknown }>> {
-    const stmt = this.db.prepare(`SELECT id, vector, vector_blob, metadata FROM memory_entries`);
+    const stmt = this.db.prepare(
+      `SELECT rowid, id, vector, vector_blob, metadata FROM memory_entries WHERE rowid > ? ORDER BY rowid ASC LIMIT ?`
+    );
     const out: Array<{ id: string; vector: number[]; metadata: unknown }> = [];
-    let i = 0;
-    for (const row of stmt.iterate() as IterableIterator<{ id: string; vector: string; vector_blob: Buffer | null; metadata: string }>) {
-      out.push({
-        id: row.id,
-        vector: this.decodeVector(row),
-        metadata: JSON.parse(row.metadata),
-      });
-      if (++i % chunkSize === 0) {
-        // Yield to other I/O / timers — event loop stays responsive even on
-        // large stores.
-        await new Promise<void>(resolve => setImmediate(resolve));
+    const batchSize = Math.max(1, Math.floor(chunkSize));
+    let lastRowId = 0;
+
+    for (;;) {
+      const rows = stmt.all(lastRowId, batchSize) as Array<{
+        rowid: number;
+        id: string;
+        vector: string;
+        vector_blob: Buffer | null;
+        metadata: string;
+      }>;
+      if (rows.length === 0) break;
+
+      for (const row of rows) {
+        out.push({
+          id: row.id,
+          vector: this.decodeVector(row),
+          metadata: JSON.parse(row.metadata),
+        });
+        lastRowId = row.rowid;
       }
+
+      if (rows.length < batchSize) break;
+      await new Promise<void>(resolve => setImmediate(resolve));
     }
     return out;
   }

@@ -23,6 +23,21 @@ vi.mock('fs/promises', () => ({
   }
 }));
 
+// Mock child_process.spawn so runTscInTempDir doesn't spawn real tsc against mocked fs
+vi.mock('child_process', async () => {
+  const { EventEmitter } = await import('events');
+  return {
+    spawn: vi.fn(() => {
+      const proc = new EventEmitter() as any;
+      proc.stdout = new EventEmitter();
+      proc.stderr = new EventEmitter();
+      proc.kill = vi.fn();
+      setImmediate(() => proc.emit('close', 0));
+      return proc;
+    }),
+  };
+});
+
 describe('WaterfallService Integration (Mocked AI)', () => {
   let service: WaterfallService;
   let mockProvider: any;

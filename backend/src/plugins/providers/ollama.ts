@@ -2,6 +2,7 @@ import { IProviderPlugin } from '../../types/plugins';
 import { ChatMessage, CompletionOptions } from '../../types/ai';
 import { config } from '../../config';
 import { logger } from '../../utils/logger';
+import { normalizeMessages, normalizeMessagesForOllama } from '../../utils/messageUtils';
 import { Ollama } from 'ollama';
 
 export class OllamaProviderPlugin implements IProviderPlugin {
@@ -51,13 +52,14 @@ export class OllamaProviderPlugin implements IProviderPlugin {
 
   private client: Ollama | null = null;
   private isInitialized = false;
+  private host: string = 'http://127.0.0.1:11434';
   private apiKey: string | null = null;
 
   async initialize(options: Record<string, unknown>): Promise<void> {
-    const host = (options.host as string) || config.OLLAMA_HOST || 'http://127.0.0.1:11434';
+    this.host = (options.host as string) || config.OLLAMA_HOST || 'http://127.0.0.1:11434';
     this.apiKey = (options.apiKey as string) || config.OLLAMA_API_KEY || null;
     this.client = new Ollama({
-      host,
+      host: this.host,
       ...(this.apiKey ? { headers: { 'Authorization': `Bearer ${this.apiKey}` } } : {}),
     });
     this.isInitialized = true;
@@ -68,48 +70,90 @@ export class OllamaProviderPlugin implements IProviderPlugin {
     return this.isInitialized && !!this.client;
   }
 
+  hasConfiguredKey(): boolean {
+    return this.isInitialized && !!this.client && config.ENABLE_OLLAMA;
+  }
+
   async complete(messages: ChatMessage[], options: CompletionOptions): Promise<string> {
-    if (!this.client) {
-      throw new Error('Ollama provider not initialized');
-    }
+    const { model, temperature = 0.7, maxTokens = 2048, jsonMode, apiKey, signal } = options;
+    if (signal?.aborted) throw new Error('Ollama request aborted');
 
-    const { model, temperature = 0.7, maxTokens = 2048, jsonMode } = options;
-
-    const response = await this.client.chat({
-      model: model || this.defaultModel,
-      messages: messages.map(msg => ({ role: msg.role, content: msg.content })),
-      ...(jsonMode ? { format: 'json' } : {}),
-      options: {
-        temperature,
-        num_predict: maxTokens,
-      }
+    // Use a per-call client if abort/timeout might trigger so abort() doesn't cancel other concurrent calls
+    const client = new Ollama({
+      host: this.host,
+      ...((apiKey || this.apiKey) ? { headers: { Authorization: `Bearer ${apiKey || this.apiKey}` } } : {}),
     });
 
-    return response.message.content;
+    const timeoutMs = config.AI_PROVIDER_TIMEOUT_MS ?? 120_000;
+    const onAbort = () => { try { client.abort(); } catch { /* ignore */ } };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    const timer = setTimeout(onAbort, timeoutMs);
+
+    try {
+      const normalized = normalizeMessagesForOllama(normalizeMessages(messages));
+      const response = await client.chat({
+        model: model || this.defaultModel,
+        messages: normalized,
+        ...(jsonMode ? { format: 'json' } : {}),
+        options: {
+          temperature,
+          num_predict: maxTokens,
+        }
+      });
+      return response.message.content;
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    }
   }
 
   async *stream(messages: ChatMessage[], options: CompletionOptions): AsyncGenerator<string> {
-    if (!this.client) {
-      throw new Error('Ollama provider not initialized');
-    }
+    const { model, temperature = 0.7, maxTokens = 2048, jsonMode, apiKey, signal } = options;
+    if (signal?.aborted) return;
 
-    const { model, temperature = 0.7, maxTokens = 2048, jsonMode } = options;
-
-    const response = await this.client.chat({
-      model: model || this.defaultModel,
-      messages: messages.map(msg => ({ role: msg.role, content: msg.content })),
-      ...(jsonMode ? { format: 'json' } : {}),
-      options: {
-        temperature,
-        num_predict: maxTokens,
-      },
-      stream: true
+    const client = new Ollama({
+      host: this.host,
+      ...((apiKey || this.apiKey) ? { headers: { Authorization: `Bearer ${apiKey || this.apiKey}` } } : {}),
     });
 
-    for await (const chunk of response) {
-      yield chunk.message.content;
+    const idleMs = config.AI_STREAM_IDLE_TIMEOUT_MS ?? 60_000;
+    const onAbort = () => { try { client.abort(); } catch { /* ignore */ } };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    const resetIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(onAbort, idleMs);
+    };
+    resetIdle();
+
+    try {
+      const normalized = normalizeMessagesForOllama(normalizeMessages(messages));
+      const response = await client.chat({
+        model: model || this.defaultModel,
+        messages: normalized,
+        ...(jsonMode ? { format: 'json' } : {}),
+        options: {
+          temperature,
+          num_predict: maxTokens,
+        },
+        stream: true
+      });
+
+      for await (const chunk of response) {
+        resetIdle();
+        if (signal?.aborted) break;
+        if (chunk.message?.content) {
+          yield chunk.message.content;
+        }
+      }
+    } finally {
+      if (idleTimer) clearTimeout(idleTimer);
+      signal?.removeEventListener('abort', onAbort);
     }
   }
+
+  generateChatStream = (messages: ChatMessage[], options: CompletionOptions): AsyncGenerator<string> =>
+    this.stream(messages, options);
 }
 
 // Export as default for dynamic loading

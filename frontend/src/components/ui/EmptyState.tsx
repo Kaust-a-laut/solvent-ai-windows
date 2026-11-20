@@ -32,7 +32,6 @@ export function EmptyState({
   icon: Icon,
   title,
   description,
-  accentColor = 'jb-accent',
   action,
   shortcuts,
   prompts,

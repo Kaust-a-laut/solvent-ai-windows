@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useAppStore } from '../store/useAppStore';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Cloud, Cpu, Zap, ChevronDown, Sparkles, Globe, Brain } from 'lucide-react';
+import { Cpu, Zap, ChevronDown, Sparkles, Globe, Brain } from 'lucide-react';
 import { cn } from '../lib/utils';
 
 const providers = [
@@ -18,7 +18,8 @@ interface ProviderQuickSwitchProps {
 
 export const ProviderQuickSwitch: React.FC<ProviderQuickSwitchProps> = ({ compact = false }) => {
   const [isOpen, setIsOpen] = useState(false);
-  const { selectedCloudProvider, setSelectedCloudProvider, isProcessing } = useAppStore();
+  const { selectedCloudProvider, setSelectedCloudProvider, isProcessingByMode, currentMode } = useAppStore();
+  const isProcessing = isProcessingByMode[currentMode] ?? false;
 
   const current = providers.find(p => p.id === selectedCloudProvider) ?? providers[0]!;
   const Icon = current.icon;

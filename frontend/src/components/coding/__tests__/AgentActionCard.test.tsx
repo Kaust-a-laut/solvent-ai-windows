@@ -22,15 +22,6 @@ describe('AgentActionCard', () => {
     callId: 'test-call-1',
   });
 
-  const mockErrorEvent = (tool: string, error: string, args?: Record<string, unknown>): ToolEvent => ({
-    type: 'tool_error',
-    tool,
-    args: args || {},
-    error,
-    iteration: 0,
-    callId: 'test-call-1',
-  });
-
   it('renders file write card in collapsed state', () => {
     const start = mockStartEvent('write_file', { path: 'src/auth.ts' });
     const result = mockResultEvent('write_file', 'content here', { path: 'src/auth.ts' });

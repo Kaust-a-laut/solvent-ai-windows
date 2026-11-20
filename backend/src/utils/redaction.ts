@@ -1,15 +1,19 @@
 import { ZodIssue } from 'zod';
 
-const SENSITIVE_KEY_RE = /apikey|api_keys|api-key|secret|token|authorization|password|credential/i;
+const SENSITIVE_KEY_RE = /api[_-]?keys?|secret|token|authorization|password|credential/i;
 
-export function redactSensitive(value: unknown): unknown {
+export function redactSensitive(value: unknown, seen = new WeakSet<object>()): unknown {
   if (Array.isArray(value)) {
-    return value.map(item => redactSensitive(item));
+    if (seen.has(value)) return '[Circular]';
+    seen.add(value);
+    return value.map(item => redactSensitive(item, seen));
   }
   if (value && typeof value === 'object') {
+    if (seen.has(value)) return '[Circular]';
+    seen.add(value);
     const output: Record<string, unknown> = {};
     for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
-      output[key] = SENSITIVE_KEY_RE.test(key) ? '***REDACTED***' : redactSensitive(nested);
+      output[key] = SENSITIVE_KEY_RE.test(key) ? '***REDACTED***' : redactSensitive(nested, seen);
     }
     return output;
   }
@@ -20,7 +24,12 @@ export function requestBodySummary(body: unknown, issues: ZodIssue[] = []): Reco
   const keys = body && typeof body === 'object' && !Array.isArray(body)
     ? Object.keys(body as Record<string, unknown>)
     : [];
-  const payloadSize = Buffer.byteLength(JSON.stringify(redactSensitive(body ?? null)));
+  let payloadSize = 0;
+  try {
+    payloadSize = Buffer.byteLength(JSON.stringify(redactSensitive(body ?? null)) ?? '');
+  } catch {
+    payloadSize = -1;
+  }
   return {
     keys,
     payloadSize,
@@ -30,20 +39,25 @@ export function requestBodySummary(body: unknown, issues: ZodIssue[] = []): Reco
 
 const DEFAULT_MAX_FIELD_BYTES = 2048;
 
-function truncateValue(value: unknown, maxBytes: number): unknown {
+function truncateValue(value: unknown, maxBytes: number, seen = new WeakSet<object>()): unknown {
   if (typeof value === 'string') {
-    if (Buffer.byteLength(value) > maxBytes) {
-      return value.slice(0, maxBytes) + `…[truncated, original ${Buffer.byteLength(value)} bytes]`;
+    const byteLen = Buffer.byteLength(value);
+    if (byteLen > maxBytes) {
+      return value.slice(0, maxBytes) + `…[truncated, original ${byteLen} bytes]`;
     }
     return value;
   }
   if (Array.isArray(value)) {
-    return value.map(item => truncateValue(item, maxBytes));
+    if (seen.has(value)) return '[Circular]';
+    seen.add(value);
+    return value.map(item => truncateValue(item, maxBytes, seen));
   }
   if (value && typeof value === 'object') {
+    if (seen.has(value)) return '[Circular]';
+    seen.add(value);
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = truncateValue(v, maxBytes);
+      out[k] = truncateValue(v, maxBytes, seen);
     }
     return out;
   }

@@ -7,7 +7,7 @@ import { vectorService } from './vectorService';
 import { logger } from '../utils/logger';
 import screenshot from 'screenshot-desktop';
 import sharp from 'sharp';
-import { validatePath, PROJECT_ROOT, getEffectiveProjectRoot } from '../utils/fileSystem';
+import { validatePath, PROJECT_ROOT, getEffectiveProjectRoot, isPathWithinRoot } from '../utils/fileSystem';
 import { transactionService } from './transactionService';
 import { appEventBus } from '../utils/eventBus';
 import { coreMemory } from './coreMemory';
@@ -91,8 +91,11 @@ const ALLOWED_COMMAND_PREFIXES = [
 ];
 
 // Operators that may separate pipeline stages. Command is validated per-stage.
-// Order matters: longer operators first so we match `&&` before `&`.
-const PIPELINE_SEPARATOR = /(?:\|\||&&|;|\|)/;
+// Order matters: longer operators first so we match `||` before `|` and `&&`
+// before `&`. Single `&` (background) and newlines also separate commands in
+// the shells we route through (`bash -c` / `sh -c`), so they must split too —
+// otherwise `ls\nevil` or `ls & evil` would only have its first stage checked.
+const PIPELINE_SEPARATOR = /(?:\|\||&&|;|\||&|\r?\n)/;
 
 /**
  * Capture the primary screen on Windows using System.Drawing via PowerShell.
@@ -135,8 +138,8 @@ $gfx.Dispose(); $bmp.Dispose();
 // The shell still interprets them when we route through `sh -c`.
 
 function hasShellMetacharacters(command: string): boolean {
-  // Any of: pipeline-splitters OR redirects
-  return /(?:\|\||&&|;|\||(?:^|\s)\d?>>?|(?:^|\s)2>)/.test(command);
+  // Any of: pipeline-splitters, background/&-chains, newlines, OR redirects
+  return /(?:\|\||&&|;|\||&|\r?\n|(?:^|\s)\d?>>?|(?:^|\s)2>)/.test(command);
 }
 
 function hasCommandSubstitution(command: string): boolean {
@@ -147,6 +150,60 @@ function hasCommandSubstitution(command: string): boolean {
 function splitPipelineStages(command: string): string[] {
   // Split on pipeline/chain operators only. Redirects stay attached.
   return command.split(PIPELINE_SEPARATOR).map(s => s.trim()).filter(Boolean);
+}
+
+// Matches shell redirect operators (`>`, `>>`, `2>`, `<`) and captures their
+// target, even when glued directly to the path with no space (`>../out.txt`).
+const REDIRECT_TARGET_RE = /(?:^|\s)\d?(?:>>?|<)\s*(\S+)/g;
+
+function extractRedirectTargets(stage: string): string[] {
+  const targets: string[] = [];
+  const re = new RegExp(REDIRECT_TARGET_RE);
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(stage)) !== null) {
+    if (match[1]) targets.push(match[1]);
+  }
+  return targets;
+}
+
+// Standard discard/stream sinks — not real files, always outside any project
+// root once resolved (e.g. `/dev/null` → `C:\dev\null` on Windows), but safe
+// to redirect to since they can't be read back or used to exfiltrate data.
+function isNullSink(target: string): boolean {
+  return /^\/dev\/(null|stdout|stderr|zero)$/i.test(target) || /^(nul|con)$/i.test(target);
+}
+
+/**
+ * Reject any argument in a stage that resolves (relative to the given
+ * simulated cwd) to a location outside the project root. Flags (tokens
+ * starting with `-`, including `--flag=value` forms) are skipped since they
+ * aren't paths; everything else — including URLs and non-path words — is
+ * resolved and containment-checked, which is a no-op for anything that isn't
+ * actually an out-of-root path.
+ */
+function assertStageArgsWithinRoot(stage: string, simulatedCwd: string): void {
+  const tokens = stage.split(/\s+/).slice(1); // drop the leading command token
+  for (const raw of tokens) {
+    if (!raw) continue;
+    const eq = raw.startsWith('--') ? raw.indexOf('=') : -1;
+    const candidate = eq !== -1 ? raw.slice(eq + 1) : raw;
+    if (candidate.startsWith('-') || isNullSink(candidate)) continue; // bare flag, or a discard sink — not a real path
+    const resolved = path.resolve(simulatedCwd, candidate);
+    if (!isPathWithinRoot(resolved)) {
+      throw new Error(
+        `Command rejected by security policy: argument '${candidate}' resolves outside the permitted project root.`
+      );
+    }
+  }
+  for (const target of extractRedirectTargets(stage)) {
+    if (isNullSink(target)) continue;
+    const resolved = path.resolve(simulatedCwd, target);
+    if (!isPathWithinRoot(resolved)) {
+      throw new Error(
+        `Command rejected by security policy: redirect target '${target}' would read/write outside the permitted project root.`
+      );
+    }
+  }
 }
 
 // Per-stage argv-level safety. Runs after the prefix allowlist check.
@@ -164,6 +221,13 @@ function rejectDangerousArgv(stage: string): void {
     if (/\s(-p|--package|-c|--call)\b/.test(lower)) {
       throw new Error(
         `Command rejected: 'npx' with -p/--package/-c/--call is not permitted (runs arbitrary packages).`
+      );
+    }
+  }
+  if (/^python3?(?:\.exe)?\s/.test(lower)) {
+    if (/\s(-c|-i)\b/.test(lower)) {
+      throw new Error(
+        `Command rejected: 'python' with -c/-i flags is not permitted (executes arbitrary code). Run a script file instead.`
       );
     }
   }
@@ -217,6 +281,19 @@ const WIN_BASH_PATH: string | null = (() => {
   }
   return null;
 })();
+
+// Files whose contents must never be auto-embedded into vector memory.
+// Reading them is allowed (they live inside the project root), but persisting
+// their contents into .solvent_memory.sqlite would copy credentials into
+// long-term storage that later surfaces in retrieval results.
+function isSensitivePath(p: string): boolean {
+  const base = path.basename(p).toLowerCase();
+  if (/^\.env(\..+)?$/.test(base)) return true;
+  if (/\.(pem|key|p12|pfx|crt|der)$/.test(base)) return true;
+  if (/^id_(rsa|dsa|ecdsa|ed25519)/.test(base)) return true;
+  if (/(credential|secret|token|apikey|api_key)/.test(base)) return true;
+  return false;
+}
 
 // Commands that require explicit opt-in via SOLVENT_ALLOW_SHELL=true
 const DANGEROUS_COMMANDS = [
@@ -943,16 +1020,21 @@ export class ToolService {
   private async fetchWebContent(url: string) {
     const response = await safeAxiosGet(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
+      responseType: 'text',
       maxHops: 5,
     });
-    // Return a slice of HTML to avoid token overflow, ideally we'd parse this to markdown
-    return response.data.slice(0, 10000);
+    // Return a slice to avoid token overflow. Guard non-string bodies — JSON
+    // responses arrive as objects when axios sniffs the content type.
+    const body = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
+    return body.slice(0, 10000);
   }
 
   private async readFile(filePath: string) {
     const fullPath = validatePath(filePath);
     const content = await fs.readFile(fullPath, 'utf-8');
-    vectorService.addEntry(content.slice(0, 5000), { path: filePath, type: 'file_read' }).catch(err => logger.error(`[ToolService] addEntry (file_read) failed: ${err instanceof Error ? err.message : String(err)}`));
+    if (!isSensitivePath(fullPath)) {
+      vectorService.addEntry(content.slice(0, 5000), { path: filePath, type: 'file_read' }).catch(err => logger.error(`[ToolService] addEntry (file_read) failed: ${err instanceof Error ? err.message : String(err)}`));
+    }
 
     const MAX_FILE_CHARS = 8_000;
     if (content.length > MAX_FILE_CHARS) {
@@ -968,7 +1050,9 @@ export class ToolService {
   private async writeFile(filePath: string, content: string) {
     const fullPath = validatePath(filePath);
     await fs.writeFile(fullPath, content);
-    vectorService.addEntry(content.slice(0, 5000), { path: filePath, type: 'file_write' }).catch(err => logger.error(`[ToolService] addEntry (file_write) failed: ${err instanceof Error ? err.message : String(err)}`));
+    if (!isSensitivePath(fullPath)) {
+      vectorService.addEntry(content.slice(0, 5000), { path: filePath, type: 'file_write' }).catch(err => logger.error(`[ToolService] addEntry (file_write) failed: ${err instanceof Error ? err.message : String(err)}`));
+    }
     return { status: 'success', path: filePath };
   }
 
@@ -1012,11 +1096,17 @@ export class ToolService {
       : `(no top-level exported symbols found in ${filePath})`;
   }
 
-  private async grepFiles(pattern: string, searchPath?: string, include?: string): Promise<string> {
+  private async grepFiles(
+    pattern: string,
+    searchPath?: string,
+    include?: string,
+    opts?: { literal?: boolean }
+  ): Promise<string> {
     const effectiveRoot = getEffectiveProjectRoot();
     const basePath = searchPath ? validatePath(searchPath) : effectiveRoot;
     const includeGlob = include || '*.{ts,tsx,js,jsx,css,json,md}';
     const pathSep = process.platform === 'win32' ? '\\' : '/';
+    const literal = opts?.literal === true;
 
     // Expand brace expressions (e.g. "*.{ts,tsx}") into multiple --include flags,
     // because spawn does not invoke a shell so brace expansion never happens.
@@ -1036,10 +1126,10 @@ export class ToolService {
     let binArgs: string[];
     if (process.platform === 'win32') {
       bin = 'findstr';
-      binArgs = ['/s', '/n', '/r', pattern, ...this.expandGlobForFindstr(includeGlob, basePath)];
+      binArgs = ['/s', '/n', literal ? '/l' : '/r', pattern, ...this.expandGlobForFindstr(includeGlob, basePath)];
     } else {
       bin = 'grep';
-      binArgs = ['-rn', ...includeArgs, '--', pattern, basePath];
+      binArgs = ['-rn', ...(literal ? ['-F'] : []), ...includeArgs, '--', pattern, basePath];
     }
 
     return new Promise((resolve) => {
@@ -1135,7 +1225,10 @@ export class ToolService {
     glob?: string,
     searchPath?: string
   ): Promise<{ status: string; filesModified: number; files: string[] }> {
-    const grepResult = await this.grepFiles(pattern, searchPath || '.', glob || '*.{ts,tsx,js,jsx,css,json}');
+    // literal: the replacement below is a literal split/join, so the search
+    // must be literal too — otherwise regex patterns find files the replace
+    // step then can't touch.
+    const grepResult = await this.grepFiles(pattern, searchPath || '.', glob || '*.{ts,tsx,js,jsx,css,json}', { literal: true });
     if (grepResult.startsWith('No matches') || grepResult.startsWith('Search timed')) {
       return { status: 'no_matches', filesModified: 0, files: [] };
     }
@@ -1194,8 +1287,14 @@ export class ToolService {
 
   private async runTests(command?: string, cwd?: string): Promise<{ stdout: string; exitCode: number }> {
     const effectiveRoot = getEffectiveProjectRoot();
-    const workDir = cwd ? path.join(effectiveRoot, cwd) : effectiveRoot;
+    // validatePath: a relative cwd like "../../" must not escape the project.
+    const workDir = cwd ? validatePath(cwd) : effectiveRoot;
     const cmd = command || 'npx tsc --noEmit --pretty false';
+    // spawnProcess uses shell:true on Windows — run_tests must pass the same
+    // security policy as run_shell or it becomes an allowlist bypass.
+    if (process.env.SOLVENT_ALLOW_SHELL !== 'true') {
+      this.assertCommandAllowed(cmd);
+    }
     const parts = cmd.split(/\s+/);
     const bin = parts[0] ?? 'npx';
     const binArgs = parts.slice(1);
@@ -1220,7 +1319,15 @@ export class ToolService {
 
   private async installPackage(packages: string[], cwd?: string): Promise<{ status: string; packages: string[] }> {
     const effectiveRoot = getEffectiveProjectRoot();
-    const workDir = cwd ? path.join(effectiveRoot, cwd) : effectiveRoot;
+    const workDir = cwd ? validatePath(cwd) : effectiveRoot;
+    // Package args reach a shell-spawned npm on Windows — restrict to the npm
+    // name/version charset and reject flag injection (leading '-').
+    const SAFE_PACKAGE = /^(@[a-z0-9~][\w.-]*\/)?[a-z0-9~][\w.-]*(@[\w.^~<>=+*-]+)?$/i;
+    for (const pkg of packages) {
+      if (typeof pkg !== 'string' || pkg.startsWith('-') || !SAFE_PACKAGE.test(pkg)) {
+        throw new Error(`install_package: invalid package name '${String(pkg).slice(0, 60)}'`);
+      }
+    }
     const { exitCode, stdout } = await this.spawnProcess('npm', ['install', ...packages], { cwd: workDir, timeoutMs: 120_000 });
     if (exitCode !== 0) throw new Error(`npm install failed: ${stdout.slice(0, 500)}`);
     return { status: 'success', packages };
@@ -1246,7 +1353,7 @@ export class ToolService {
 
   private async getProjectInfo(projectPath?: string): Promise<Record<string, unknown>> {
     const effectiveRoot = getEffectiveProjectRoot();
-    const basePath = projectPath ? path.join(effectiveRoot, projectPath) : effectiveRoot;
+    const basePath = projectPath ? validatePath(projectPath) : effectiveRoot;
     try {
       const pkg = JSON.parse(await fs.readFile(path.join(basePath, 'package.json'), 'utf-8')) as {
         name?: string; version?: string; scripts?: Record<string, string>;
@@ -1265,6 +1372,78 @@ export class ToolService {
       };
     } catch {
       return { error: `No package.json found at ${projectPath ?? 'project root'}` };
+    }
+  }
+
+  /**
+   * Validate a command against the security policy: command-substitution
+   * rejection, dangerous-pattern denylist, and per-stage allowlist + argv
+   * checks. Shared by run_shell and run_tests so neither path can bypass the
+   * policy. Callers gate on SOLVENT_ALLOW_SHELL themselves where opt-out is
+   * intended.
+   */
+  private assertCommandAllowed(command: string): void {
+    const normalizedCommand = command.trim().toLowerCase();
+
+    // Reject command substitution — it hides commands from the allowlist.
+    if (hasCommandSubstitution(command)) {
+      throw new Error(
+        `Command rejected by security policy: command substitution ($() or backticks) is not permitted.`
+      );
+    }
+
+    // First, check for dangerous commands (always blocked)
+    for (const dangerous of DANGEROUS_COMMANDS) {
+      if (normalizedCommand.includes(dangerous.toLowerCase())) {
+        throw new Error(
+          `Command rejected by security policy: Contains dangerous pattern '${dangerous}'. Set SOLVENT_ALLOW_SHELL=true to enable arbitrary command execution (not recommended).`
+        );
+      }
+    }
+
+    // Validate every pipeline stage's first token against the allowlist, and
+    // track a simulated cwd across chained stages so `cd` can't be used to
+    // walk the *real* shell's cwd outside the project root before a later
+    // stage reads/writes relative to it (e.g. `cd .. && cat ../../secret`).
+    // Every stage's own arguments and redirect targets are also resolved
+    // against that simulated cwd and rejected if they'd escape the root,
+    // which also blocks single-stage traversal with no `cd` at all
+    // (e.g. `cat ../../../etc/passwd`).
+    let simulatedCwd = getEffectiveProjectRoot();
+    for (const stage of splitPipelineStages(command)) {
+      const stageLower = stage.toLowerCase();
+      const allowed = ALLOWED_COMMAND_PREFIXES.some(prefix =>
+        stageLower.startsWith(prefix.toLowerCase()) || stageLower === prefix.trim().toLowerCase()
+      );
+      if (!allowed) {
+        throw new Error(
+          `Command rejected by security policy: pipeline stage '${stage.substring(0, 50)}${stage.length > 50 ? '...' : ''}' is not in the allowlist. Allowed commands: ${ALLOWED_COMMAND_PREFIXES.join(', ')}.`
+        );
+      }
+      rejectDangerousArgv(stage);
+
+      const cdMatch = /^cd(?:\s+(.*))?$/i.exec(stage.trim());
+      if (cdMatch) {
+        const arg = (cdMatch[1] ?? '').trim();
+        // Bare `cd`, `cd -`, and `cd ~` all resolve via $HOME/$OLDPWD in a
+        // real shell — none of which we control or can validate here — so
+        // they're rejected outright rather than risking an untracked escape.
+        if (!arg || arg === '-' || arg === '~' || arg.startsWith('~/')) {
+          throw new Error(
+            `Command rejected by security policy: 'cd' with no argument (or '~'/'-') is not permitted — it may resolve outside the project root via $HOME.`
+          );
+        }
+        const resolved = path.resolve(simulatedCwd, arg);
+        if (!isPathWithinRoot(resolved)) {
+          throw new Error(
+            `Command rejected by security policy: 'cd ${arg}' would move outside the permitted project root.`
+          );
+        }
+        simulatedCwd = resolved;
+        continue;
+      }
+
+      assertStageArgsWithinRoot(stage, simulatedCwd);
     }
   }
 
@@ -1323,38 +1502,7 @@ export class ToolService {
     }
 
     if (!allowArbitraryShell) {
-      const normalizedCommand = command.trim().toLowerCase();
-
-      // Reject command substitution — it hides commands from the allowlist.
-      if (hasCommandSubstitution(command)) {
-        throw new Error(
-          `Command rejected by security policy: command substitution ($() or backticks) is not permitted.`
-        );
-      }
-
-      // First, check for dangerous commands (always blocked)
-      for (const dangerous of DANGEROUS_COMMANDS) {
-        if (normalizedCommand.includes(dangerous.toLowerCase())) {
-          throw new Error(
-            `Command rejected by security policy: Contains dangerous pattern '${dangerous}'. Set SOLVENT_ALLOW_SHELL=true to enable arbitrary command execution (not recommended).`
-          );
-        }
-      }
-
-      // Validate every pipeline stage's first token against the allowlist.
-      const stages = splitPipelineStages(command);
-      for (const stage of stages) {
-        const stageLower = stage.toLowerCase();
-        const allowed = ALLOWED_COMMAND_PREFIXES.some(prefix =>
-          stageLower.startsWith(prefix.toLowerCase()) || stageLower === prefix.trim().toLowerCase()
-        );
-        if (!allowed) {
-          throw new Error(
-            `Command rejected by security policy: pipeline stage '${stage.substring(0, 50)}${stage.length > 50 ? '...' : ''}' is not in the allowlist. Allowed commands: ${ALLOWED_COMMAND_PREFIXES.join(', ')}.`
-          );
-        }
-        rejectDangerousArgv(stage);
-      }
+      this.assertCommandAllowed(command);
     }
 
     // Windows shell routing: prefer git-bash if present (agent writes POSIX
@@ -1415,6 +1563,8 @@ export class ToolService {
 
       let stdout = '';
       let stderr = '';
+      let stdoutTruncated = false;
+      let stderrTruncated = false;
       let timedOut = false;
 
       // Kill any command that runs longer than 3 minutes — protects against
@@ -1425,12 +1575,27 @@ export class ToolService {
         proc.kill();
       }, TIMEOUT_MS);
 
+      // Cap accumulated output — a verbose command (npm install, git log -p)
+      // can otherwise grow these strings unboundedly until the 3-minute
+      // timeout fires, putting memory pressure on the whole backend process.
+      const MAX_OUTPUT_BYTES = 512 * 1024; // 512KB per stream
+
       child.stdout.on('data', (data: Buffer) => {
-        stdout += data.toString();
+        if (stdout.length < MAX_OUTPUT_BYTES) {
+          stdout += data.toString();
+        } else if (!stdoutTruncated) {
+          stdout += '\n... (stdout truncated at 512KB)';
+          stdoutTruncated = true;
+        }
       });
 
       child.stderr.on('data', (data: Buffer) => {
-        stderr += data.toString();
+        if (stderr.length < MAX_OUTPUT_BYTES) {
+          stderr += data.toString();
+        } else if (!stderrTruncated) {
+          stderr += '\n... (stderr truncated at 512KB)';
+          stderrTruncated = true;
+        }
       });
 
       child.on('error', (err: Error) => {

@@ -1,22 +1,21 @@
 import { IProviderPlugin, ProviderHealth } from '../../types/plugins';
 import { ChatMessage, CompletionOptions } from '../../types/ai';
 import { config } from '../../config';
-import { logger } from '../../utils/logger';
 import { BaseOpenAIService } from '../../services/baseOpenAIService';
 import { OPENAI_COMPATIBLE_PROVIDERS } from '../../services/aiProviderFactory';
 
 export class DashScopeProviderPlugin extends BaseOpenAIService implements IProviderPlugin {
   readonly name = 'dashscope';
   protected baseUrl = OPENAI_COMPATIBLE_PROVIDERS.dashscope!.baseUrl;
-  protected apiKey!: string;
-  
+  protected apiKey: string = '';
+
   id = 'dashscope';
   description = 'Alibaba Cloud DashScope — Qwen3-Coder, Qwen3.5, Qwen-Max and more';
   version = '1.0.0';
   defaultModel = 'qwen3.6-plus';
   capabilities = {
     supportsVision: false,
-    supportsStreaming: false,
+    supportsStreaming: true,
     supportsEmbeddings: false,
     contextWindow: 131072,
     maxOutputTokens: 8192,
@@ -32,6 +31,10 @@ export class DashScopeProviderPlugin extends BaseOpenAIService implements IProvi
   }
 
   isReady(): boolean {
+    return this.isInitialized;
+  }
+
+  hasConfiguredKey(): boolean {
     return this.isInitialized && !!this.apiKey;
   }
 

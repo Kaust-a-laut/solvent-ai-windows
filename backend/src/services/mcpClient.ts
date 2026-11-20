@@ -18,12 +18,11 @@ export interface MCPToolDefinition {
 /**
  * MCPClientManager provides a bridge to Model Context Protocol servers.
  *
- * For now this is a stub that loads server configs and provides the tool
- * discovery interface. Full stdio transport integration requires the
- * @modelcontextprotocol/sdk package which may not be installed yet.
- *
- * When the SDK is available (`npm i @modelcontextprotocol/sdk`), uncomment
- * the transport code below for full tool calling support.
+ * isMCPTool()/callTool() are wired into toolService's live tool-dispatch
+ * path, so the class itself is not dead code. What's missing is a caller of
+ * registerServer()/registerServers() — no config loader currently wires any
+ * MCP servers in, so in practice this stays inert (zero registered servers,
+ * zero discovered tools) until one is added.
  */
 export class MCPClientManager {
   private serverConfigs: Map<string, MCPServerConfig> = new Map();

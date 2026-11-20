@@ -1,6 +1,29 @@
 export {};
 
 declare global {
+  interface SupervisorActivity {
+    [key: string]: unknown;
+  }
+
+  interface SupervisorNudge {
+    type: string;
+    message: string;
+  }
+
+  interface MissionContext {
+    mission_id: number;
+    goal: string;
+    actions: SupervisorActivity[];
+    status: string;
+  }
+
+  interface SystemTelemetry {
+    cpu?: number;
+    mem?: number;
+    net?: number;
+    disk?: number;
+  }
+
   interface Window {
     electron?: {
       platform: string;
@@ -12,22 +35,26 @@ declare global {
       syncNotepadToDisk: (content: string) => void;
       onNotepadUpdated: (callback: (content: string) => void) => () => void;
       // Supervisor
-      reportActivity: (activity: any) => void;
-      logAction: (action: any) => void;
+      reportActivity: (activity: SupervisorActivity) => void;
+      logAction: (action: SupervisorActivity) => void;
       setMissionGoal: (goal: string) => void;
-      getMissionContext: () => Promise<any>;
-      onSupervisorNudge: (callback: (nudge: any) => void) => () => void;
-      onSupervisorData: (callback: (data: any) => void) => () => void;
-      onSystemTelemetry: (callback: (stats: any) => void) => () => void;
+      getMissionContext: () => Promise<MissionContext>;
+      onSupervisorNudge: (callback: (nudge: SupervisorNudge) => void) => () => void;
+      onSupervisorData: (callback: (data: SupervisorActivity) => void) => () => void;
+      onSystemTelemetry: (callback: (stats: SystemTelemetry) => void) => () => void;
       // Window Sync
       setMode: (mode: string) => void;
       onModeChanged: (callback: (mode: string) => void) => () => void;
-      getSessionSecret: () => Promise<string>;
+      // null in dev — the renderer falls back to the backend's /dev-secret
+      getSessionSecret: () => Promise<string | null>;
+      // Performance tier detection
+      getDeviceCapability?: () => Promise<{ ramGB: number; cpuCores: number; hasDiscreteGPU: boolean }>;
+      setTelemetryInterval?: (ms: number) => void;
       model: {
-        execute: (tier: string, messages: any[]) => Promise<any>;
-        getPreference: (tier: string) => Promise<any>;
-        setPreference: (tier: string, prefs: any) => Promise<void>;
-        getUsage: () => Promise<any>;
+        execute: (tier: string, messages: Array<{ role: string; content: string }>) => Promise<unknown>;
+        getPreference: (tier: string) => Promise<unknown>;
+        setPreference: (tier: string, prefs: Record<string, unknown>) => Promise<void>;
+        getUsage: () => Promise<unknown>;
         resetUsage: () => Promise<void>;
         onStatusChange: (callback: (status: { status: string, model: string }) => void) => () => void;
       };

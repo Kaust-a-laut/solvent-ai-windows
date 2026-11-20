@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useCallback } from 'react';
+import React, { useEffect, useRef, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '../../lib/utils';
 import { ConversationBubble } from './ConversationBubble';
@@ -85,8 +85,25 @@ export const ConversationFeed: React.FC<ConversationFeedProps> = ({
     bubbles.forEach(el => observerRef.current?.observe(el));
   }, [messages.length]);
 
-  // Group messages by round for separators
-  let lastRound = 0;
+  // Round separators: one precedes the first non-user message of each round
+  // ≥ 2. Derived purely (mutating a local during render breaks under
+  // StrictMode/partial re-renders), and O(n) instead of a filter per message.
+  const roundMarkers = useMemo(() => {
+    const agentCount = Math.max(1, agentConfigs.length);
+    const markers = new Map<string, number>(); // msg.id -> round to label
+    let nonUserCount = 0;
+    let lastShownRound = 0;
+    for (const msg of messages) {
+      if (msg.agentId === 'user') continue;
+      nonUserCount++;
+      const round = Math.ceil(nonUserCount / agentCount);
+      if (round > lastShownRound && round > 1) {
+        markers.set(msg.id, round);
+        lastShownRound = round;
+      }
+    }
+    return markers;
+  }, [messages, agentConfigs.length]);
 
   return (
     <div ref={feedRef} className="space-y-4">
@@ -111,17 +128,8 @@ export const ConversationFeed: React.FC<ConversationFeedProps> = ({
       )}
 
       <AnimatePresence initial={false}>
-        {messages.map((msg, idx) => {
-          // Check if we need a round separator
-          const currentMsgRound = Math.ceil(
-            messages.filter((m, i) => i <= idx && m.agentId !== 'user').length /
-            Math.max(1, agentConfigs.length)
-          );
-          let showRoundSep = false;
-          if (currentMsgRound > lastRound && currentMsgRound > 1 && msg.agentId !== 'user') {
-            showRoundSep = true;
-            lastRound = currentMsgRound;
-          }
+        {messages.map((msg) => {
+          const sepRound = roundMarkers.get(msg.id);
 
           // Determine highlight state for hover-to-highlight
           let isHighlighted: boolean | undefined;
@@ -131,7 +139,7 @@ export const ConversationFeed: React.FC<ConversationFeedProps> = ({
 
           return (
             <React.Fragment key={msg.id}>
-              {showRoundSep && (
+              {sepRound !== undefined && (
                 <motion.div
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
@@ -139,7 +147,7 @@ export const ConversationFeed: React.FC<ConversationFeedProps> = ({
                 >
                   <div className="flex-1 h-px bg-white/5" />
                   <span className="text-[11px] font-black uppercase tracking-widest text-slate-400">
-                    Round {currentMsgRound}
+                    Round {sepRound}
                   </span>
                   <div className="flex-1 h-px bg-white/5" />
                 </motion.div>

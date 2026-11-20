@@ -1,10 +1,22 @@
 import React, { useEffect, useState } from 'react';
 import { API_BASE_URL } from '../../lib/config';
-import { Activity, Clock, Database, DatabaseBackup, Hash, AlertTriangle, ShieldAlert } from 'lucide-react';
-import { cn } from '../../lib/utils';
+
+interface TraceItem {
+  id: string;
+  score?: number;
+  reason?: string;
+}
+
+interface DebugTrace {
+  timestamp: string | number;
+  sessionId?: string;
+  active?: TraceItem[];
+  suppressed?: TraceItem[];
+  budget?: { used: number; limit: number };
+}
 
 export const DebugTab = () => {
-  const [traces, setTraces] = useState<any[]>([]);
+  const [traces, setTraces] = useState<DebugTrace[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -54,7 +66,7 @@ export const DebugTab = () => {
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Active Context</span>
                 <div className="bg-black/20 rounded-lg p-2 text-xs text-slate-300 font-mono">
                   {trace.active?.length || 0} items retrieved
-                  {trace.active?.map((item: any, idx: number) => (
+                  {trace.active?.map((item, idx) => (
                     <div key={idx} className="mt-1 truncate text-[10px] text-slate-400">
                       [{item.score?.toFixed(2) || 'N/A'}] {item.id}
                     </div>
@@ -66,7 +78,7 @@ export const DebugTab = () => {
                 <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Suppressed Context</span>
                 <div className="bg-black/20 rounded-lg p-2 text-xs text-slate-300 font-mono">
                   {trace.suppressed?.length || 0} items excluded
-                  {trace.suppressed?.map((item: any, idx: number) => (
+                  {trace.suppressed?.map((item, idx) => (
                     <div key={idx} className="mt-1 truncate text-[10px] text-rose-400/80">
                       {item.reason}: {item.id}
                     </div>

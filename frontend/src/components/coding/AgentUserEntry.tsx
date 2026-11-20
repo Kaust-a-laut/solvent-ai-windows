@@ -9,9 +9,6 @@ interface Props {
 }
 
 export const AgentUserEntry: React.FC<Props> = ({ msg, onEditAndRerun }) => {
-  const isBuildCheck = msg.content.startsWith('[build_check');
-  if (isBuildCheck) return null;
-
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState(msg.content);
   const editRef = useRef<HTMLTextAreaElement>(null);
@@ -19,6 +16,10 @@ export const AgentUserEntry: React.FC<Props> = ({ msg, onEditAndRerun }) => {
   useEffect(() => {
     if (editing) editRef.current?.focus();
   }, [editing]);
+
+  // After the hooks — an early return above them violates the Rules of Hooks
+  // (hook order must be identical on every render).
+  if (msg.content.startsWith('[build_check')) return null;
 
   const handleStartEdit = () => {
     setEditText(msg.content);

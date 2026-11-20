@@ -214,7 +214,7 @@ Be direct, specific, and actionable. Avoid restating the initial synthesis verba
     logger.info(`[Orchestrator] Running analyzeFindings for missionType: ${missionType}`);
     const analysis = await provider.complete(
       [{ role: 'user', content: prompt }],
-      { model }
+      { model, shouldSearch: false }
     );
     return analysis;
   }
@@ -281,7 +281,7 @@ Be direct, specific, and actionable. Avoid restating the initial synthesis verba
         priority: priority as 'cost' | 'performance' | 'reliability',
         requirements: {
           minContext: undefined, // Determine from goal if needed
-          supportsVision: goal.toLowerCase().includes('image') || goal.toLowerCase().includes('vision'),
+          supportsVision: false, // Plain-text mission goals must not be hijacked to vision-only providers
           inputTokens,
           outputTokens
         }
@@ -292,36 +292,36 @@ Be direct, specific, and actionable. Avoid restating the initial synthesis verba
 
     logger.info(`[Orchestrator] Using provider: ${provider.id}, model: ${model}`);
 
-    try {
-      // Fetch relevant project memory to give all agents shared context
-      const relevantMemories = await vectorService.search(goal, 3).catch(() => []);
-      const memoryContext = relevantMemories.filter(m => m.score > 0.6).length > 0
-        ? '\n\nPROJECT MEMORY (established decisions from past sessions):\n' +
-          relevantMemories.filter(m => m.score > 0.6).map(m => `• ${m.metadata.text}`).join('\n')
-        : '';
+    // Fetch relevant project memory to give all agents shared context
+    const relevantMemories = await vectorService.search(goal, 3).catch(() => []);
+    const memoryContext = relevantMemories.filter(m => m.score > 0.6).length > 0
+      ? '\n\nPROJECT MEMORY (established decisions from past sessions):\n' +
+        relevantMemories.filter(m => m.score > 0.6).map(m => `• ${m.metadata.text}`).join('\n')
+      : '';
 
-      // Phase 1: Parallel Agent Analysis
-      const expertOpinions = await Promise.all(template.agents.map(async (agent) => {
-        // Per-agent provider selection
-        let agentProvider;
-        if (agent.provider) {
-          agentProvider = await pluginManager.resolveProvider(agent.provider);
-        } else {
-          // For agents, we can reuse the main provider or select based on agent specialty
-          agentProvider = provider;
-        }
+    // Phase 1: Parallel Agent Analysis — scope circuit breaker recording to each provider's own complete() call
+    const expertOpinions = await Promise.all(template.agents.map(async (agent) => {
+      const agentProvider = agent.provider
+        ? await pluginManager.resolveProvider(agent.provider)
+        : provider;
 
-        const agentModel = agent.model || model;
+      const agentModel = agent.model || (agent.provider ? (agentProvider.defaultModel || model) : model);
 
+      try {
         const response = await agentProvider.complete(
           [{ role: 'user', content: `GOAL: ${goal}${memoryContext}\n\n${agent.instruction}` }],
-          { model: agentModel }
+          { model: agentModel, shouldSearch: false }
         );
+        await circuitBreaker.recordSuccess(agentProvider.id).catch(() => {});
         return { id: agent.id, agent: agent.name, opinion: response };
-      }));
+      } catch (err) {
+        await circuitBreaker.recordFailure(agentProvider.id).catch(() => {});
+        throw err;
+      }
+    }));
 
-      // Phase 2: Anchored Synthesis Pass
-      const synthesisPrompt = `You are a senior technical synthesizer. You have received parallel expert analysis from ${template.agents.length} specialists regarding: "${goal}"
+    // Phase 2: Anchored Synthesis Pass
+    const synthesisPrompt = `You are a senior technical synthesizer. You have received parallel expert analysis from ${template.agents.length} specialists regarding: "${goal}"
 
 EXPERT OPINIONS:
 ${expertOpinions.map(o => `=== ${o.agent.toUpperCase()} ===\n${o.opinion}`).join('\n\n')}
@@ -334,32 +334,31 @@ ${template.synthesisInstruction}
 
 IMPORTANT: Reference each agent's closing verdict or finding explicitly. Surface any tensions or contradictions between the agents and resolve them — do not average conflicting positions. Then add a VERIFICATION section that marks each invariant as PASSED or FAILED with a one-sentence explanation.`;
 
-      const synthesis = await provider.complete(
+    let synthesis: string;
+    try {
+      synthesis = await provider.complete(
         [{ role: 'user', content: synthesisPrompt }],
-        { model }
+        { model, shouldSearch: false }
       );
-
-      // 3. Success Telemetry
-      await circuitBreaker.recordSuccess(provider.id);
-
-      // Phase 3: Memory Persistence
-      await vectorService.addEntry(synthesis, {
-        type: 'mission_synthesis',
-        templateId,
-        goal,
-        timestamp: new Date().toISOString()
-      });
-
-      return {
-        goal,
-        expertOpinions,
-        synthesis
-      };
+      await circuitBreaker.recordSuccess(provider.id).catch(() => {});
     } catch (error) {
-      // Record failure so the circuit breaker can open if this provider keeps failing
-      await circuitBreaker.recordFailure(provider.id);
+      await circuitBreaker.recordFailure(provider.id).catch(() => {});
       throw error;
     }
+
+    // Phase 3: Memory Persistence (never blame LLM provider circuit breaker for memory storage errors)
+    await vectorService.addEntry(synthesis, {
+      type: 'mission_synthesis',
+      templateId,
+      goal,
+      timestamp: new Date().toISOString()
+    });
+
+    return {
+      goal,
+      expertOpinions,
+      synthesis
+    };
   }
 }
 

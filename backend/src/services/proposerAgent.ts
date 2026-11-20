@@ -75,7 +75,7 @@ Output STRICT JSON only:
           provider = await AIProviderFactory.getProvider(p);
           if (provider.isReady()) {
             model = p === 'groq' ? 'llama-3.1-8b-instant' :
-                    p === 'fireworks' ? 'accounts/fireworks/models/llama-v3p1-8b-instruct' :
+                    p === 'fireworks' ? 'accounts/fireworks/models/gpt-oss-120b' :
                     'meta-llama/llama-3.1-8b-instruct';
             break;
           }

@@ -43,15 +43,18 @@ Respond with JSON only:
       const response = await provider.complete([
         { role: 'system', content: 'You are a relevance scorer. Output JSON only.' },
         { role: 'user', content: prompt }
-      ], { model: RERANK_MODEL, temperature: 0, jsonMode: true });
+      ], { model: RERANK_MODEL, temperature: 0, jsonMode: true, shouldSearch: false });
 
-      const cleaned = response.replace(/ᚫ[\s\S]*?<\/think>/g, '').replace(/```json/g, '').replace(/```/g, '').trim();
+      const cleaned = response.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/```json/gi, '').replace(/```/g, '').trim();
       const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
       const parsed = JSON.parse(jsonMatch ? jsonMatch[0] : cleaned);
 
       const scoreMap = new Map<string, number>();
-      for (const s of parsed.scores || []) {
-        scoreMap.set(s.id, Math.max(0, Math.min(10, s.relevance)));
+      for (const s of Array.isArray(parsed?.scores) ? parsed.scores : []) {
+        const rel = Number(s?.relevance);
+        if (s?.id && Number.isFinite(rel)) {
+          scoreMap.set(String(s.id), Math.max(0, Math.min(10, rel)));
+        }
       }
 
       return candidates

@@ -45,7 +45,7 @@ interface TabButtonProps {
   shortcut?: string;
 }
 
-export const TabButton = ({ id, label, icon: Icon, isActive, onClick, shortcut }: TabButtonProps) => (
+export const TabButton = ({ label, icon: Icon, isActive, onClick, shortcut }: TabButtonProps) => (
   <button
     onClick={onClick}
     className={cn(

@@ -47,6 +47,12 @@ export default defineConfig({
         target: process.env.VITE_BACKEND_URL || 'http://localhost:3001',
         changeOrigin: true,
         secure: false,
+        // Same-origin GETs carry no Origin header, but the backend's
+        // /dev-secret hardening requires one from the CORS allowlist —
+        // inject it so the browser-dev auth handshake can succeed.
+        headers: {
+          Origin: 'http://localhost:5173',
+        },
       },
     },
     headers: {
@@ -57,6 +63,12 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     globals: true,
-    setupFiles: [],
+    setupFiles: ['./src/test/setup.ts'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html'],
+      include: ['src/**/*.{ts,tsx}'],
+      exclude: ['src/**/*.{test,spec}.{ts,tsx}', 'src/test/**', 'src/types/**', 'src/**/*.d.ts'],
+    },
   },
 })

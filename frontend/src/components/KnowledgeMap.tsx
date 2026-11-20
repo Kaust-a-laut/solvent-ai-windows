@@ -169,7 +169,7 @@ export const KnowledgeMap = () => {
          select(event.currentTarget).select("circle.outer-glow").attr("r", 14).attr("opacity", 0.4);
          setHoveredNode(d);
       })
-      .on("mouseout", (event, d) => {
+      .on("mouseout", (event) => {
          select(event.currentTarget).select("circle.outer-glow").attr("r", 10).attr("opacity", 0.2);
          setHoveredNode(null);
       });

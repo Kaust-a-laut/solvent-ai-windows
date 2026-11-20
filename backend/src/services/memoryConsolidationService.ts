@@ -63,7 +63,7 @@ export class MemoryConsolidationService {
       const summary = await groq.complete([
         { role: 'system', content: 'You are a technical archivist.' },
         { role: 'user', content: prompt }
-      ], { model: 'llama-3.3-70b-versatile', temperature: 0.1 });
+      ], { model: 'llama-3.3-70b-versatile', temperature: 0.1, shouldSearch: false });
 
       logger.info(`[Memory] Consolidating segment for mode: ${mode}`);
       
@@ -122,25 +122,25 @@ export class MemoryConsolidationService {
       const res = await groq.complete([
         { role: 'system', content: 'You are the Memory Architect. You detect new knowledge, links, AND contradictions.' },
         { role: 'user', content: prompt }
-      ], { model: 'llama-3.3-70b-versatile', temperature: 0, jsonMode: true });
+      ], { model: 'llama-3.3-70b-versatile', temperature: 0, jsonMode: true, shouldSearch: false });
 
-      const cleaned = res.replace(/<think>[\s\S]*?<\/think>/g, '').replace(/```json/g, '').replace(/```/g, '').trim();
+      const cleaned = res.replace(/<think>[\s\S]*?<\/think>/gi, '').replace(/```json/gi, '').replace(/```/g, '').trim();
       const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
       const analysis = JSON.parse(jsonMatch ? jsonMatch[0] : cleaned);
 
-      // Dynamic import to avoid circular dependency
-      const { toolService } = require('./toolService');
-
       let newMemoryId: string | undefined;
 
-      // 2. Crystallize New Memory
+      // 2. Crystallize New Memory — align 'project_rule' with 'permanent_rule' used by queries
       if (analysis.isWorthRemembering && analysis.conciseStatement) {
-        const importance = Math.max(1, Math.min(10, analysis.importance || 5));
+        const importance = Math.max(1, Math.min(10, Number(analysis.importance) || 5));
+        const normalizedType = analysis.category === 'project_rule'
+          ? 'permanent_rule'
+          : (analysis.category || 'technical_fact');
         newMemoryId = await vectorService.addEntry(analysis.conciseStatement, {
-          type: analysis.category || 'technical_fact',
+          type: normalizedType,
           tier: 'crystallized',
-          tags: analysis.tags || [],
-          links: analysis.links || [],
+          tags: Array.isArray(analysis.tags) ? analysis.tags : [],
+          links: Array.isArray(analysis.links) ? analysis.links : [],
           confidence: 'HIGH',
           source: 'chat',
           importance
@@ -182,8 +182,12 @@ export class MemoryConsolidationService {
    */
   async compressOlderMemories() {
     logger.info('[Memory] Starting compression of older episodic memories...');
+    if (typeof vectorService.waitUntilReady === 'function') {
+      await vectorService.waitUntilReady();
+    }
     const allRecent = vectorService.getRecentEntries(500);
     const olderEpisodic = allRecent.filter(m => 
+      m.metadata.status !== 'deprecated' &&
       m.metadata.tier === 'episodic' && 
       (Date.now() - new Date(m.metadata.createdAt || 0).getTime()) > 1000 * 60 * 60 * 24 * 3 // Older than 3 days
     );
@@ -205,7 +209,7 @@ export class MemoryConsolidationService {
       const summary = await groq.complete([
         { role: 'system', content: 'You are a technical archivist.' },
         { role: 'user', content: prompt }
-      ], { model: 'llama-3.3-70b-versatile', temperature: 0.1 });
+      ], { model: 'llama-3.3-70b-versatile', temperature: 0.1, shouldSearch: false });
 
       // Store the compressed summary
       await vectorService.addEntry(summary, {
@@ -236,7 +240,12 @@ export class MemoryConsolidationService {
     // Trigger compression of older memories first
     await this.compressOlderMemories().catch(e => logger.error('[Memory] Compression during Amnesia Cycle failed', e));
 
-    const recentEntries = await vectorService.getRecentEntries(200);
+    if (typeof vectorService.waitUntilReady === 'function') {
+      await vectorService.waitUntilReady();
+    }
+    const recentEntries = vectorService
+      .getRecentEntries(200)
+      .filter(m => m.metadata.status !== 'deprecated');
     const content = recentEntries
       .map(m => `[TYPE: ${m.metadata.type}] ${m.metadata.text}`)
       .join('\n---\n');
@@ -314,9 +323,9 @@ export class MemoryConsolidationService {
           return result;
 
         } catch (err: unknown) {
-          const error = err as Error;
+          const errMsg = err instanceof Error ? err.message : String(err);
           attempts++;
-          const isRateLimit = error.message.includes('429') || error.message.includes('quota');
+          const isRateLimit = errMsg.includes('429') || errMsg.toLowerCase().includes('quota');
           
           if (isRateLimit && attempts < maxProviderAttempts) {
             const delay = 2000 * attempts;
@@ -325,7 +334,7 @@ export class MemoryConsolidationService {
             continue;
           }
 
-          logger.warn(`[Memory] Amnesia Cycle failed with ${providerInfo.name}: ${error.message}`);
+          logger.warn(`[Memory] Amnesia Cycle failed with ${providerInfo.name}: ${errMsg}`);
           break; // Switch to next provider
         }
       }

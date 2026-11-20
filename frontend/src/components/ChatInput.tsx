@@ -1,7 +1,8 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Send, Image as ImageIcon, Mic, MicOff, X, Loader2, Sparkles, Paperclip, FileText, ChevronUp, ChevronDown, Brain, Plus, Globe, FolderOpen } from 'lucide-react';
+import { Send, Image as ImageIcon, Mic, X, Loader2, Paperclip, FileText, Brain, Plus, Globe, FolderOpen } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
+import { useShallow } from 'zustand/react/shallow';
 import { useSpeechToText } from '../hooks/useSpeechToText';
 import { cn } from '../lib/utils';
 import { fetchWithRetry } from '../lib/api-client';
@@ -25,13 +26,28 @@ interface ChatInputProps {
 }
 
 export const ChatInput = ({ compact = false }: ChatInputProps) => {
-  const { sendMessage, generateImageAction, isProcessing, addMessage, deviceInfo, thinkingModeEnabled, setThinkingModeEnabled, currentMode, selectedCloudModel, selectedLocalModel, globalProvider, browserInjectedContext, setBrowserInjectedContext, pendingPrompt, setPendingPrompt } = useAppStore();
+  const { sendMessage, isProcessing, addMessage, deviceInfo, thinkingModeEnabled, setThinkingModeEnabled, currentMode, selectedCloudModel, selectedLocalModel, globalProvider, browserInjectedContext, setBrowserInjectedContext, pendingPrompt, setPendingPrompt } = useAppStore(
+    useShallow((state) => ({
+      sendMessage: state.sendMessage,
+      isProcessing: state.isProcessingByMode[state.currentMode] ?? false,
+      addMessage: state.addMessage,
+      deviceInfo: state.deviceInfo,
+      thinkingModeEnabled: state.thinkingModeEnabled,
+      setThinkingModeEnabled: state.setThinkingModeEnabled,
+      currentMode: state.currentMode,
+      selectedCloudModel: state.selectedCloudModel,
+      selectedLocalModel: state.selectedLocalModel,
+      globalProvider: state.globalProvider,
+      browserInjectedContext: state.browserInjectedContext,
+      setBrowserInjectedContext: state.setBrowserInjectedContext,
+      pendingPrompt: state.pendingPrompt,
+      setPendingPrompt: state.setPendingPrompt,
+    }))
+  );
   const [input, setInput] = useState('');
   const [showMenu, setShowMenu] = useState(false);
-  const [uploadMode, setUploadMode] = useState<'image' | 'file'>('image');
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [attachedFile, setAttachedFile] = useState<{ name: string; url: string; originalName: string; content?: string } | null>(null);
-  const [isUploading, setIsUploading] = useState(false);
 
   const menuRef = useRef<HTMLDivElement>(null);
   const activeModel = globalProvider === 'local' ? selectedLocalModel : selectedCloudModel;
@@ -133,7 +149,6 @@ export const ChatInput = ({ compact = false }: ChatInputProps) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    setIsUploading(true);
     const formData = new FormData();
     formData.append('file', file);
 
@@ -156,7 +171,6 @@ export const ChatInput = ({ compact = false }: ChatInputProps) => {
       console.error('File upload failed:', error);
       addMessage({ role: 'assistant', content: 'Error: Could not upload file.' });
     } finally {
-      setIsUploading(false);
       e.target.value = '';
     }
   };
@@ -165,7 +179,6 @@ export const ChatInput = ({ compact = false }: ChatInputProps) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
-    setIsUploading(true);
     const textFiles: { path: string; content: string }[] = [];
 
     const readPromises = Array.from(files).map(file => {
@@ -198,7 +211,6 @@ export const ChatInput = ({ compact = false }: ChatInputProps) => {
       addMessage({ role: 'assistant', content: 'Error: No readable files found in folder.' });
     }
 
-    setIsUploading(false);
     e.target.value = '';
   };
 
@@ -260,7 +272,7 @@ export const ChatInput = ({ compact = false }: ChatInputProps) => {
           <div className="hud-corner bottom-0 right-0 border-b-2 border-r-2 rounded-br-[2rem] group-focus-within:border-jb-purple/40 transition-colors" />
 
           <div className={cn(
-            "liquid-input flex items-center gap-2 relative z-10 overflow-visible rounded-[2rem] border border-white/10",
+            "liquid-input flex items-center gap-2 relative z-10 overflow-visible rounded-[2rem] border border-white/[0.16] bg-white/[0.04]",
             compact ? "p-1 px-3" : (deviceInfo.isMobile ? "p-1.5 px-3" : "p-2 px-4")
           )}>
             {/* Unified Action Menu */}
@@ -374,16 +386,14 @@ export const ChatInput = ({ compact = false }: ChatInputProps) => {
                   <Mic size={deviceInfo.isMobile ? 16 : 18} className={cn("transition-colors", isListening ? "text-rose-500 animate-pulse" : "hover:text-jb-accent")} />
                 </button>
               )}
-              <motion.button 
+              <motion.button
                 whileHover={{ scale: 1.05 }}
                 whileTap={{ scale: 0.95 }}
                 onClick={handleSend}
                 disabled={(!input.trim() && !selectedImage && !attachedFile) || isProcessing}
                 className={cn(
-                  "bg-black/40 border border-white/5 rounded-2xl flex items-center justify-center disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-2xl button-glow-hover font-black uppercase tracking-widest",
-                  compact ? "w-8 h-8" : (deviceInfo.isMobile ? "w-10 h-10" : "px-6 h-11"),
-                  compact ? "text-[11px]" : "text-[11px]",
-                  "text-jb-accent hover:text-white hover:border-jb-accent/50"
+                  "cta-primary flex items-center justify-center font-black uppercase tracking-widest",
+                  compact ? "w-8 h-8 text-[11px]" : (deviceInfo.isMobile ? "w-10 h-10 text-[11px]" : "px-6 h-11 text-[11px]")
                 )}
               >
                 {isProcessing ? <Loader2 size={14} className="animate-spin text-jb-purple" /> : (compact || deviceInfo.isMobile ? <Send size={compact ? 12 : 16} fill="currentColor" /> : "Send")}

@@ -255,7 +255,26 @@ export class PluginManager {
   }
 
   getRegistry(): PluginRegistry {
-    return { ...this.registry }; // Return a copy to prevent external mutations
+    return {
+      providers: new Map(this.registry.providers),
+      tools: new Map(this.registry.tools),
+    };
+  }
+
+  /**
+   * Look up a specific provider plugin by ID without silently falling back to a
+   * different provider. Use this whenever a caller pairs the provider with a
+   * provider-specific model ID, API key, or capability (e.g., Gemini vision).
+   */
+  getExactProvider(id: string): IProviderPlugin {
+    const provider = this.registry.providers.get(id);
+    if (!provider) {
+      throw new Error(`Provider '${id}' is not registered.`);
+    }
+    if (!provider.isReady()) {
+      throw new Error(`Provider '${id}' is not ready.`);
+    }
+    return provider;
   }
 
   /**
@@ -345,12 +364,24 @@ export class PluginManager {
   async reload(): Promise<void> {
     logger.info('[PluginManager] Reloading all plugins...');
 
-    // Clear current registry
-    this.registry.providers.clear();
-    this.registry.tools.clear();
+    const oldProviders = Array.from(this.registry.providers.values());
+    const oldTools = Array.from(this.registry.tools.values());
 
-    // Reload all plugins
-    await this.loadAllPlugins();
+    // Load into a fresh registry and swap atomically so concurrent callers
+    // never observe an empty registry mid-reload.
+    const previousRegistry = this.registry;
+    this.registry = { providers: new Map(), tools: new Map() };
+    try {
+      await this.loadAllPlugins();
+    } catch (err) {
+      this.registry = previousRegistry;
+      throw err;
+    }
+
+    await Promise.allSettled([
+      ...oldProviders.map(p => p.dispose?.()),
+      ...oldTools.map(t => t.dispose?.()),
+    ]);
 
     logger.info('[PluginManager] Plugins reloaded successfully');
   }

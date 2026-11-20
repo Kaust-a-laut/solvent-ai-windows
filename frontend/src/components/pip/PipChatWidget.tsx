@@ -8,7 +8,7 @@ export const PipChatWidget: React.FC = () => {
   const { messages, isProcessing, sendMessage } = useAppStore(
     useShallow((s) => ({
       messages: s.messages,
-      isProcessing: s.isProcessing,
+      isProcessing: s.isProcessingByMode[s.currentMode] ?? false,
       sendMessage: s.sendMessage,
     }))
   );

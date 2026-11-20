@@ -141,7 +141,7 @@ export const FolderPickerModal: React.FC<FolderPickerModalProps> = ({ fileName, 
         {/* Fallback note — shown when folder list fetch failed */}
         {fetchFailed && (
           <p className="px-4 pb-1 text-[11px] text-amber-400/60">
-            Couldn't load folders — will import to project root
+            Couldn&apos;t load folders — will import to project root
           </p>
         )}
 

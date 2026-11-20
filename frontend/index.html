@@ -8,7 +8,16 @@
     <meta name="theme-color" content="#020205" />
     <link rel="preload" href="/fonts/geist-variable.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/fonts/inter-tight-variable.woff2" as="font" type="font/woff2" crossorigin>
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: https://js.puter.com https://*.puter.com *; connect-src 'self' http://localhost:3001 ws://localhost:3001 ws://localhost:5173 http://localhost:5173 https://api.puter.com https://*.puter.com *; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; worker-src 'self' blob:; frame-src 'self' blob: https: http:; child-src 'self' blob:; font-src 'self' data:; img-src 'self' data: blob: https://grainy-gradients.vercel.app *;">
+    <!--
+      Content-Security-Policy — scoped to the domains the app actually uses.
+      'unsafe-inline'/'unsafe-eval' in script-src are required for Vite HMR (dev),
+      Monaco editor workers, and the Puter SDK. They are NOT in default-src so
+      only script-src/style-src inherit them. No bare '*' wildcards remain:
+      script-src/connect-src/frame-src list explicit origins only. img-src stays
+      broad (http:/https:) because the Notepad LinkNode renders OpenGraph images
+      and favicons from arbitrary user-pinned URLs (images cannot execute JS).
+    -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: https://js.puter.com https://*.puter.com https://cdn.jsdelivr.net; connect-src 'self' http://localhost:3001 ws://localhost:3001 http://127.0.0.1:3001 ws://127.0.0.1:3001 http://localhost:5173 ws://localhost:5173 https://api.puter.com https://*.puter.com wss://*.puter.com; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; worker-src 'self' blob:; frame-src 'self' blob: http://localhost:* https://localhost:*; child-src 'self' blob:; font-src 'self' data:; img-src 'self' data: blob: http: https:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none';">
     <script src="https://js.puter.com/v2/"></script>
     <title>Solvent AI</title>
   </head>

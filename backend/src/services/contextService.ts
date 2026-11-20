@@ -3,8 +3,7 @@ import { vectorService } from './vectorService';
 import { getModelContextLimit } from '../constants/models';
 import { memoryMetrics } from '../utils/memoryMetrics';
 import { estimateTokens, getContextBudget } from '../utils/tokenEstimator';
-import { BM25Index, reciprocalRankFusion } from '../utils/bm25';
-import { statSync } from 'fs';
+import { stat } from 'fs/promises';
 import { join } from 'path';
 import { reranker } from './reranker';
 import { coreMemory } from './coreMemory';
@@ -153,33 +152,20 @@ export function getModeRetrievalProfile(mode?: string): { countDelta: number; mi
   return MODE_RETRIEVAL_PROFILES[mode ?? ''] ?? { countDelta: 0, minScoreDelta: 0 };
 }
 
-// Shared BM25 index instance — incrementally updated when vector memory changes
-const bm25Index = new BM25Index();
-let bm25IndexedIds = new Set<string>();
+// Hybrid keyword + vector fusion now happens inside vectorService.search(),
+// so there is no second BM25 index to keep in sync on the hot chat path.
 
-/**
- * Incrementally sync the BM25 index with vector memory.
- * Adds new documents and removes deleted ones instead of full rebuild.
- */
-function ensureBM25Index() {
-  const allDocs = vectorService.getAllTexts();
-  const currentIds = new Set(allDocs.map(d => d.id));
+// Word-boundary negation detection (substring checks matched 'node', 'json', 'note', ...)
+const NEGATION_RE = /\b(no|don't|dont|do not|never|avoid|stop|not|must not|shouldn't|should not)\b/i;
+const CONFLICT_STOP_WORDS = new Set(['the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'her', 'was', 'one', 'our', 'had', 'with', 'have', 'this', 'will', 'from', 'they', 'that', 'what', 'been', 'when', 'there', 'make', 'like', 'into', 'then', 'some', 'him', 'its', 'your', 'just', 'should', 'about', 'more', 'never', 'avoid', 'stop']);
+function conflictTokens(text: string): Set<string> {
+  return new Set(text.toLowerCase().split(/\W+/).filter(w => w.length >= 4 && !CONFLICT_STOP_WORDS.has(w)));
+}
 
-  // Remove deleted documents
-  for (const id of bm25IndexedIds) {
-    if (!currentIds.has(id)) {
-      bm25Index.removeDocument(id);
-      bm25IndexedIds.delete(id);
-    }
-  }
-
-  // Add new documents
-  for (const doc of allDocs) {
-    if (!bm25IndexedIds.has(doc.id)) {
-      bm25Index.addDocument(doc);
-      bm25IndexedIds.add(doc.id);
-    }
-  }
+/** Max characters of a memory shown in the UI provenance payload (the LLM gets the full text). */
+const PROVENANCE_PREVIEW_CHARS = 150;
+function previewText(text: string): string {
+  return text.length > PROVENANCE_PREVIEW_CHARS ? text.substring(0, PROVENANCE_PREVIEW_CHARS) + '...' : text;
 }
 
 // --- Mode-Specific Instructions (Item 1) ---
@@ -302,12 +288,13 @@ function getConversationState(messages: Array<{ role: string; content?: string }
 
 // --- Actionable Memory Formatting (Item 3) ---
 
-function formatMemoryContext(activeItems: ProvenanceItem[]): string {
+function formatMemoryContext(activeItems: ProvenanceItem[], fullTextById: Map<string, string>): string {
   if (activeItems.length === 0) {
     return 'Nothing relevant retrieved for this query. Memory grows as decisions get crystallized.';
   }
 
-  const cleanText = (t: string) => t.replace(/\.\.\.$/, '').trim();
+  // Inject the FULL memory text into the prompt (provenance .text is a UI preview only)
+  const cleanText = (i: ProvenanceItem) => (fullTextById.get(i.id) ?? i.text).replace(/\.\.\.$/, '').trim();
 
   const rules = activeItems.filter(i => i.type === 'PERMANENT_RULE');
   const decisions = activeItems.filter(i => i.type === 'ARCHITECTURAL_DECISION');
@@ -321,18 +308,18 @@ function formatMemoryContext(activeItems: ProvenanceItem[]): string {
 
   const contextItems = [...decisions, ...patterns, ...other];
   if (contextItems.length > 0) {
-    parts.push('Some relevant context from our past work: ' + contextItems.map(i => cleanText(i.text)).join(' — '));
+    parts.push('Some relevant context from our past work: ' + contextItems.map(cleanText).join(' — '));
   }
 
   if (rules.length > 0) {
     const ruleText = rules.length === 1
-      ? `There is a standing rule here: ${cleanText(rules[0]!.text)}.`
-      : `Standing rules in effect: ${rules.map(r => cleanText(r.text)).join('; ')}.`;
+      ? `There is a standing rule here: ${cleanText(rules[0]!)}.`
+      : `Standing rules in effect: ${rules.map(cleanText).join('; ')}.`;
     parts.push(ruleText);
   }
 
   if (code.length > 0) {
-    parts.push('Related code patterns on file: ' + code.map(c => cleanText(c.text)).join(' | '));
+    parts.push('Related code patterns on file: ' + code.map(cleanText).join(' | '));
   }
 
   return parts.join('\n\n');
@@ -428,7 +415,7 @@ function deduplicateEntries(
         // Add to suppressed with reason
         suppressedItems.push({
           id: entry.id,
-          text: typeof entry.metadata?.text === 'string' ? entry.metadata.text.substring(0, 150) + '...' : '',
+          text: typeof entry.metadata?.text === 'string' ? previewText(entry.metadata.text) : '',
           type: typeof entry.metadata?.type === 'string' ? entry.metadata.type.toUpperCase() : 'UNKNOWN',
           source: entry.metadata?.isUniversal ? 'GLOBAL' : 'LOCAL',
           score: entry.finalScore,
@@ -559,26 +546,7 @@ export class ContextService {
 
     const relevantEntries = await vectorService.search(lastMessage, maxRetrievalCount + 5);
     const universalPatterns = await vectorService.search(lastMessage, 5, { tier: 'meta-summary' });
-
-    // BM25 hybrid search — merge keyword and vector signals via Reciprocal Rank Fusion
-    ensureBM25Index();
-    const bm25Results = bm25Index.search(lastMessage, maxRetrievalCount * 3);
-    const rrfRanking = reciprocalRankFusion(
-      relevantEntries.map(e => ({ id: e.id, score: e.score })),
-      bm25Results
-    );
-    const rrfScoreMap = new Map(rrfRanking.map(r => [r.id, r.rrfScore]));
-
-    // Bring in BM25-only results that vector search missed
-    const vectorIdSet = new Set(relevantEntries.map(e => e.id));
-    for (const bm25Result of bm25Results.slice(0, 10)) {
-      if (!vectorIdSet.has(bm25Result.id)) {
-        const entry = vectorService.getEntryById(bm25Result.id);
-        if (entry) {
-          relevantEntries.push({ ...entry, score: 0.5 });
-        }
-      }
-    }
+    // Keyword (BM25) + vector fusion is already applied inside vectorService.search().
 
     // 2b. Cross-encoder reranking for top candidates via LLM
     const reranked = await reranker.rerank(lastMessage, relevantEntries.slice(0, 20));
@@ -600,8 +568,10 @@ export class ContextService {
     }
 
     const combinedCandidates = [...relevantEntries, ...linkedMemories];
+    const combinedIds = new Set(combinedCandidates.map(c => c.id));
     universalPatterns.forEach(up => {
-      if (up.metadata.isUniversal && !combinedCandidates.find(ce => ce.id === up.id)) {
+      if (up.metadata.isUniversal && !combinedIds.has(up.id)) {
+        combinedIds.add(up.id);
         combinedCandidates.push(up);
       }
     });
@@ -609,20 +579,22 @@ export class ContextService {
     const activeItems: ProvenanceItem[] = [];
     const suppressedItems: ProvenanceItem[] = [];
 
-    // File mtime cache for stale code detection (scoped to this request)
-    const mtimeCache = new Map<string, number>();
-    function getFileMtime(filePath: string): number | null {
-      if (mtimeCache.has(filePath)) return mtimeCache.get(filePath)!;
-      try {
-        const fullPath = join(process.cwd(), filePath);
-        const mtime = statSync(fullPath).mtimeMs;
-        mtimeCache.set(filePath, mtime);
-        return mtime;
-      } catch {
-        mtimeCache.set(filePath, -1);
-        return null;
+    // Async, de-duplicated mtime lookups for stale code detection (no blocking statSync on the hot path)
+    const mtimeByPath = new Map<string, number | null>();
+    const codePaths = new Set<string>();
+    for (const e of combinedCandidates) {
+      if (e.metadata.type === 'code_block' && e.metadata.filePath && e.metadata.fileModifiedAt) {
+        codePaths.add(e.metadata.filePath);
       }
     }
+    await Promise.all([...codePaths].map(async (filePath) => {
+      try {
+        const s = await stat(join(process.cwd(), filePath));
+        mtimeByPath.set(filePath, s.mtimeMs);
+      } catch {
+        mtimeByPath.set(filePath, null);
+      }
+    }));
 
     const scoredEntries = combinedCandidates.map(e => {
       let finalScore = e.score;
@@ -630,28 +602,22 @@ export class ContextService {
 
       if (e.metadata.isUniversal) finalScore += SCORE_BOOST_UNIVERSAL;
       else if (e.metadata.type === 'meta_summary') finalScore += SCORE_BOOST_META_SUMMARY;
-      else if (e.metadata.crystallized) finalScore += SCORE_BOOST_CRYSTALLIZED;
+      else if (e.metadata.crystallized || e.metadata.tier === 'crystallized') finalScore += SCORE_BOOST_CRYSTALLIZED;
       else if (e.metadata.type === 'permanent_rule') finalScore += SCORE_BOOST_PERMANENT_RULE;
       else if (e.metadata.type === 'code_block') {
         finalScore -= (ageHours / 24) * SCORE_DECAY_CODE_BLOCK_PER_DAY;
         // Stale code detection: penalize if source file was modified since indexing
         if (e.metadata.filePath && e.metadata.fileModifiedAt) {
-          const currentMtime = getFileMtime(e.metadata.filePath);
-          if (currentMtime !== null && currentMtime > e.metadata.fileModifiedAt) {
+          const currentMtime = mtimeByPath.get(e.metadata.filePath);
+          if (typeof currentMtime === 'number' && currentMtime > e.metadata.fileModifiedAt) {
             finalScore -= SCORE_PENALTY_STALE_CODE;
           }
         }
       }
 
-      // RRF hybrid score boost (replaces simple keyword match boost)
-      const rrfBoost = rrfScoreMap.get(e.id);
-      if (rrfBoost) {
-        finalScore += rrfBoost * 10;
-      }
-      
       // Reranker boost (cross-encoder LLM scoring)
       const rerankerBoost = rerankerScoreMap.get(e.id);
-      if (rerankerBoost !== undefined) {
+      if (rerankerBoost !== undefined && Number.isFinite(rerankerBoost)) {
         finalScore += rerankerBoost * 0.05;
       }
 
@@ -677,12 +643,21 @@ export class ContextService {
     // 3. Process Logic: Active vs Suppressed — token-budget-aware selection
     const minScore = Math.max(0, (isMassiveContext ? MIN_SCORE_MASSIVE_CONTEXT : MIN_SCORE_STANDARD_CONTEXT) + modeProfile.minScoreDelta + (data.minScoreAdjustment || 0));
     let memoryTokensUsed = 0;
+    const fullTextById = new Map<string, string>();
+
+    // Pre-compute negation rules once per request (word-boundary match, not substring)
+    const negationRules = globalRules
+      .map(r => (r.metadata.text || '').toLowerCase())
+      .filter(text => NEGATION_RE.test(text))
+      .map(text => conflictTokens(text))
+      .filter(tokens => tokens.size > 0);
 
     for (const entry of dedupedEntries) {
       const meta = entry.metadata;
+      const fullText = typeof meta?.text === 'string' ? meta.text : '';
       const item: ProvenanceItem = {
         id: entry.id,
-        text: typeof meta?.text === 'string' ? meta.text.substring(0, 150) + '...' : '',
+        text: previewText(fullText),
         type: meta?.isUniversal ? 'UNIVERSAL PATTERN' : (typeof meta?.type === 'string' ? meta.type.toUpperCase() : 'UNKNOWN'),
         source: meta?.isUniversal ? 'GLOBAL' : 'LOCAL',
         score: entry.finalScore,
@@ -696,20 +671,14 @@ export class ContextService {
         continue;
       }
 
-      // Conflict Check: negation rule + keyword overlap heuristic
-      const NEGATION_WORDS = ['no', 'don\'t', 'never', 'avoid', 'stop', 'not'];
-      const STOP_WORDS = new Set(['the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'can', 'her', 'was', 'one', 'our', 'had', 'but', 'with', 'have', 'this', 'will', 'from', 'they', 'that', 'what', 'been', 'when', 'there', 'make', 'like', 'into', 'then', 'some', 'him', 'its', 'your', 'just', 'should', 'about', 'more']);
-      const tokenize = (text: string) =>
-        text.toLowerCase().split(/\W+/).filter(w => w.length >= 4 && !STOP_WORDS.has(w));
-      const hasConflict = globalRules.some(r => {
-        const ruleText = (r.metadata.text || '').toLowerCase();
-        const isNegationRule = NEGATION_WORDS.some(w => ruleText.includes(w));
-        if (!isNegationRule) return false;
-        const ruleTokens = new Set(tokenize(ruleText));
-        if (ruleTokens.size === 0) return false;
-        const itemTokens = new Set(tokenize(item.text));
-        const overlap = [...ruleTokens].filter(t => itemTokens.has(t)).length;
-        return overlap / Math.min(ruleTokens.size, itemTokens.size) >= 0.3;
+      // Conflict Check: negation rule + keyword overlap heuristic (rules themselves never conflict with themselves)
+      const isRule = meta?.type === 'permanent_rule';
+      const itemTokens = conflictTokens(fullText);
+      const hasConflict = !isRule && itemTokens.size > 0 && negationRules.some(ruleTokens => {
+        let overlap = 0;
+        for (const t of ruleTokens) if (itemTokens.has(t)) overlap++;
+        const denom = Math.min(ruleTokens.size, itemTokens.size);
+        return denom > 0 && overlap / denom >= 0.3;
       });
 
       if (hasConflict) {
@@ -718,9 +687,10 @@ export class ContextService {
         suppressedItems.push(item);
       } else {
         // Token budget check (primary) + entry count check (secondary safety cap)
-        const entryTokenCost = estimateTokens(typeof meta?.text === 'string' ? meta.text : '');
+        const entryTokenCost = estimateTokens(fullText);
         if (memoryTokensUsed + entryTokenCost <= budget.memory && activeItems.length < maxRetrievalCount) {
           activeItems.push(item);
+          fullTextById.set(item.id, fullText);
           memoryTokensUsed += entryTokenCost;
         } else {
           item.status = 'suppressed';
@@ -888,7 +858,7 @@ ${(() => {
 })()}
 
 **[PROJECT MEMORY — RETRIEVED CONTEXT]**
-${formatMemoryContext(activeItems)}
+${formatMemoryContext(activeItems, fullTextById)}
 
 **[ESTABLISHED RULES — ALWAYS HONOR THESE]**
 ${rulesContext || '• No permanent rules set yet. Rules are added via the crystallize_memory tool or by the Overseer.'}
@@ -905,12 +875,12 @@ ${rulesContext || '• No permanent rules set yet. Rules are added via the cryst
     };
 
     // Compute per-section token breakdown for trace logging and HUD display.
-    // Must be computed after systemPrompt is assembled.
+    // memory/rules/workspace are sub-sections already embedded in the system prompt,
+    // so the total is systemPrompt + history (no double-counting). Workspace counts
+    // only the file list actually injected, not full file contents.
     const systemPromptTokens = estimateTokens(systemPrompt.content);
     const rulesTokens = estimateTokens(rulesContext || '');
-    const workspaceTokens = data.openFiles?.reduce(
-      (acc, f) => acc + estimateTokens(f.content), 0
-    ) || 0;
+    const workspaceTokens = estimateTokens(provenance.workspaceFiles.join('\n'));
     const historyTokens = data.messages.reduce(
       (acc, m) => acc + estimateTokens(typeof m.content === 'string' ? m.content : ''), 0
     );
@@ -920,7 +890,7 @@ ${rulesContext || '• No permanent rules set yet. Rules are added via the cryst
       workspace: workspaceTokens,
       conversationHistory: historyTokens,
       systemPrompt: systemPromptTokens,
-      total: memoryTokensUsed + rulesTokens + workspaceTokens + historyTokens + systemPromptTokens,
+      total: systemPromptTokens + historyTokens,
       budget: budget.total || (budget.memory + budget.history),
     };
 

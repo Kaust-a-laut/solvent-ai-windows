@@ -50,7 +50,6 @@ const sizeMap: Record<LogoSize, number> = {
 const Logo: React.FC<LogoProps> = memo(({
   size = 'md',
   variant = 'beaker',
-  state = 'idle',
   animated = true,
   className,
   onClick,

@@ -1,11 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import {
-  Activity, Users, Clock, Cpu, Brain, MessageSquare,
-  CheckCircle, AlertCircle, Hourglass, Zap, TrendingUp
+  Activity, Users, Cpu, Brain, MessageSquare,
+  Hourglass, Zap, TrendingUp
 } from 'lucide-react';
-import { useAppStore } from '../store/useAppStore';
-import { api } from '../lib/api';
 import { ErrorBoundary } from './ErrorBoundary';
 
 interface AgentContribution {
@@ -38,7 +36,6 @@ export const MissionDashboard: React.FC = () => {
   const [activeMission, setActiveMission] = useState<MissionProgress | null>(null);
   const [consensusHistory, setConsensusHistory] = useState<ConsensusHistory[]>([]);
   const [elapsedTime, setElapsedTime] = useState(0);
-  const { currentMode } = useAppStore();
 
   // Poll for mission progress
   useEffect(() => {

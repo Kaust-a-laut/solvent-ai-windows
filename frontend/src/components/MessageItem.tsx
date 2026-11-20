@@ -175,7 +175,7 @@ export const MessageItem: React.FC<MessageItemProps> = ({
            <ReactMarkdown 
               remarkPlugins={[remarkGfm]}
               components={{
-                 code({node, className, children, ...props}) {
+                 code({node: _node, className, children, ...props}) {
                     const match = /language-(\w+)/.exec(className || '');
                     return match ? (
                        <CodeBlock 
@@ -375,7 +375,6 @@ export const MessageItem: React.FC<MessageItemProps> = ({
                   {message.provenance.promptTokens && message.provenance.promptTokens.budget > 0 && (() => {
                      const { total, budget, memory, rules, workspace, conversationHistory, systemPrompt } = message.provenance.promptTokens!;
                      const pct = Math.min((total / budget) * 100, 100);
-                     const barColor = pct >= 95 ? 'bg-rose-500' : pct >= 85 ? 'bg-amber-500' : 'bg-emerald-500';
                      return (
                         <div className="group/budget relative w-full mt-1">
                            <div className="h-1 w-full bg-white/5 rounded-full overflow-hidden flex">

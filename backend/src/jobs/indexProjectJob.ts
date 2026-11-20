@@ -6,23 +6,29 @@ export interface IndexProjectJobData {
   projectPath: string;
 }
 
-export async function indexProjectJob(job: Job<IndexProjectJobData>): Promise<unknown> {
-  const { projectPath } = job.data;
-  
+export async function indexProjectJob(job: Job<IndexProjectJobData | { type?: string; data?: IndexProjectJobData }>): Promise<unknown> {
+  const raw = job.data as unknown as { data?: IndexProjectJobData } & Partial<IndexProjectJobData>;
+  const payload = (raw?.data && typeof raw.data === 'object' ? raw.data : raw) as Partial<IndexProjectJobData>;
+  const projectPath = typeof payload?.projectPath === 'string' ? payload.projectPath : '';
+
+  if (!projectPath) {
+    throw new Error('Indexing failed: missing projectPath in job payload');
+  }
+
   logger.info(`[IndexProjectJob] Starting indexing for project: ${projectPath}`);
-  
+
   try {
     // Report initial progress
     await job.updateProgress(5);
-    
+
     // Wrap the vectorService.indexProject method
     await vectorService.indexProject(projectPath);
-    
+
     // Report completion
     await job.updateProgress(100);
-    
+
     logger.info(`[IndexProjectJob] Completed indexing for project: ${projectPath}`);
-    
+
     return {
       success: true,
       message: `Successfully indexed project: ${projectPath}`,

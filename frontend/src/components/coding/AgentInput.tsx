@@ -71,8 +71,10 @@ export const AgentInput: React.FC<Props> = ({
   // Parse file list from project map
   const projectFiles = useMemo(() => parseProjectMap(projectMap), [projectMap]);
 
-  // Track the @ mention query position and text
-  const atQueryRef = useRef<{ start: number; query: string } | null>(null);
+  // Track the @ mention query position and text. State (not a ref) because
+  // filteredFiles derives from it during render — as a ref, typing updated
+  // the query without recomputing the list, so it never narrowed.
+  const [atQuery, setAtQuery] = useState<{ start: number; query: string } | null>(null);
 
   // Derive display commands from the canonical slashCommands module
   const slashCommands = useMemo(() => toDisplayCommands(CANONICAL_COMMANDS), []);
@@ -89,11 +91,11 @@ export const AgentInput: React.FC<Props> = ({
 
   // Filter files when user types after @
   const filteredFiles = useMemo(() => {
-    if (!showFileMenu || !atQueryRef.current) return projectFiles;
-    const query = atQueryRef.current.query.toLowerCase();
+    if (!showFileMenu || !atQuery) return projectFiles;
+    const query = atQuery.query.toLowerCase();
     if (!query) return projectFiles;
     return projectFiles.filter(f => f.toLowerCase().includes(query));
-  }, [showFileMenu, projectFiles]);
+  }, [showFileMenu, atQuery, projectFiles]);
 
   // Fetch file content when a file is selected via @ mention
   const fetchFileContent = useCallback(async (filePath: string) => {
@@ -144,12 +146,12 @@ export const AgentInput: React.FC<Props> = ({
     setShowSlashMenu(false);
     setShowFileMenu(false);
     setAttachedFiles([]);
-    atQueryRef.current = null;
+    setAtQuery(null);
   }, [input, isGenerating, onSend, attachedFiles]);
 
   const selectFile = useCallback((filePath: string) => {
-    if (!atQueryRef.current) return;
-    const { start } = atQueryRef.current;
+    if (!atQuery) return;
+    const { start } = atQuery;
     const before = input.slice(0, start);
     // Find where the current @ mention ends (next space or end of string from the @ position)
     const atEndIndex = input.indexOf(' ', start);
@@ -157,7 +159,7 @@ export const AgentInput: React.FC<Props> = ({
     const newValue = before + '@' + filePath + ' ' + input.slice(afterStart).trimStart();
     setInput(newValue);
     setShowFileMenu(false);
-    atQueryRef.current = null;
+    setAtQuery(null);
     // Add to attached files with loading state, then fetch
     setAttachedFiles(prev => {
       if (prev.find(f => f.path === filePath)) return prev;
@@ -165,7 +167,7 @@ export const AgentInput: React.FC<Props> = ({
     });
     fetchFileContent(filePath);
     inputRef.current?.focus();
-  }, [input, fetchFileContent]);
+  }, [input, atQuery, fetchFileContent]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -174,7 +176,7 @@ export const AgentInput: React.FC<Props> = ({
     } else if (e.key === 'Escape') {
       setShowSlashMenu(false);
       setShowFileMenu(false);
-      atQueryRef.current = null;
+      setAtQuery(null);
     } else if (showFileMenu) {
       if (e.key === 'ArrowDown') {
         e.preventDefault();
@@ -225,12 +227,12 @@ export const AgentInput: React.FC<Props> = ({
     if (atMatch && atMatch[1] !== undefined && atMatch[0] !== undefined) {
       const query = atMatch[1];
       const atStart = cursorPos - atMatch[0].length;
-      atQueryRef.current = { start: atStart, query };
+      setAtQuery({ start: atStart, query });
       setShowFileMenu(true);
       setFileMenuIndex(0);
     } else {
       setShowFileMenu(false);
-      atQueryRef.current = null;
+      setAtQuery(null);
     }
   }, []);
 
@@ -250,9 +252,9 @@ export const AgentInput: React.FC<Props> = ({
   }, [onAttach]);
 
   return (
-    <div className="border-t border-white/[0.06] p-3">
+    <div className="border-t border-white/[0.16] p-3 bg-white/[0.02]">
       <div className="relative">
-        <div className="flex items-end gap-2 bg-white/[0.03] border border-white/[0.06] rounded-xl px-3 py-2 focus-within:border-jb-accent/30 transition-colors">
+        <div className="flex items-end gap-2 bg-white/[0.06] border border-white/[0.22] rounded-xl px-3 py-2 focus-within:border-jb-accent/60 focus-within:bg-white/[0.08] transition-colors shadow-[inset_0_0_0_1px_rgba(255,255,255,0.05)]">
           <label className="flex-shrink-0 p-1 text-white/30 hover:text-white/50 cursor-pointer transition-colors">
             <Paperclip size={16} />
             <input
@@ -282,10 +284,10 @@ export const AgentInput: React.FC<Props> = ({
             className={cn(
               'flex-shrink-0 p-1.5 rounded-lg transition-all',
               isGenerating
-                ? 'bg-rose-500/10 text-rose-400 hover:bg-rose-500/20'
+                ? 'bg-rose-500/20 border border-rose-500/60 text-rose-300 hover:bg-rose-500/30 shadow-[inset_0_0_0_1px_rgba(244,63,94,0.2)]'
                 : input.trim()
-                  ? 'bg-jb-accent/20 text-jb-accent hover:bg-jb-accent/30'
-                  : 'bg-white/[0.05] text-white/30 cursor-not-allowed'
+                  ? 'cta-primary'
+                  : 'bg-white/[0.05] border border-white/[0.12] text-white/30 cursor-not-allowed'
             )}
           >
             {isGenerating ? <Square size={14} fill="currentColor" /> : <Send size={14} />}

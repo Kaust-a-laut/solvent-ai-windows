@@ -12,8 +12,13 @@ export class MetaMemoryService {
   async synthesizeStateOfTheUnion() {
     logger.info('[MetaMemory] Starting synthesis cycle...');
     
-    // 1. Gather Raw Data
-    const recent = vectorService.getRecentEntries(50);
+    // 1. Gather Raw Data (exclude deprecated entries)
+    if (typeof vectorService.waitUntilReady === 'function') {
+      await vectorService.waitUntilReady();
+    }
+    const recent = vectorService
+      .getRecentEntries(50)
+      .filter(m => m.metadata.status !== 'deprecated');
     if (recent.length < 5) {
         logger.info('[MetaMemory] Not enough data to synthesize.');
         return null;
@@ -52,12 +57,16 @@ export class MetaMemoryService {
             { role: 'user', content: prompt }
         ], { 
             model: MODELS.GROQ.LLAMA_3_3_70B || 'llama-3.3-70b-versatile',
-            temperature: 0.2 
+            temperature: 0.2,
+            shouldSearch: false,
         });
 
         // 3. Commit to Long-Term Memory
         await vectorService.addEntry(summary, {
             type: 'meta_summary',
+            tier: 'meta-summary',
+            isAnchor: true,
+            importance: 5,
             timestamp: new Date().toISOString(),
             source: 'meta_memory_service'
         });

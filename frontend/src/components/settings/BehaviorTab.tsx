@@ -7,7 +7,6 @@ import { cn } from '../../lib/utils';
 import { InlineToggle, SectionCard, staggerContainer, staggerItem } from './shared';
 import { SETTINGS_DEFAULTS } from './settingsDefaults';
 import { CustomSlider } from './CustomSlider';
-import type { PerformanceMode } from '../../lib/performanceTier';
 
 export const BehaviorTab = () => {
   const {

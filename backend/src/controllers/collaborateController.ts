@@ -32,6 +32,7 @@ export class CollaborateController {
       for await (const event of generator) {
         if (sse.signal.aborted) break;
         sse.send(event);
+        if (sse.isBackpressured) await sse.flushed();
       }
 
       sse.end();
@@ -81,10 +82,12 @@ export class CollaborateController {
 
   static async synthesizeNow(req: Request, res: Response) {
     try {
-      const { sessionId } = req.body;
-      if (!sessionId) return res.status(400).json({ error: 'sessionId is required' });
+      const parsed = z.object({ sessionId: z.string().min(1) }).safeParse(req.body);
+      if (!parsed.success) {
+        return res.status(400).json({ error: 'sessionId is required' });
+      }
 
-      const success = triggerSynthesis(sessionId);
+      const success = triggerSynthesis(parsed.data.sessionId);
       if (!success) {
         return res.status(404).json({ error: 'Session not found or not active' });
       }

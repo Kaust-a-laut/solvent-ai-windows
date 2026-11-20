@@ -12,7 +12,7 @@ interface Props {
 
 export const EditorTabBar: React.FC<Props> = ({ openFiles, activeFile, onTabClick, onTabClose }) => {
   return (
-    <div className="h-10 bg-black/20 border-b border-white/[0.04] flex items-center px-2 gap-1 overflow-x-auto no-scrollbar shrink-0">
+    <div className="h-10 bg-black/40 border-b border-white/[0.14] flex items-center px-2 gap-1 overflow-x-auto no-scrollbar shrink-0">
       {openFiles.map((file) => {
         const name = file.path.split('/').pop() ?? file.path;
         const icon = getFileIcon(name);
@@ -25,8 +25,8 @@ export const EditorTabBar: React.FC<Props> = ({ openFiles, activeFile, onTabClic
             className={cn(
               'flex items-center gap-1.5 px-3 py-1 rounded-lg text-[11px] font-medium cursor-pointer transition-all border shrink-0',
               isActive
-                ? 'bg-jb-accent/10 text-jb-accent border-jb-accent/25 shadow-[0_0_10px_rgba(60,113,247,0.08)]'
-                : 'text-white/55 border-transparent hover:text-white/80 hover:bg-white/5',
+                ? 'bg-jb-accent/15 text-jb-accent border-jb-accent/55 shadow-[inset_0_0_0_1px_rgba(60,113,247,0.2),0_0_12px_-2px_rgba(60,113,247,0.25)]'
+                : 'bg-white/[0.04] text-white/60 border-white/[0.14] hover:text-white hover:bg-white/[0.08] hover:border-white/[0.26]',
             )}
           >
             <span className={cn('shrink-0', isActive ? 'text-jb-accent' : icon.color)}>{icon.emoji}</span>

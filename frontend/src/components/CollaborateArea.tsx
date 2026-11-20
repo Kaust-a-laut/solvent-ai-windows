@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useCallback, useRef, useMemo, useEffect } from 'react';
 import {
   Users, ShieldAlert, Code2, Briefcase, Play, Loader2,
   CheckCircle2, XCircle, RotateCcw, Swords, Zap, GitMerge,
@@ -136,6 +136,14 @@ export const CollaborateArea = () => {
     resetConversation,
     activeMissions,
   } = useAppStore();
+
+  // Stop an in-flight collaborate run when the user navigates away from this
+  // mode — otherwise the SSE stream keeps running and mutating the store in
+  // the background with no visible UI. No-op if nothing is running.
+  useEffect(() => {
+    return () => { cancelConversation(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const {
     status,

@@ -3,12 +3,15 @@ import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
-import { randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import fs from 'fs';
 import path from 'path';
 import { z } from 'zod';
 import { logger } from './utils/logger';
+import { safeCompare } from './utils/auth';
+import { getSafeErrorMessage } from './utils/errors';
 
+/* eslint-disable @typescript-eslint/no-namespace */
 declare global {
   namespace Express {
     interface Request {
@@ -16,6 +19,7 @@ declare global {
     }
   }
 }
+/* eslint-enable @typescript-eslint/no-namespace */
 
 // --- Import Routes ---
 import fileRoutes from './routes/fileRoutes';
@@ -40,13 +44,8 @@ import { SocketRateLimiter } from './utils/socketRateLimiter';
 import { codebaseIndexer } from './services/codebaseIndexer';
 import { vectorService } from './services/vectorService';
 import { modelAvailabilityService } from './services/modelAvailabilityService';
+import { modelRegistryService } from './services/modelRegistryService';
 import { nativeCopyManager } from './services/nativeCopyManager';
-
-// Timing-safe secret comparison to prevent timing attacks
-function safeCompare(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(Buffer.from(a), Buffer.from(b));
-}
 
 const app = express();
 const httpServer = createServer(app);
@@ -54,15 +53,18 @@ const httpServer = createServer(app);
 // Security: Restrict CORS to configured origin(s) (not wildcard in production)
 // CORS_ORIGIN supports comma-separated values: "http://localhost:5173,http://127.0.0.1:5173"
 const allowedOrigins = config.CORS_ORIGIN.split(',').map(o => o.trim());
+const allowPackagedFileOrigin = process.env.SOLVENT_ELECTRON_PACKAGED === '1';
 const corsOptions = {
   origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (!origin || allowedOrigins.includes(origin) || (allowPackagedFileOrigin && origin === 'null')) {
       callback(null, true);
     } else {
-      callback(new Error(`CORS: origin '${origin}' not allowed`));
+      const corsErr = new Error(`CORS: origin '${origin}' not allowed`) as Error & { status?: number };
+      corsErr.status = 403;
+      callback(corsErr);
     }
   },
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'X-Solvent-Secret'],
   credentials: true
 };
@@ -196,7 +198,7 @@ try {
   });
 
   logger.info('[Server] Mission progress bridge initialized');
-} catch (err) {
+} catch {
   logger.warn('[Server] Mission progress bridge unavailable (Redis not running — missions/task queue disabled)');
 }
 
@@ -227,15 +229,25 @@ const limiter = rateLimit({
 app.use('/api/', limiter);
 
 // --- Directory Setup ---
-const generatedImagesDir = path.join(__dirname, '../generated_images');
-const uploadDir = path.join(__dirname, '../uploads'); 
+const dataRootDir = process.env.SOLVENT_DATA_DIR || path.join(__dirname, '..');
+const generatedImagesDir = path.join(dataRootDir, 'generated_images');
+const uploadDir = path.join(dataRootDir, 'uploads');
 
 if (!fs.existsSync(generatedImagesDir)) fs.mkdirSync(generatedImagesDir, { recursive: true });
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 
 // --- Static Files (Publicly Accessible for Frontend <img> tags) ---
 app.use('/generated_images', express.static(generatedImagesDir));
-app.use('/files', express.static(uploadDir));
+// User uploads are untrusted content: force download instead of inline render/execute
+// (uploads are also extension-filtered in fileRoutes.ts, this is defense in depth) and
+// block MIME sniffing so a browser never treats an upload as HTML/SVG/script.
+app.use('/files', express.static(uploadDir, {
+  setHeaders: (res) => {
+    res.setHeader('Content-Disposition', 'attachment');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+  }
+}));
 
 const API_SECRET = config.BACKEND_INTERNAL_SECRET;
 
@@ -309,15 +321,38 @@ app.use('/api/files', fileRoutes);
 app.use('/api/debug', debugRoutes);
 app.use('/api/settings', settingsRoutes);
 
+// Track plugin initialization state
+let pluginsInitialized = false;
+let pluginsDegraded = false;
+
+// Health check that reflects plugin state (mounted before global error handler)
+app.get('/health', (_req, res) => {
+  const healthStatus = {
+    status: pluginsDegraded ? 'degraded' : 'ok',
+    plugins: pluginsInitialized ? 'ready' : pluginsDegraded ? 'failed' : 'initializing',
+    timestamp: new Date().toISOString()
+  };
+  res.status(pluginsDegraded ? 503 : 200).json(healthStatus);
+});
+
 // --- Error Handling Middleware ---
 interface HttpError extends Error {
   status?: number;
+  code?: string;
 }
 
-app.use((err: HttpError, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+app.use((err: HttpError, _req: express.Request, res: express.Response, next: express.NextFunction) => {
   logger.error('[Global Error Handler]', err);
-  const status = err.status || 500;
-  const message = err.message || 'Internal Server Error';
+  if (res.headersSent) {
+    return next(err);
+  }
+  let status = err.status || 500;
+  if (err.code === 'LIMIT_FILE_SIZE') {
+    status = 413;
+  } else if (err.name === 'MulterError' || err.message?.startsWith('Unsupported file type:')) {
+    status = 400;
+  }
+  const message = status >= 500 ? getSafeErrorMessage(err, 'global') : (err.message || 'Request error');
   res.status(status).json({
     error: {
       message,
@@ -326,10 +361,6 @@ app.use((err: HttpError, _req: express.Request, res: express.Response, _next: ex
     }
   });
 });
-
-// Track plugin initialization state
-let pluginsInitialized = false;
-let pluginsDegraded = false;
 
 // Initialize the plugin manager - MUST complete before server accepts requests
 async function initializePlugins(): Promise<void> {
@@ -343,28 +374,6 @@ async function initializePlugins(): Promise<void> {
     pluginsDegraded = true;
   }
 }
-
-// Start codebase indexer in background (non-blocking)
-async function startCodebaseIndexing(): Promise<void> {
-  try {
-    // Start file watcher for incremental indexing
-    await codebaseIndexer.start({ rootPath: process.cwd() });
-    logger.info('[Server] Codebase indexer started with file watcher enabled');
-  } catch (error) {
-    logger.error('[Server] Failed to start codebase indexer:', error);
-    // Don't fail server - indexing is optional
-  }
-}
-
-// Health check that reflects plugin state
-app.get('/health', (_req, res) => {
-  const healthStatus = {
-    status: pluginsDegraded ? 'degraded' : 'ok',
-    plugins: pluginsInitialized ? 'ready' : pluginsDegraded ? 'failed' : 'initializing',
-    timestamp: new Date().toISOString()
-  };
-  res.status(pluginsDegraded ? 503 : 200).json(healthStatus);
-});
 
 // Start server asynchronously
 async function startServer(): Promise<void> {
@@ -394,6 +403,12 @@ async function startServer(): Promise<void> {
   modelAvailabilityService.scan().catch(err => {
     logger.warn('[Server] Model availability scan failed:', err);
   });
+
+  // Live model registry: load cached lists, refresh from provider APIs in
+  // the background, re-refresh daily (non-blocking).
+  modelRegistryService.initialize().catch(err => {
+    logger.warn('[Server] Model registry init failed:', err);
+  });
 }
 
 startServer().catch(error => {
@@ -402,13 +417,24 @@ startServer().catch(error => {
 });
 
 // Graceful shutdown handling
+let shuttingDown = false;
+
 async function gracefulShutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
   logger.info(`[Server] Received ${signal}, starting graceful shutdown...`);
-  
-  httpServer.close(() => {
-    logger.info('[Server] HTTP server closed');
-    process.exit(0);
-  });
+
+  // Hard deadline — if any cleanup step hangs we still exit.
+  const forceTimer = setTimeout(() => {
+    logger.warn('[Server] Forced shutdown after timeout');
+    process.exit(1);
+  }, 10000);
+
+  // Stop accepting new connections while cleanup runs. Exiting happens after
+  // cleanup below — exiting from the close callback would race it (with zero
+  // open connections the callback fires immediately).
+  batcher.destroy();
+  io.close(() => logger.info('[Server] HTTP server closed'));
 
   try {
     await codebaseIndexer.stop();
@@ -425,16 +451,31 @@ async function gracefulShutdown(signal: string): Promise<void> {
   }
 
   try {
+    await vectorService.shutdown();
+    logger.info('[Server] Vector index flushed');
+  } catch (error) {
+    logger.warn('[Server] Error flushing vector index', error);
+  }
+
+  try {
     await nativeCopyManager.stopAll();
     logger.info('[Server] Native-copy sidecar stopped');
   } catch (error) {
     logger.warn('[Server] Error stopping sidecar', error);
   }
 
-  setTimeout(() => {
-    logger.warn('[Server] Forced shutdown after timeout');
-    process.exit(1);
-  }, 10000);
+  try {
+    await taskService.close();
+    logger.info('[Server] Task service closed');
+  } catch (error) {
+    logger.warn('[Server] Error closing task service', error);
+  }
+
+  supervisorService.shutdown();
+  modelRegistryService.shutdown();
+
+  clearTimeout(forceTimer);
+  process.exit(0);
 }
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));

@@ -6,9 +6,14 @@
   "scripts": {
     "dev": "vite --host",
     "test": "vitest run",
+    "test:watch": "vitest",
+    "coverage": "vitest run --coverage",
+    "typecheck": "tsc --noEmit",
     "build": "tsc && vite build",
     "lint": "eslint src --ext ts,tsx",
     "lint:fix": "eslint src --ext ts,tsx --fix",
+    "format": "prettier --write \"src/**/*.{ts,tsx,css}\"",
+    "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\"",
     "preview": "vite preview",
     "desktop": "cd .. && npm run desktop"
   },
@@ -53,6 +58,7 @@
     "eslint-plugin-react-hooks": "^7.0.1",
     "jsdom": "^26.1.0",
     "postcss": "^8.5.6",
+    "prettier": "^3.8.4",
     "tailwindcss": "^3.4.1",
     "typescript": "^5.4.5",
     "vite": "^7.3.1",

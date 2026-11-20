@@ -2,7 +2,7 @@ import React from 'react';
 import { useReactFlow } from '@xyflow/react';
 import { useAppStore } from '../../store/useAppStore';
 import { useShallow } from 'zustand/react/shallow';
-import { StickyNote, Image as ImageIcon, Link as LinkIcon, BoxSelect, Maximize2, Save, Loader2, Undo2, Redo2 } from 'lucide-react';
+import { StickyNote, Image as ImageIcon, Link as LinkIcon, BoxSelect, Maximize2, Save, Undo2, Redo2 } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
 const newId = (prefix: string) => `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
@@ -18,7 +18,7 @@ const ToolbarButton: React.FC<{ icon: React.ElementType; label: string; onClick:
   <button
     onClick={onClick}
     className={cn(
-      'flex items-center gap-2 px-3 py-1.5 rounded-lg border border-white/[0.06] bg-white/[0.02] hover:bg-white/[0.05] hover:border-white/15 transition-colors text-[11px] text-slate-300 hover:text-white',
+      'cta-secondary flex items-center gap-2 px-3 py-1.5 text-[11px]',
       accent
     )}
   >
@@ -124,10 +124,10 @@ export const NotepadToolbar: React.FC<ToolbarProps> = () => {
           disabled={!canUndo}
           title="Undo (Ctrl/Cmd+Z)"
           className={cn(
-            'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] transition-colors',
+            'flex items-center gap-1.5 px-2.5 py-1.5 text-[11px]',
             canUndo
-              ? 'border-white/[0.06] bg-white/[0.02] text-slate-300 hover:bg-white/[0.05] hover:border-white/15 hover:text-white'
-              : 'border-white/[0.04] bg-white/[0.01] text-white/20 cursor-not-allowed'
+              ? 'cta-secondary'
+              : 'rounded-xl border border-white/[0.06] bg-white/[0.01] text-white/20 cursor-not-allowed'
           )}
         >
           <Undo2 size={13} />
@@ -137,10 +137,10 @@ export const NotepadToolbar: React.FC<ToolbarProps> = () => {
           disabled={!canRedo}
           title="Redo (Ctrl/Cmd+Shift+Z)"
           className={cn(
-            'flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-[11px] transition-colors',
+            'flex items-center gap-1.5 px-2.5 py-1.5 text-[11px]',
             canRedo
-              ? 'border-white/[0.06] bg-white/[0.02] text-slate-300 hover:bg-white/[0.05] hover:border-white/15 hover:text-white'
-              : 'border-white/[0.04] bg-white/[0.01] text-white/20 cursor-not-allowed'
+              ? 'cta-secondary'
+              : 'rounded-xl border border-white/[0.06] bg-white/[0.01] text-white/20 cursor-not-allowed'
           )}
         >
           <Redo2 size={13} />
@@ -151,10 +151,10 @@ export const NotepadToolbar: React.FC<ToolbarProps> = () => {
           onClick={() => save()}
           disabled={!dirty}
           className={cn(
-            'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-medium transition-colors border',
+            'flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium',
             dirty
-              ? 'bg-jb-accent/10 hover:bg-jb-accent/20 border-jb-accent/40 text-jb-accent'
-              : 'bg-white/[0.02] border-white/[0.04] text-white/30'
+              ? 'cta-primary'
+              : 'rounded-xl border border-white/[0.06] bg-white/[0.02] text-white/30 cursor-not-allowed'
           )}
         >
           <Save size={12} />

@@ -1,4 +1,5 @@
 import { io, Socket } from 'socket.io-client';
+import { toast } from 'sonner';
 import { API_BASE_URL } from './config';
 import { getSecret } from './api-client';
 
@@ -26,5 +27,14 @@ export async function connectSocket(): Promise<void> {
 if (typeof window !== 'undefined') {
   (window as unknown as Record<string, unknown>).socket = socket;
 }
+
+// A provider retired the requested model mid-session; the backend substituted
+// a live one (see modelRegistryService) — tell the user which one ran.
+socket.on('MODEL_SUBSTITUTED', (data: { provider: string; requested: string; used: string }) => {
+  toast.warning(`${data.requested} was retired by ${data.provider}`, {
+    description: `Request ran on ${data.used} instead. Update your model selection.`,
+    duration: 10_000,
+  });
+});
 
 connectSocket();

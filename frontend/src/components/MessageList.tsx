@@ -4,6 +4,7 @@ import { EmptyState } from './ui/EmptyState';
 import { MessageCircle, Code, Terminal, FileText, Lightbulb, Image as ImageIcon, Wand2, Palette, Globe, Search, Compass, Brain, Sparkles, Scale, GitCompare, Users } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { useAppStore } from '../store/useAppStore';
+import type { Message } from '../store/types';
 import { useShallow } from 'zustand/react/shallow';
 import { cn } from '../lib/utils';
 import { downloadImage } from '../lib/file-utils';
@@ -150,7 +151,7 @@ export const MessageList = ({ compact }: MessageListProps) => {
   const { currentMode, isProcessing, modeConfigs, selectedCloudModel, selectedLocalModel, globalProvider, deviceInfo, imageProvider, currentProject } = useAppStore(
     useShallow((state) => ({
       currentMode: state.currentMode,
-      isProcessing: state.isProcessing,
+      isProcessing: state.isProcessingByMode[state.currentMode] ?? false,
       modeConfigs: state.modeConfigs,
       selectedCloudModel: state.selectedCloudModel,
       selectedLocalModel: state.selectedLocalModel,
@@ -179,8 +180,11 @@ export const MessageList = ({ compact }: MessageListProps) => {
     activeModel = selectedLocalModel;
   }
 
-  const getTime = () => {
-    return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  // Format a message's own createdAt — falls back to "now" only for legacy
+  // messages that predate the field, so it never crashes on old sessions.
+  const getTime = (message: Message) => {
+    const date = message.createdAt !== undefined ? new Date(message.createdAt) : new Date();
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   };
 
   const isVision = currentMode === 'vision';
@@ -234,7 +238,7 @@ export const MessageList = ({ compact }: MessageListProps) => {
                   message={m}
                   isUser={m.role === 'user'}
                   modelName={m.role === 'user' ? 'User' : (m.model || activeModel)}
-                  time={getTime()}
+                  time={getTime(m)}
                   onDownloadImage={downloadImage}
                   compact={isCompact}
                   animate={isNew}

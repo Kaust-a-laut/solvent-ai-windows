@@ -51,12 +51,13 @@ export const CustomSelect = ({
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
-  // Determine drop direction
-  useEffect(() => {
-    if (!open || !ref.current) return;
+  // Measure at open time (event handler), not in an effect — the trigger is
+  // always mounted, so its rect is available before the menu renders.
+  const measureDropDirection = () => {
+    if (!ref.current) return;
     const rect = ref.current.getBoundingClientRect();
     setDropDirection(rect.bottom + 320 > window.innerHeight ? 'up' : 'down');
-  }, [open]);
+  };
 
   // Focus search input when opening
   useEffect(() => {
@@ -95,6 +96,7 @@ export const CustomSelect = ({
     if (!open) {
       if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
         e.preventDefault();
+        measureDropDirection();
         setOpen(true);
       }
       return;
@@ -142,7 +144,7 @@ export const CustomSelect = ({
       {/* Trigger */}
       <button
         type="button"
-        onClick={() => { if (!disabled) { setOpen(v => !v); setHighlightIndex(-1); } }}
+        onClick={() => { if (!disabled) { if (!open) measureDropDirection(); setOpen(v => !v); setHighlightIndex(-1); } }}
         disabled={disabled}
         className={cn(
           "w-full flex items-center justify-between bg-white/[0.03] border border-white/10 rounded-2xl px-5 py-3 text-xs font-bold text-slate-300 outline-none transition-all",

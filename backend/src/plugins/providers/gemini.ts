@@ -54,15 +54,27 @@ export class GeminiProviderPlugin implements IProviderPlugin {
   private isInitialized = false;
 
   async initialize(options: Record<string, unknown>): Promise<void> {
-    const apiKey = (options.apiKey as string) || config.GEMINI_API_KEY;
-    if (apiKey) {
-      this.genAI = new GoogleGenerativeAI(apiKey);
-    }
+    const apiKey = (options.apiKey as string) || config.GEMINI_API_KEY || '';
+    this.genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;
     this.isInitialized = true;
   }
 
   isReady(): boolean {
     return this.isInitialized;
+  }
+
+  hasConfiguredKey(): boolean {
+    return !!this.genAI;
+  }
+
+  private extractSystemAndChat(messages: ChatMessage[]) {
+    const systemParts = messages
+      .filter(m => m.role === 'system')
+      .map(m => m.content)
+      .filter(Boolean);
+    const systemInstruction = systemParts.length > 0 ? systemParts.join('\n\n') : undefined;
+    const chatMessages = messages.filter(m => m.role !== 'system');
+    return { systemInstruction, chatMessages };
   }
 
   async complete(messages: ChatMessage[], options: CompletionOptions): Promise<string> {
@@ -74,8 +86,11 @@ export class GeminiProviderPlugin implements IProviderPlugin {
     const genAI = effectiveApiKey ? new GoogleGenerativeAI(effectiveApiKey) : this.genAI;
     if (!genAI) throw new Error('Gemini API key missing. Provide it in settings or set GEMINI_API_KEY in .env.');
 
+    const { systemInstruction, chatMessages } = this.extractSystemAndChat(messages);
+
     const modelInstance = genAI.getGenerativeModel({
       model: model || this.defaultModel,
+      systemInstruction,
       generationConfig: {
         temperature,
         maxOutputTokens: maxTokens,
@@ -83,13 +98,13 @@ export class GeminiProviderPlugin implements IProviderPlugin {
       }
     });
 
-    const history = messages.slice(0, -1).map(m => ({
-      role: (m.role === 'user' || m.role === 'system') ? 'user' : 'model',
+    const history = chatMessages.slice(0, -1).map(m => ({
+      role: m.role === 'user' ? 'user' : 'model',
       parts: [{ text: m.content }]
     }));
 
     const chat = modelInstance.startChat({ history });
-    const lastMessage = messages[messages.length - 1];
+    const lastMessage = chatMessages[chatMessages.length - 1];
     if (!lastMessage) {
       throw new Error('No messages provided');
     }
@@ -103,35 +118,45 @@ export class GeminiProviderPlugin implements IProviderPlugin {
   }
 
   async *stream(messages: ChatMessage[], options: CompletionOptions): AsyncGenerator<string> {
-    const { model, temperature = 0.7, maxTokens = 2048, apiKey } = options;
+    const { model, temperature = 0.7, maxTokens = 2048, apiKey, signal } = options;
     const effectiveApiKey = apiKey || config.GEMINI_API_KEY;
     const genAI = effectiveApiKey ? new GoogleGenerativeAI(effectiveApiKey) : this.genAI;
     if (!genAI) throw new Error('Gemini API key missing. Provide it in settings or set GEMINI_API_KEY in .env.');
 
+    if (signal?.aborted) return;
+
+    const { systemInstruction, chatMessages } = this.extractSystemAndChat(messages);
+
     const modelInstance = genAI.getGenerativeModel({
       model: model || this.defaultModel,
+      systemInstruction,
       generationConfig: {
         temperature,
         maxOutputTokens: maxTokens,
       }
     });
 
-    const history = messages.slice(0, -1).map(m => ({
-      role: (m.role === 'user' || m.role === 'system') ? 'user' : 'model',
+    const history = chatMessages.slice(0, -1).map(m => ({
+      role: m.role === 'user' ? 'user' : 'model',
       parts: [{ text: m.content }]
     }));
 
     const chat = modelInstance.startChat({ history });
-    const lastMessage = messages[messages.length - 1];
+    const lastMessage = chatMessages[chatMessages.length - 1];
     if (!lastMessage) {
       throw new Error('No messages provided');
     }
     const result = await chat.sendMessageStream(lastMessage.content);
 
     for await (const chunk of result.stream) {
-      yield chunk.text();
+      if (signal?.aborted) break;
+      const text = chunk.text();
+      if (text) yield text;
     }
   }
+
+  generateChatStream = (messages: ChatMessage[], options: CompletionOptions): AsyncGenerator<string> =>
+    this.stream(messages, options);
 
   async vision(
     prompt: string,

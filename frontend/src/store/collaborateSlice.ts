@@ -2,6 +2,7 @@ import { StateCreator } from 'zustand';
 import { AppState } from './types';
 import { getSecret } from '../lib/api-client';
 import { API_BASE_URL } from '../lib/config';
+import { streamSSE } from '../lib/sse';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -110,14 +111,9 @@ export const createCollaborateSlice: StateCreator<AppState, [], [], CollaborateS
 
       if (!response.body) throw new Error('No response body');
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let sseBuffer = '';
-
-      const processSSELine = (line: string) => {
-        if (!line.startsWith('data: ')) return;
+      const processSSEPayload = (raw: string) => {
         try {
-          const payload = JSON.parse(line.slice(6));
+          const payload = JSON.parse(raw);
           const { event, data } = payload;
 
           set((state) => {
@@ -226,26 +222,13 @@ export const createCollaborateSlice: StateCreator<AppState, [], [], CollaborateS
         }
       };
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-
-        sseBuffer += decoder.decode(value, { stream: true });
-        const lines = sseBuffer.split('\n');
-        sseBuffer = lines.pop() || '';
-
-        for (const line of lines) {
-          processSSELine(line);
-        }
-      }
-
-      if (sseBuffer.trim()) {
-        processSSELine(sseBuffer.trim());
+      for await (const payload of streamSSE(response.body)) {
+        processSSEPayload(payload);
       }
     } catch (error: unknown) {
       const err = error as { name?: string; message?: string };
       if (err.name === 'AbortError') {
-        console.log('[Collaborate] Request cancelled');
+        // User-initiated cancel — not an error state.
       } else {
         set((state) => ({
           collaborate: {

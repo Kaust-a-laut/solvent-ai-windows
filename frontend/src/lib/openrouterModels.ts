@@ -18,12 +18,8 @@ export const OPENROUTER_FREE_CHAT_MODELS = [
   // Google Gemma
   { label: 'Gemma 4 26B (Free)',          value: 'google/gemma-4-26b-a4b-it:free' },
   { label: 'Gemma 4 31B (Free)',          value: 'google/gemma-4-31b-it:free' },
-  { label: 'Gemma 3 27B (Free)',          value: 'google/gemma-3-27b-it:free' },
-  { label: 'Gemma 3 12B (Free)',          value: 'google/gemma-3-12b-it:free' },
   // Z.ai
-  { label: 'GLM 4.5 Air (Free)',          value: 'z-ai/glm-4.5-air:free' },
   // MiniMax
-  { label: 'MiniMax M2.5 (Free)',         value: 'minimax/minimax-m2.5:free' },
   // NousResearch
   { label: 'Hermes 3 405B (Free)',        value: 'nousresearch/hermes-3-llama-3.1-405b:free' },
 ] as const;

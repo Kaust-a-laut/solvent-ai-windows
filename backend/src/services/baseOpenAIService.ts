@@ -15,6 +15,8 @@ import { agentScratchpadService } from './agentScratchpad';
 import { delegationService, parseDelegationTags } from './delegationService';
 import { getErrorMessage } from '../utils/errorMessage';
 import { providerHttpAgent, providerHttpsAgent } from '../utils/httpAgents';
+import { modelRegistryService } from './modelRegistryService';
+import { appEventBus } from '../utils/eventBus';
 
 /**
  * Simple XML tool call parser using string operations to avoid regex issues.
@@ -87,6 +89,118 @@ export function stripRanges(content: string, ranges: Array<{ start: number; end:
  */
 function stripThinkTags(text: string): string {
   return text.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+}
+
+/**
+ * Stateful streaming filter that removes <think>...</think> blocks across
+ * arbitrary SSE chunk boundaries WITHOUT trimming token whitespace/indentation.
+ */
+class ThinkTagStreamFilter {
+  private inThink = false;
+  private pending = '';
+
+  push(chunk: string): string {
+    if (!chunk) return '';
+    let input = this.pending + chunk;
+    this.pending = '';
+    let output = '';
+
+    while (input.length > 0) {
+      if (this.inThink) {
+        const closeMatch = /<\/think>/i.exec(input);
+        if (closeMatch) {
+          input = input.slice(closeMatch.index + closeMatch[0].length);
+          this.inThink = false;
+        } else {
+          // Keep tail up to length of '</think>' - 1 in case tag splits across chunks
+          const keep = Math.min(input.length, 7);
+          this.pending = input.slice(input.length - keep);
+          break;
+        }
+      } else {
+        const openMatch = /<think>/i.exec(input);
+        if (openMatch) {
+          output += input.slice(0, openMatch.index);
+          input = input.slice(openMatch.index + openMatch[0].length);
+          this.inThink = true;
+        } else {
+          // Buffer any trailing partial prefix of '<think>' (e.g. '<', '<t', '<thi')
+          const lastLt = input.lastIndexOf('<');
+          if (lastLt !== -1 && input.length - lastLt < 7) {
+            const tail = input.slice(lastLt).toLowerCase();
+            if ('<think>'.startsWith(tail)) {
+              output += input.slice(0, lastLt);
+              this.pending = input.slice(lastLt);
+              break;
+            }
+          }
+          output += input;
+          break;
+        }
+      }
+    }
+    return output;
+  }
+
+  flush(): string {
+    const rest = this.inThink ? '' : this.pending;
+    this.pending = '';
+    return rest;
+  }
+}
+
+class ProviderStreamError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProviderStreamError';
+  }
+}
+
+const PLAN_START_MARKER = '<!-- SOLVENT_PLAN_START -->';
+const PLAN_END_MARKER = '<!-- SOLVENT_PLAN_END -->';
+
+function upsertScratchpadBlock(
+  messages: Array<{ role: string; content: string }>,
+  sessionId: string
+): void {
+  const scratchpadBlock = agentScratchpadService.renderForPrompt(sessionId);
+  if (!scratchpadBlock) return;
+
+  const lastSystemIdx = [...messages].reverse().findIndex(m => m.role === 'system');
+  if (lastSystemIdx === -1) return;
+
+  const realIdx = messages.length - 1 - lastSystemIdx;
+  const existing = messages[realIdx]!;
+  const block =
+    `${PLAN_START_MARKER}\n[CURRENT PLAN]\n${scratchpadBlock}\n\n` +
+    `[INSTRUCTIONS] The plan above is your live task scratchpad. Use update_plan to mark steps as you work. Use reflect after 3+ tool actions to summarize progress.\n${PLAN_END_MARKER}`;
+
+  const startIdx = existing.content.indexOf(PLAN_START_MARKER);
+  const endIdx = existing.content.indexOf(PLAN_END_MARKER);
+  if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+    existing.content =
+      existing.content.slice(0, startIdx) +
+      block +
+      existing.content.slice(endIdx + PLAN_END_MARKER.length);
+  } else {
+    existing.content += `\n\n${block}`;
+  }
+}
+
+function killProcessTree(proc: ReturnType<typeof nodeSpawn>): void {
+  try {
+    if (process.platform === 'win32' && proc.pid) {
+      nodeSpawn('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore' });
+    } else {
+      proc.kill('SIGTERM');
+    }
+  } catch { /* process may already have exited */ }
+}
+
+function normalizeDiagnosticFile(line: string): string | null {
+  const m = line.match(/^(.+?)(?:\(\d+,\d+\)|:\d+:\d+):/);
+  if (!m || !m[1]) return null;
+  return m[1].trim().replace(/\\/g, '/').toLowerCase();
 }
 
 /**
@@ -282,7 +396,7 @@ async function getTscErrors(cwd: string): Promise<string[]> {
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      proc.kill();
+      killProcessTree(proc);
       resolve([]);
     }, 15_000);
     proc.stdout.on('data', (d: Buffer) => { out += d.toString(); });
@@ -291,7 +405,12 @@ async function getTscErrors(cwd: string): Promise<string[]> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(out.split('\n').filter(Boolean));
+      const files = new Set<string>();
+      for (const line of out.split(/\r?\n/)) {
+        const f = normalizeDiagnosticFile(line);
+        if (f) files.add(f);
+      }
+      resolve(Array.from(files));
     });
     proc.on('error', () => {
       if (settled) return;
@@ -327,7 +446,7 @@ async function autoVerify(
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      proc.kill();
+      killProcessTree(proc);
       resolve(null);
     }, 30_000);
 
@@ -342,24 +461,27 @@ async function autoVerify(
       if (code === 0) { resolve(null); return; }
 
       const errorLines = output
-        .split('\n')
+        .split(/\r?\n/)
         .filter((l) => /\.tsx?\(/.test(l) || /\.tsx?:/.test(l));
 
       // Filter out files that were already erroring before this session
       const newErrors = errorLines.filter((line) => {
-        const fileMatch = line.match(/^([^(:]+)/);
-        return fileMatch && fileMatch[1] ? !errorBaseline.has(fileMatch[1].trim()) : true;
+        const fileKey = normalizeDiagnosticFile(line);
+        return fileKey ? !errorBaseline.has(fileKey) : true;
       });
 
-      // Focus on files we actually changed (full-path match to avoid false positives)
+      // Focus on files we actually changed (normalize separators & case for Windows)
       const relevant =
         changedFiles.length > 0
-          ? newErrors.filter((line) =>
-              changedFiles.some((f) => {
-                const abs = nodePath.isAbsolute(f) ? f : nodePath.join(getEffectiveProjectRoot(), f);
-                return line.includes(abs) || line.includes(f);
-              })
-            )
+          ? newErrors.filter((line) => {
+              const normLine = line.replace(/\\/g, '/').toLowerCase();
+              return changedFiles.some((f) => {
+                const abs = (nodePath.isAbsolute(f) ? f : nodePath.join(getEffectiveProjectRoot(), f))
+                  .replace(/\\/g, '/').toLowerCase();
+                const rel = f.replace(/\\/g, '/').toLowerCase();
+                return normLine.includes(abs) || normLine.includes(rel);
+              });
+            })
           : newErrors;
 
       resolve(relevant.slice(0, 10).join('\n') || null);
@@ -385,17 +507,21 @@ interface ParsedToolCall {
 }
 
 /**
- * Parse a model's `tool_calls` array. On JSON parse failure the `parseError`
- * is captured and the raw `arguments` field is reset to "{}" so the assistant
- * message stays valid for follow-up provider requests (DashScope/Groq reject
- * tool_calls with non-JSON arguments in history).
+ * Parse a model's `tool_calls` array. On JSON parse failure (or non-object JSON
+ * such as null/arrays/primitives) the `parseError` is captured and the raw
+ * `arguments` field is reset to "{}" so the assistant message stays valid for
+ * follow-up provider requests.
  */
 export function parseToolCalls(toolCalls: RawToolCall[]): ParsedToolCall[] {
   return toolCalls.map((toolCall) => {
     let args: Record<string, unknown> = {};
     let parseError: string | null = null;
     try {
-      args = JSON.parse(toolCall.function.arguments);
+      const parsed = JSON.parse(toolCall.function.arguments);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error(`Tool arguments must be a JSON object, got ${parsed === null ? 'null' : Array.isArray(parsed) ? 'array' : typeof parsed}`);
+      }
+      args = parsed as Record<string, unknown>;
     } catch (e) {
       parseError = (e as Error).message;
       toolCall.function.arguments = '{}';
@@ -437,6 +563,7 @@ export function errorSignature(toolName: string, errorMessage: string): string {
   const trimmed = (errorMessage || '')
     .replace(/\b\d{13,}\b/g, 'TS')                        // epoch ms
     .replace(/\b(TX:\s*)[a-z0-9]+/gi, '$1TX')             // transaction ids
+    .replace(/\b(position|line|column)\s+\d+/gi, '$1 N')  // JSON parse positions
     .replace(/[A-Z]:\\[^\s'"]+/g, 'PATH')                 // windows absolute paths
     .replace(/\/[^\s'"]*\/[^\s'"]+/g, 'PATH')             // unix absolute paths
     .replace(/\s+/g, ' ')
@@ -450,10 +577,12 @@ export function errorSignature(toolName: string, errorMessage: string): string {
  * Provides standardized message mapping and recursive tool-calling logic.
  */
 export abstract class BaseOpenAIService implements AIProvider {
+  abstract readonly id: string;
   abstract readonly name: string;
   protected abstract baseUrl: string;
   protected abstract apiKey: string;
   public defaultModel: string = '';
+  public capabilities?: import('../types/plugins').ProviderCapabilities;
 
   isReady(): boolean {
     // Always report ready — runtime API keys from the frontend can satisfy the requirement
@@ -466,18 +595,38 @@ export abstract class BaseOpenAIService implements AIProvider {
     return getOpenAITools();
   }
 
+  /**
+   * Resolve the requested model against the live registry. If the provider
+   * has retired it, substitute the default (or first live model) instead of
+   * letting the request 404 — and surface the swap to the UI.
+   */
+  protected resolveModel(requested?: string): string {
+    const wanted = requested || this.defaultModel;
+    const providerId = this.id;
+    const { model, substituted } = modelRegistryService.resolveLiveModel(providerId, wanted, this.defaultModel);
+    if (substituted) {
+      logger.warn(`[${this.name}] Model '${wanted}' is no longer served — substituting '${model}'.`);
+      appEventBus.emit('supervisor:emit-event', {
+        event: 'MODEL_SUBSTITUTED',
+        data: { provider: providerId, requested: wanted, used: model },
+      });
+    }
+    return model;
+  }
+
   async generateChatCompletion(messages: ChatMessage[], options: CompletionOptions): Promise<string> {
     const apiKey = options.apiKey || this.apiKey;
     if (!apiKey) throw new Error(`${this.name} API Key missing`);
 
     const currentMessages: Array<{ role: string; content: string; name?: string; tool_call_id?: string; tool_calls?: unknown }> = normalizeMessages(messages).map(m => ({ role: m.role, content: m.content }));
-    const model = options.model || this.defaultModel;
+    const model = this.resolveModel(options.model);
+    const sessionId = options.sessionId || 'default';
     let iteration = 0;
     const maxIterations = 8;
 
     try {
       let hadProblems = false;
-      // Auto-verify state for non-streaming path (mirrors streaming path)
+      // Auto-verify state for non-streaming path (captured BEFORE first write tool executes)
       let errorBaselinePromise: Promise<Set<string>> | null = null;
       const getErrorBaselineNonStream = (): Promise<Set<string>> => {
         if (errorBaselinePromise === null) {
@@ -488,18 +637,12 @@ export abstract class BaseOpenAIService implements AIProvider {
       let verifyAttempts = 0;
 
       while (iteration < maxIterations) {
-        // Inject agent scratchpad (plan + reflections) into the last system message
-        const scratchpadBlock = agentScratchpadService.renderForPrompt('default');
-        if (scratchpadBlock) {
-          const lastSystemIdx = [...currentMessages].reverse().findIndex(m => m.role === 'system');
-          if (lastSystemIdx !== -1) {
-            const realIdx = currentMessages.length - 1 - lastSystemIdx;
-            const existing = currentMessages[realIdx]!;
-            if (!existing.content.includes('[CURRENT PLAN]')) {
-              existing.content += `\n\n[CURRENT PLAN]\n${scratchpadBlock}\n\n[INSTRUCTIONS] The plan above is your live task scratchpad. Use update_plan to mark steps as you work. Use reflect after 3+ tool actions to summarize progress.`;
-            }
-          }
+        if (options.signal?.aborted) {
+          throw new Error(`${this.name} request aborted`);
         }
+
+        // Refresh agent scratchpad (plan + reflections) into the last system message
+        upsertScratchpadBlock(currentMessages, sessionId);
 
         const messagesForRequest = compactHistory(currentMessages, 4, 32_768);
         if (messagesForRequest !== currentMessages) {
@@ -513,11 +656,14 @@ export abstract class BaseOpenAIService implements AIProvider {
           max_tokens: options.maxTokens ?? 8192,
         };
 
-        // CRITICAL FIX: Most providers (Groq, OpenAI) do not allow
-        // response_format: "json_object" and tools to be used simultaneously.
-        if (options.jsonMode && !this.shouldSkipJsonMode(model)) {
-          payload.response_format = { type: "json_object" };
-        } else if (options.shouldSearch !== false) {
+        // Never attach tools when jsonMode is requested (even if shouldSkipJsonMode
+        // suppresses response_format for reasoning models), or when the provider
+        // declares supportsFunctionCalling === false.
+        if (options.jsonMode) {
+          if (!this.shouldSkipJsonMode(model)) {
+            payload.response_format = { type: "json_object" };
+          }
+        } else if (options.shouldSearch !== false && this.capabilities?.supportsFunctionCalling !== false) {
           payload.tools = this.getToolDefinitions();
           payload.tool_choice = "auto";
         }
@@ -544,11 +690,17 @@ export abstract class BaseOpenAIService implements AIProvider {
 
         logger.info(`[${this.name}] iter=${iteration} responded in ${Date.now() - reqStart}ms`);
 
-        const message = response.data.choices[0].message;
+        if (response.data?.error) {
+          throw new Error(response.data.error.message || JSON.stringify(response.data.error));
+        }
+        const message = response.data?.choices?.[0]?.message;
+        if (!message) {
+          throw new Error(`${this.name} returned empty choices array`);
+        }
         const rawContent = message.content || "";
         const content = stripThinkTags(typeof rawContent === 'string' ? rawContent : JSON.stringify(rawContent));
 
-        if (!message.tool_calls) {
+        if (!message.tool_calls || message.tool_calls.length === 0) {
           return prependTruthfulnessNote(content, hadProblems);
         }
 
@@ -557,9 +709,17 @@ export abstract class BaseOpenAIService implements AIProvider {
 
         const parsed = parseToolCalls(message.tool_calls);
 
+        // Capture tsc baseline BEFORE executing any write tools in this batch
+        if (parsed.some(c => WRITE_TOOLS.has(c.name) && !c.parseError)) {
+          await getErrorBaselineNonStream();
+        }
+
         currentMessages.push({ ...message, content });
 
         for (const { toolCall, name, args, parseError } of parsed) {
+          if (options.signal?.aborted) {
+            throw new Error(`${this.name} request aborted`);
+          }
           if (parseError) {
             hadProblems = true;
             const msg = buildToolArgsTruncatedMessage(parseError);
@@ -640,7 +800,7 @@ export abstract class BaseOpenAIService implements AIProvider {
     const apiKey = options.apiKey || this.apiKey;
     if (!apiKey) throw new Error(`${this.name} API Key missing`);
 
-    const model = options.model || this.defaultModel;
+    const model = this.resolveModel(options.model);
     const normalized = normalizeMessages(messages).map(m => ({ role: m.role, content: m.content }));
 
     const payload: Record<string, unknown> = {
@@ -676,6 +836,7 @@ export abstract class BaseOpenAIService implements AIProvider {
 
     const stream = response.data as import('stream').Readable;
     const decoder = new StringDecoder('utf8');
+    const thinkFilter = new ThinkTagStreamFilter();
     let buffer = '';
 
     // Idle-timeout watchdog: axios `timeout` only governs initial connect, so
@@ -691,6 +852,33 @@ export abstract class BaseOpenAIService implements AIProvider {
     };
     resetIdle();
 
+    const processEventBlock = (rawEvent: string): string[] => {
+      const outputs: string[] = [];
+      for (const rawLine of rawEvent.split('\n')) {
+        const line = rawLine.trimEnd();
+        if (!line.startsWith('data:')) continue;
+        const data = line.slice(5).trim();
+        if (!data || data === '[DONE]') continue;
+
+        let parsed: { error?: { message?: string }; choices?: Array<{ delta?: { content?: string } }> };
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          // Ignore malformed chunks — providers occasionally split JSON mid-line
+          continue;
+        }
+        if (parsed.error) {
+          throw new ProviderStreamError(parsed.error.message ?? 'provider stream error');
+        }
+        const delta = parsed.choices?.[0]?.delta?.content;
+        if (typeof delta === 'string' && delta.length > 0) {
+          const filtered = thinkFilter.push(delta);
+          if (filtered.length > 0) outputs.push(filtered);
+        }
+      }
+      return outputs;
+    };
+
     try {
       for await (const chunk of stream) {
         resetIdle();
@@ -698,34 +886,27 @@ export abstract class BaseOpenAIService implements AIProvider {
           stream.destroy();
           return;
         }
-        buffer += decoder.write(chunk as Buffer);
+        buffer += decoder.write(chunk as Buffer).replace(/\r\n/g, '\n');
 
         let eventEnd: number;
         while ((eventEnd = buffer.indexOf('\n\n')) !== -1) {
           const rawEvent = buffer.slice(0, eventEnd);
           buffer = buffer.slice(eventEnd + 2);
-
-          for (const line of rawEvent.split('\n')) {
-            if (!line.startsWith('data:')) continue;
-            const data = line.slice(5).trim();
-            if (!data || data === '[DONE]') continue;
-            try {
-              const parsed = JSON.parse(data);
-              if (parsed.error) {
-                throw new Error(parsed.error.message ?? 'provider stream error');
-              }
-              const delta: string | undefined = parsed.choices?.[0]?.delta?.content;
-              if (typeof delta === 'string' && delta.length > 0) {
-                yield stripThinkTags(delta);
-              }
-            } catch (parseErr) {
-              if ((parseErr as Error).message?.startsWith('provider stream error')) throw parseErr;
-              // Ignore malformed chunks — providers occasionally split JSON mid-line
-            }
+          for (const out of processEventBlock(rawEvent)) {
+            yield out;
           }
         }
       }
-      buffer += decoder.end();
+      buffer += decoder.end().replace(/\r\n/g, '\n');
+      if (buffer.trim().length > 0) {
+        for (const out of processEventBlock(buffer)) {
+          yield out;
+        }
+      }
+      const trailing = thinkFilter.flush();
+      if (trailing.length > 0) {
+        yield trailing;
+      }
     } finally {
       if (idleTimer) clearTimeout(idleTimer);
       if (!stream.destroyed) stream.destroy();
@@ -748,10 +929,13 @@ export abstract class BaseOpenAIService implements AIProvider {
     if (!apiKey) throw new Error(`${this.name} API Key missing`);
 
     const currentMessages: Array<{ role: string; content: string; name?: string; tool_call_id?: string; tool_calls?: unknown }> = normalizeMessages(messages).map(m => ({ role: m.role, content: m.content }));
-    const model = options.model || this.defaultModel;
+    const model = this.resolveModel(options.model);
+    const sessionId = options.sessionId || 'default';
 
     let iteration = 0;
+    let totalTurns = 0;
     const maxIterations = tier === 'full-agentic' ? 20 : 6;
+    const maxTotalTurns = maxIterations + 5;
 
     try {
       let consecutiveFailures = 0;
@@ -763,8 +947,8 @@ export abstract class BaseOpenAIService implements AIProvider {
       let sameErrorRepeats = 0;
       const maxSameErrorRepeats = 3;
       let hadProblems = false;
-      // Baseline of pre-existing tsc errors, captured lazily on the first
-      // write-tool call. Chat-only turns never pay the ~15s tsc spawn cost.
+      // Baseline of pre-existing tsc errors, captured lazily BEFORE the first
+      // write-tool call executes. Chat-only turns never pay the tsc spawn cost.
       let errorBaselinePromise: Promise<Set<string>> | null = null;
       const getErrorBaseline = (): Promise<Set<string>> => {
         if (errorBaselinePromise === null) {
@@ -774,21 +958,14 @@ export abstract class BaseOpenAIService implements AIProvider {
       };
       let verifyAttempts = 0;
 
-      while (iteration < maxIterations) {
-        // Inject agent scratchpad (plan + reflections) into the last system message
-        const scratchpadBlock = agentScratchpadService.renderForPrompt('default');
-        if (scratchpadBlock) {
-          // Find the last system message and append the scratchpad
-          const lastSystemIdx = [...currentMessages].reverse().findIndex(m => m.role === 'system');
-          if (lastSystemIdx !== -1) {
-            const realIdx = currentMessages.length - 1 - lastSystemIdx;
-            const existing = currentMessages[realIdx]!;
-            // Avoid duplicating the scratchpad block on repeated iterations
-            if (!existing.content.includes('[CURRENT PLAN]')) {
-              existing.content += `\n\n[CURRENT PLAN]\n${scratchpadBlock}\n\n[INSTRUCTIONS] The plan above is your live task scratchpad. Use update_plan to mark steps as you work. Use reflect after 3+ tool actions to summarize progress.`;
-            }
-          }
+      while (iteration < maxIterations && totalTurns < maxTotalTurns) {
+        if (options.signal?.aborted) {
+          throw new Error(`${this.name} agent aborted by client`);
         }
+        totalTurns++;
+
+        // Refresh agent scratchpad (plan + reflections) into the last system message
+        upsertScratchpadBlock(currentMessages, sessionId);
 
         // Compact old tool results if payload is too large
         const messagesForRequest = compactHistory(currentMessages, 4, 32_768);
@@ -803,9 +980,11 @@ export abstract class BaseOpenAIService implements AIProvider {
           max_tokens: options.maxTokens ?? 8192,
         };
 
-        if (options.jsonMode && !this.shouldSkipJsonMode(model)) {
-          payload.response_format = { type: "json_object" };
-        } else if (options.shouldSearch !== false) {
+        if (options.jsonMode) {
+          if (!this.shouldSkipJsonMode(model)) {
+            payload.response_format = { type: "json_object" };
+          }
+        } else if (options.shouldSearch !== false && this.capabilities?.supportsFunctionCalling !== false) {
           const allTools = this.getToolDefinitions();
           const filteredTools = filterToolsByTier(allTools, tier, traits);
           payload.tools = filteredTools;
@@ -842,46 +1021,56 @@ export abstract class BaseOpenAIService implements AIProvider {
           let buf = '';
           let streamDone = false;
           const stream = response.data as import('stream').Readable;
-          // StringDecoder handles UTF-8 codepoints split across chunk boundaries,
-          // which raw chunk.toString() would surface as U+FFFD replacement chars.
           const decoder = new StringDecoder('utf8');
 
-          // Idle-timeout watchdog. The axios `timeout` only governs the
-          // initial response — once the provider starts streaming, a stalled
-          // upstream would otherwise hang the loop forever. Reset on every
-          // chunk and reject if the gap between chunks exceeds the budget.
           const idleMs = config.AI_STREAM_IDLE_TIMEOUT_MS ?? 60_000;
           let idleTimer: NodeJS.Timeout | null = null;
+          const clearWatchdog = () => {
+            if (idleTimer) {
+              clearTimeout(idleTimer);
+              idleTimer = null;
+            }
+          };
+          const failStream = (err: Error) => {
+            if (streamDone) return;
+            streamDone = true;
+            clearWatchdog();
+            options.signal?.removeEventListener('abort', onAbort);
+            if (!stream.destroyed) stream.destroy();
+            streamReject(err);
+          };
+          const done = () => {
+            if (streamDone) return;
+            streamDone = true;
+            clearWatchdog();
+            options.signal?.removeEventListener('abort', onAbort);
+            buf += decoder.end();
+            if (!stream.destroyed) stream.destroy();
+            streamResolve();
+          };
+          const onAbort = () => failStream(new Error(`${this.name} stream aborted`));
+          options.signal?.addEventListener('abort', onAbort, { once: true });
+
           const resetIdle = () => {
-            if (idleTimer) clearTimeout(idleTimer);
+            clearWatchdog();
             idleTimer = setTimeout(() => {
-              if (streamDone) return;
-              streamDone = true;
-              stream.destroy();
-              streamReject(new Error(`${this.name} stream idle timeout (${idleMs}ms)`));
+              failStream(new Error(`${this.name} stream idle timeout (${idleMs}ms)`));
             }, idleMs);
           };
           resetIdle();
 
-          const done = () => {
-            if (streamDone) return;
-            streamDone = true;
-            if (idleTimer) clearTimeout(idleTimer);
-            buf += decoder.end();
-            stream.destroy();
-            streamResolve();
-          };
-
           stream.on('data', (chunk: Buffer) => {
             if (streamDone) return;
             resetIdle();
-            buf += decoder.write(chunk);
+            buf += decoder.write(chunk).replace(/\r\n/g, '\n');
             const lines = buf.split('\n');
             buf = lines.pop() ?? '';
 
-            for (const line of lines) {
-              if (!line.startsWith('data: ')) continue;
-              const data = line.slice(6).trim();
+            for (const rawLine of lines) {
+              const line = rawLine.trimEnd();
+              if (!line.startsWith('data:')) continue;
+              const data = line.slice(5).trim();
+              if (!data) continue;
               if (data === '[DONE]') { done(); return; }
               try {
                 const parsed = JSON.parse(data) as {
@@ -902,26 +1091,22 @@ export abstract class BaseOpenAIService implements AIProvider {
 
                 // Surface provider-side errors (e.g. rate limit, auth failure)
                 if (parsed.error) {
-                  streamDone = true;
-                  stream.destroy();
-                  streamReject(new Error(parsed.error.message ?? 'Provider stream error'));
+                  failStream(new Error(parsed.error.message ?? 'Provider stream error'));
                   return;
                 }
 
-                const delta = parsed.choices?.[0]?.delta;
-                if (!delta) {
-                  // Some providers emit usage in a final chunk with no choices
-                  const usage = parsed.usage as { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } } | undefined;
-                  if (usage?.prompt_tokens !== undefined) {
-                    onEvent({
-                      type: 'usage',
-                      promptTokens: usage.prompt_tokens,
-                      completionTokens: usage.completion_tokens ?? 0,
-                      cachedTokens: usage.prompt_tokens_details?.cached_tokens,
-                    });
-                  }
-                  continue;
+                // Emit usage whenever present (final chunk often has empty choices)
+                if (parsed.usage?.prompt_tokens !== undefined) {
+                  onEvent({
+                    type: 'usage',
+                    promptTokens: parsed.usage.prompt_tokens,
+                    completionTokens: parsed.usage.completion_tokens ?? 0,
+                    cachedTokens: parsed.usage.prompt_tokens_details?.cached_tokens,
+                  });
                 }
+
+                const delta = parsed.choices?.[0]?.delta;
+                if (!delta) continue;
 
                 if (delta.content) {
                   rawContent += delta.content;
@@ -940,18 +1125,13 @@ export abstract class BaseOpenAIService implements AIProvider {
                     if (tc.function?.arguments) acc.arguments += tc.function.arguments;
                   }
                 }
-
-                const finish = parsed.choices?.[0]?.finish_reason;
-                if (finish === 'stop' || finish === 'tool_calls') done();
               } catch { /* partial JSON chunk */ }
             }
           });
 
           stream.on('end', done);
-          stream.on('error', (err) => {
-            if (idleTimer) clearTimeout(idleTimer);
-            streamReject(err);
-          });
+          stream.on('close', done);
+          stream.on('error', (err) => failStream(err));
         });
 
         const content = stripThinkTags(rawContent);
@@ -1101,9 +1281,17 @@ export abstract class BaseOpenAIService implements AIProvider {
         // tool_call with non-JSON `arguments`.
         const parsedCalls = parseToolCalls(message.tool_calls);
 
+        // Capture tsc baseline BEFORE executing any write tool in this turn
+        if (parsedCalls.some(c => WRITE_TOOLS.has(c.name) && !c.parseError)) {
+          await getErrorBaseline();
+        }
+
         currentMessages.push({ ...message, content });
 
         for (const { name, callId, args, parseError } of parsedCalls) {
+          if (options.signal?.aborted) {
+            throw new Error(`${this.name} agent aborted by client`);
+          }
           if (parseError) {
             hadProblems = true;
             consecutiveFailures++;

@@ -28,11 +28,16 @@ export function MissionDirectiveInput({
 
   return (
     <div className={cn('rounded-[2rem]', vibrantBorder && 'vibrant-border')}>
-      <div className="glass-panel rounded-[2rem] overflow-hidden">
-        <div className="flex flex-col gap-4 p-5">
-          <span className="text-[11px] font-black text-slate-400 uppercase tracking-widest">
-            Mission Directive
-          </span>
+      <div className="surface-1 bg-white/[0.075] rounded-[2rem] overflow-hidden backdrop-blur-xl relative shadow-[0_0_40px_-12px_rgba(60,113,247,0.25),0_0_80px_-20px_rgba(157,91,210,0.18)]">
+        {/* Top accent bar marks this as the primary entry point */}
+        <div className="h-[2px] w-full bg-gradient-to-r from-jb-accent via-jb-purple to-jb-orange opacity-80" />
+        <div className="flex flex-col gap-4 p-6">
+          <div className="flex items-center gap-2">
+            <div className="w-1 h-3 rounded-full bg-jb-accent shadow-[0_0_8px_rgba(60,113,247,0.8)]" />
+            <span className="text-[12px] font-black text-white uppercase tracking-[0.3em]">
+              Mission Directive
+            </span>
+          </div>
           <textarea
             value={value}
             onChange={(e) => onChange(e.target.value)}
@@ -40,16 +45,16 @@ export function MissionDirectiveInput({
             placeholder="Describe the complex task for the pipeline to orchestrate..."
             rows={rows}
             disabled={isStreaming}
-            className="w-full bg-transparent text-[14px] font-medium text-white placeholder:text-slate-800 resize-none outline-none leading-relaxed input-focus-ring disabled:opacity-50 transition-opacity"
+            className="w-full bg-transparent text-[15px] font-medium text-white placeholder:text-slate-500 resize-none outline-none leading-relaxed input-focus-ring disabled:opacity-50 transition-opacity"
           />
-          <div className="flex items-center justify-between pt-1 border-t border-white/[0.04]">
-            <span className="text-[11px] text-slate-400 font-mono">⌘↩ to submit</span>
+          <div className="flex items-center justify-between pt-2 border-t border-white/[0.12]">
+            <span className="text-[11px] text-slate-300 font-mono">⌘↩ to submit</span>
             <button
               onClick={onSubmit}
               disabled={!value.trim() || isStreaming}
-              className="flex items-center gap-2 px-5 py-2 rounded-full bg-jb-purple/15 border border-jb-purple/25 text-jb-purple text-[11px] font-black uppercase tracking-widest hover:bg-jb-purple/25 disabled:opacity-30 transition-all shadow-lg"
+              className="cta-primary flex items-center gap-2.5 px-7 py-3 text-[12px] font-black uppercase tracking-[0.25em]"
             >
-              <Sparkles size={13} className={isStreaming ? 'animate-pulse' : ''} />
+              <Sparkles size={15} className={isStreaming ? 'animate-pulse' : ''} />
               {isStreaming ? 'Processing...' : 'Initiate'}
             </button>
           </div>

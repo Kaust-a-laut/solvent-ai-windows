@@ -36,15 +36,15 @@ export class DebateService {
     const rounds: DebateRound[] = [];
     const pro = proponentModel;
     const crit = criticModel;
-    const opts = { temperature: 0.7, maxTokens: 2048 };
+    const opts = { temperature: 0.7, maxTokens: 2048, shouldSearch: false };
 
     logger.info(
       `[DebateService] Starting 4-turn debate on: "${topic}" | ` +
       `Proponent: ${pro.provider}/${pro.model} | Critic: ${crit.provider}/${crit.model}`
     );
 
-    const proProvider = await AIProviderFactory.getProvider(pro.provider);
-    const critProvider = await AIProviderFactory.getProvider(crit.provider);
+    const proProvider = await AIProviderFactory.getExactProvider(pro.provider);
+    const critProvider = await AIProviderFactory.getExactProvider(crit.provider);
 
     // Turn 1: Proponent opens
     const turn1 = await proProvider.complete([
