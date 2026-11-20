@@ -32,9 +32,34 @@ export class LocalImageService {
    * @param prompt The prompt to generate the image from.
    * @param options Optional overrides for the local generator.
    */
+  /**
+   * `localUrl` comes from the request, so it must not be usable as an HTTP
+   * POST SSRF primitive: http(s) on loopback only.
+   */
+  private resolveLocalUrl(raw: unknown): string {
+    if (raw === undefined || raw === null || raw === '') return this.defaultUrl;
+    let parsed: URL;
+    try {
+      parsed = new URL(String(raw));
+    } catch {
+      throw new Error('Invalid localUrl');
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error('localUrl must use http or https');
+    }
+    const host = parsed.hostname.toLowerCase();
+    if (host !== '127.0.0.1' && host !== 'localhost' && host !== '[::1]' && host !== '::1') {
+      throw new Error('localUrl must point at a loopback address (127.0.0.1, localhost or [::1])');
+    }
+    if (parsed.username || parsed.password) {
+      throw new Error('localUrl must not contain credentials');
+    }
+    return parsed.toString();
+  }
+
   async generateImage(prompt: string, options: Record<string, unknown> = {}): Promise<{ base64: string, mimeType: string }> {
     try {
-      const url = (options.localUrl as string) || this.defaultUrl;
+      const url = this.resolveLocalUrl(options.localUrl);
       const isXL = prompt.toLowerCase().includes('xl') || (options.model as string)?.toLowerCase().includes('xl') || (options.model as string)?.toLowerCase().includes('juggernaut');
 
       logger.info(`[LocalImage] Generating image at ${url} for prompt: "${prompt.substring(0, 50)}..."`);
@@ -65,7 +90,10 @@ export class LocalImageService {
       }
 
       const response = await axios.post(url, payload, {
-        timeout: 120000 // 2 minutes timeout for local generation
+        timeout: 120000, // 2 minutes timeout for local generation
+        maxRedirects: 0, // a redirect could bounce the POST off loopback
+        maxContentLength: 50 * 1024 * 1024,
+        proxy: false,
       });
 
       if (response.status !== 200) {

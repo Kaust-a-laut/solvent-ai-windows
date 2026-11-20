@@ -4,6 +4,8 @@ import fs from 'fs/promises';
 import { createHash } from 'crypto';
 import { logger } from '../utils/logger';
 import { vectorService, VectorMetadata } from './vectorService';
+import { isExcludedFromIndex } from '../utils/sensitivePaths';
+import { AtomicFileSystem } from '../utils/fileSystem';
 
 interface FileWatcherConfig {
   rootPath: string;
@@ -15,7 +17,7 @@ interface FileWatcherConfig {
 
 export class CodebaseIndexer {
   private watcher: chokidar.FSWatcher | null = null;
-  private pendingChanges: Map<string, { path: string; content: string; mtime: number }> = new Map();
+  private pendingChanges: Map<string, { path: string; content: string; mtime: number; hash: string }> = new Map();
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
   private isIndexing = false;
   private config: FileWatcherConfig | null = null;
@@ -113,13 +115,14 @@ export class CodebaseIndexer {
         return;
       }
 
+      // The hash is recorded in fileHashes only once the file is actually
+      // indexed — recording it here meant a failed index was never retried.
       this.pendingChanges.set(relativePath, {
         path: filePath,
         content,
-        mtime: stats.mtimeMs
+        mtime: stats.mtimeMs,
+        hash,
       });
-
-      this.fileHashes.set(relativePath, hash);
 
       // Debounce batch indexing
       this.scheduleIndexing();
@@ -141,7 +144,8 @@ export class CodebaseIndexer {
     
     // Remove from hash cache
     this.fileHashes.delete(relativePath);
-    
+    await this.saveFileHashes();
+
     // Remove from vector index (by file path)
     try {
       await vectorService.deleteByFilePath(relativePath);
@@ -170,21 +174,33 @@ export class CodebaseIndexer {
    * Process all pending file changes
    */
   private async processPendingChanges() {
-    if (this.pendingChanges.size === 0 || this.isIndexing) return;
+    if (this.pendingChanges.size === 0) return;
+    if (this.isIndexing) {
+      // A run is in flight; it re-checks pendingChanges when it finishes.
+      return;
+    }
 
     this.isIndexing = true;
-    logger.info(`[CodebaseIndexer] Indexing ${this.pendingChanges.size} changed files...`);
+    // Snapshot and clear *before* any await: edits that land while this batch
+    // is being embedded go into a fresh map instead of being cleared
+    // unindexed when the batch completes.
+    const batch = new Map(this.pendingChanges);
+    this.pendingChanges.clear();
+    logger.info(`[CodebaseIndexer] Indexing ${batch.size} changed files...`);
 
     try {
+      const batchSize = this.config?.maxBatchSize || 20;
       const entries: { text: string; metadata: VectorMetadata }[] = [];
 
-      for (const [relativePath, fileData] of this.pendingChanges.entries()) {
-        const chunks = this.chunkFile(fileData.content, fileData.path);
-        entries.push(...chunks);
+      for (const [relativePath, fileData] of batch.entries()) {
+        // Drop the file's previous chunks first — re-indexing without this
+        // accumulated a duplicate set of chunks on every save.
+        await vectorService.deleteByFilePath(relativePath);
+        entries.push(...this.chunkFile(fileData.content, fileData.path));
 
         // Process in batches to avoid memory issues
-        if (entries.length >= (this.config?.maxBatchSize || 20)) {
-          await this.addEntriesBatch(entries.splice(0, this.config?.maxBatchSize || 20));
+        while (entries.length >= batchSize) {
+          await this.addEntriesBatch(entries.splice(0, batchSize));
         }
       }
 
@@ -193,12 +209,20 @@ export class CodebaseIndexer {
         await this.addEntriesBatch(entries);
       }
 
-      logger.info(`[CodebaseIndexer] Incremental indexing complete. ${this.pendingChanges.size} files processed.`);
-      this.pendingChanges.clear();
+      for (const [relativePath, fileData] of batch.entries()) {
+        this.fileHashes.set(relativePath, fileData.hash);
+      }
+      await this.saveFileHashes();
+      logger.info(`[CodebaseIndexer] Incremental indexing complete. ${batch.size} files processed.`);
     } catch (error) {
       logger.error('[CodebaseIndexer] Incremental indexing failed', error);
+      // Re-queue anything that hasn't been superseded by a newer change.
+      for (const [relativePath, fileData] of batch.entries()) {
+        if (!this.pendingChanges.has(relativePath)) this.pendingChanges.set(relativePath, fileData);
+      }
     } finally {
       this.isIndexing = false;
+      if (this.pendingChanges.size > 0) this.scheduleIndexing();
     }
   }
 
@@ -208,14 +232,18 @@ export class CodebaseIndexer {
   private async addEntriesBatch(entries: { text: string; metadata: VectorMetadata }[]) {
     if (entries.length === 0) return;
 
-    await vectorService.addEntriesBatch(entries);
+    // addEntriesBatch assigns the ids (index-aligned with `entries`);
+    // entry.metadata.id is never set here, so links were never resolved.
+    const ids = await vectorService.addEntriesBatch(entries);
 
     // Resolve semantic relationships for code files
-    for (const entry of entries) {
-      if (entry.metadata.type === 'code_block' && entry.metadata.id) {
-        const links = this.findReferenceTargets(entry.text, entry.metadata.id);
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i]!;
+      const id = ids[i];
+      if (entry.metadata.type === 'code_block' && id) {
+        const links = this.findReferenceTargets(entry.text, id);
         if (links.length > 0) {
-          await vectorService.addLinks(entry.metadata.id, links);
+          await vectorService.addLinks(id, links);
         }
       }
     }
@@ -350,7 +378,9 @@ export class CodebaseIndexer {
     if (!this.config) return false;
 
     const ext = path.extname(filePath).toLowerCase();
-    return this.config.extensions.includes(ext);
+    // Never embed secrets/credentials (.env*, keys, settings.json, .solvent_*)
+    // or lockfiles — same exclusion list as the full vectorService index.
+    return this.config.extensions.includes(ext) && !isExcludedFromIndex(filePath);
   }
 
   /**
@@ -384,7 +414,7 @@ export class CodebaseIndexer {
   private async saveFileHashes() {
     try {
       const cachePath = path.join(this.config!.rootPath, '.solvent_file_hashes.json');
-      await fs.writeFile(cachePath, JSON.stringify(Array.from(this.fileHashes.entries())), 'utf-8');
+      await AtomicFileSystem.writeFile(cachePath, JSON.stringify(Array.from(this.fileHashes.entries())));
     } catch (error) {
       logger.error('[CodebaseIndexer] Failed to save file hash cache', error);
     }

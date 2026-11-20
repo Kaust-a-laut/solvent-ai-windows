@@ -11,13 +11,15 @@ import { validatePath, PROJECT_ROOT, getEffectiveProjectRoot, isPathWithinRoot }
 import { transactionService } from './transactionService';
 import { appEventBus } from '../utils/eventBus';
 import { coreMemory } from './coreMemory';
-import { getPreviewState } from '../utils/requestContext';
+import { getPreviewState, getRequestContext } from '../utils/requestContext';
 import { nativeCopyManager } from './nativeCopyManager';
 import { agentScratchpadService } from './agentScratchpad';
 import { parseUnifiedDiff, applyHunks } from './patchApplier';
 import { buildSymbolIndex, querySymbols, hasSymbolIndex } from './projectIndexer';
 import { mcpClientManager } from './mcpClient';
 import { safeAxiosGet, UrlSafetyError } from '../utils/urlSafety';
+import { isSensitivePath } from '../utils/sensitivePaths';
+import { lexShellCommand, ShellSyntaxError, type ShellDialect, type ShellStage, type ShellWord } from '../utils/shellLexer';
 
 // Security: Explicit allowlist of permitted command prefixes
 // This replaces the insecure denylist approach which was trivially bypassed
@@ -120,7 +122,8 @@ $gfx.Dispose(); $bmp.Dispose();
       windowsHide: true,
     });
     let stderr = '';
-    proc.stderr.on('data', (d: Buffer) => { stderr += d.toString(); });
+    proc.stdout.resume(); // drain — an unread stdout pipe can stall the child
+    proc.stderr.on('data', (d: Buffer) => { if (stderr.length < 64 * 1024) stderr += d.toString(); });
     const timer = setTimeout(() => {
       proc.kill();
       reject(new Error('Screenshot timed out after 10s'));
@@ -152,20 +155,6 @@ function splitPipelineStages(command: string): string[] {
   return command.split(PIPELINE_SEPARATOR).map(s => s.trim()).filter(Boolean);
 }
 
-// Matches shell redirect operators (`>`, `>>`, `2>`, `<`) and captures their
-// target, even when glued directly to the path with no space (`>../out.txt`).
-const REDIRECT_TARGET_RE = /(?:^|\s)\d?(?:>>?|<)\s*(\S+)/g;
-
-function extractRedirectTargets(stage: string): string[] {
-  const targets: string[] = [];
-  const re = new RegExp(REDIRECT_TARGET_RE);
-  let match: RegExpExecArray | null;
-  while ((match = re.exec(stage)) !== null) {
-    if (match[1]) targets.push(match[1]);
-  }
-  return targets;
-}
-
 // Standard discard/stream sinks — not real files, always outside any project
 // root once resolved (e.g. `/dev/null` → `C:\dev\null` on Windows), but safe
 // to redirect to since they can't be read back or used to exfiltrate data.
@@ -173,69 +162,159 @@ function isNullSink(target: string): boolean {
   return /^\/dev\/(null|stdout|stderr|zero)$/i.test(target) || /^(nul|con)$/i.test(target);
 }
 
-/**
- * Reject any argument in a stage that resolves (relative to the given
- * simulated cwd) to a location outside the project root. Flags (tokens
- * starting with `-`, including `--flag=value` forms) are skipped since they
- * aren't paths; everything else — including URLs and non-path words — is
- * resolved and containment-checked, which is a no-op for anything that isn't
- * actually an out-of-root path.
- */
-function assertStageArgsWithinRoot(stage: string, simulatedCwd: string): void {
-  const tokens = stage.split(/\s+/).slice(1); // drop the leading command token
-  for (const raw of tokens) {
-    if (!raw) continue;
-    const eq = raw.startsWith('--') ? raw.indexOf('=') : -1;
-    const candidate = eq !== -1 ? raw.slice(eq + 1) : raw;
-    if (candidate.startsWith('-') || isNullSink(candidate)) continue; // bare flag, or a discard sink — not a real path
-    const resolved = path.resolve(simulatedCwd, candidate);
-    if (!isPathWithinRoot(resolved)) {
-      throw new Error(
-        `Command rejected by security policy: argument '${candidate}' resolves outside the permitted project root.`
-      );
-    }
-  }
-  for (const target of extractRedirectTargets(stage)) {
-    if (isNullSink(target)) continue;
-    const resolved = path.resolve(simulatedCwd, target);
-    if (!isPathWithinRoot(resolved)) {
-      throw new Error(
-        `Command rejected by security policy: redirect target '${target}' would read/write outside the permitted project root.`
-      );
-    }
+/** The dialect of the shell run_shell will actually route through. */
+function currentShellDialect(): ShellDialect {
+  return process.platform === 'win32' && !WIN_BASH_PATH ? 'cmd' : 'posix';
+}
+
+function assertPathTokenWithinRoot(candidate: string, simulatedCwd: string, kind: 'argument' | 'redirect target'): void {
+  if (!candidate || isNullSink(candidate)) return;
+  const resolved = path.resolve(simulatedCwd, candidate);
+  if (!isPathWithinRoot(resolved)) {
+    throw new Error(
+      kind === 'redirect target'
+        ? `Command rejected by security policy: redirect target '${candidate}' would read/write outside the permitted project root.`
+        : `Command rejected by security policy: argument '${candidate}' resolves outside the permitted project root.`
+    );
   }
 }
 
+function assertNoExpansion(word: ShellWord): void {
+  if (word.expands) {
+    throw new Error(
+      `Command rejected by security policy: '${word.text.slice(0, 60)}' uses shell expansion ($VAR, ~, {a,b}, %VAR%), which can resolve outside the project root. Use an explicit relative path instead.`
+    );
+  }
+}
+
+/**
+ * Reject any argument or redirect target in a stage that resolves (relative
+ * to the given simulated cwd) to a location outside the project root. Words
+ * come from the shell-aware lexer, so quotes, escapes and glued redirects
+ * (`cat "../x"`, `\.\./x`, `echo a>../x`) are seen the way the shell sees
+ * them. Flags are skipped, but `--flag=value` values and short flags with a
+ * glued path value (`-o../out`) are still checked.
+ */
+function assertStageArgsWithinRoot(stage: ShellStage, simulatedCwd: string): void {
+  for (const word of stage.words.slice(1)) {
+    assertNoExpansion(word);
+    const raw = word.text;
+    if (!raw) continue;
+    if (raw.startsWith('--')) {
+      const eq = raw.indexOf('=');
+      if (eq !== -1) assertPathTokenWithinRoot(raw.slice(eq + 1), simulatedCwd, 'argument');
+      continue;
+    }
+    if (raw.startsWith('-')) {
+      // `-o../out`, `-C/etc` — a short flag with its value glued on.
+      const glued = raw.slice(2);
+      if (raw.length > 2 && (/[\\/]/.test(glued) || glued.startsWith('.'))) {
+        assertPathTokenWithinRoot(glued, simulatedCwd, 'argument');
+      }
+      continue;
+    }
+    assertPathTokenWithinRoot(raw, simulatedCwd, 'argument');
+  }
+  for (const target of stage.redirects) {
+    assertNoExpansion(target);
+    assertPathTokenWithinRoot(target.text, simulatedCwd, 'redirect target');
+  }
+}
+
+/** Short-flag cluster letters (`-uc` → "uc"), or '' if the word isn't one. */
+function shortFlagCluster(arg: string): string {
+  return /^-[A-Za-z0-9]+$/.test(arg) ? arg.slice(1) : '';
+}
+
+function commandBaseName(word: string): string {
+  return path.basename(word.replace(/\\/g, '/')).toLowerCase().replace(/\.(exe|cmd|bat)$/, '');
+}
+
+// Env vars that make an otherwise-safe binary load arbitrary code.
+const DANGEROUS_ENV_ASSIGNMENTS = /^(NODE_OPTIONS|LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]+|PYTHONSTARTUP|PYTHONPATH|PYTHONHOME|BASH_ENV|ENV|PATH|PERL5OPT|RUBYOPT|GIT_[A-Z_]+)=/i;
+
 // Per-stage argv-level safety. Runs after the prefix allowlist check.
-// Blocks code-eval / arbitrary-spawn flags on otherwise-allowed binaries.
-function rejectDangerousArgv(stage: string): void {
-  const lower = stage.toLowerCase();
-  if (/^node(?:\.exe)?\s/.test(lower)) {
-    if (/\s(-e|--eval|-p|--print|-r|--require|-i|--interactive)\b/.test(lower)) {
-      throw new Error(
-        `Command rejected: 'node' with -e/--eval/-p/--print/-r/--require/-i flags is not permitted (executes arbitrary code).`
-      );
+// Blocks code-eval / arbitrary-spawn flags on otherwise-allowed binaries,
+// including combined short flags (`python -uc`, `node -pe`).
+function rejectDangerousArgv(words: string[]): void {
+  if (words.length === 0) return;
+  const cmd = commandBaseName(words[0]!);
+  const args = words.slice(1);
+
+  if (cmd === 'node') {
+    for (const a of args) {
+      const lower = a.toLowerCase();
+      const cluster = shortFlagCluster(a);
+      if (
+        /[epri]/.test(cluster) ||
+        /^--(eval|print|require|import|loader|experimental-loader|interactive|inspect|inspect-brk|inspect-wait)(=|$)/.test(lower)
+      ) {
+        throw new Error(
+          `Command rejected: 'node' with -e/--eval/-p/--print/-r/--require/--import/--loader/-i/--inspect flags is not permitted (executes arbitrary code).`
+        );
+      }
     }
   }
-  if (/^npx(?:\.cmd)?\s/.test(lower)) {
-    if (/\s(-p|--package|-c|--call)\b/.test(lower)) {
-      throw new Error(
-        `Command rejected: 'npx' with -p/--package/-c/--call is not permitted (runs arbitrary packages).`
-      );
+
+  if (cmd === 'python' || cmd === 'python3' || cmd === 'py') {
+    for (const a of args) {
+      if (/[ci]/.test(shortFlagCluster(a))) {
+        throw new Error(
+          `Command rejected: 'python' with -c/-i flags is not permitted (executes arbitrary code). Run a script file instead.`
+        );
+      }
     }
   }
-  if (/^python3?(?:\.exe)?\s/.test(lower)) {
-    if (/\s(-c|-i)\b/.test(lower)) {
-      throw new Error(
-        `Command rejected: 'python' with -c/-i flags is not permitted (executes arbitrary code). Run a script file instead.`
-      );
+
+  if (cmd === 'npx') {
+    let idx = 0;
+    for (; idx < args.length; idx++) {
+      const a = args[idx]!;
+      const lower = a.toLowerCase();
+      if (/[pc]/.test(shortFlagCluster(a)) || /^--(package|call)(=|$)/.test(lower)) {
+        throw new Error(
+          `Command rejected: 'npx' with -p/--package/-c/--call is not permitted (runs arbitrary packages).`
+        );
+      }
+      if (!a.startsWith('-')) break;
     }
+    // `npx node -e …` / `npx python -c …` — check the wrapped command too.
+    if (idx < args.length) rejectDangerousArgv(args.slice(idx));
   }
-  if (/^find\s/.test(lower)) {
-    if (/\s(-exec|-execdir|-ok|-okdir)\b/.test(lower)) {
+
+  if (cmd === 'find') {
+    if (args.some(a => /^-(exec|execdir|ok|okdir)$/i.test(a))) {
       throw new Error(
         `Command rejected: 'find' with -exec/-execdir/-ok/-okdir is not permitted (spawns arbitrary commands).`
       );
+    }
+  }
+
+  if (cmd === 'env') {
+    // `env` runs whatever follows it — the wrapped command must pass the same
+    // allowlist and argv checks, and may not inject code-loading env vars.
+    let idx = 0;
+    for (; idx < args.length; idx++) {
+      const a = args[idx]!;
+      if (a.startsWith('-')) continue;
+      if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(a)) {
+        if (DANGEROUS_ENV_ASSIGNMENTS.test(a)) {
+          throw new Error(`Command rejected: 'env' may not set '${a.split('=')[0]}' (loads arbitrary code).`);
+        }
+        continue;
+      }
+      break;
+    }
+    const wrapped = args.slice(idx);
+    if (wrapped.length > 0) {
+      const wrappedText = wrapped.join(' ');
+      const allowed = ALLOWED_COMMAND_PREFIXES.some(prefix =>
+        wrappedText.toLowerCase().startsWith(prefix.toLowerCase()) || wrappedText.toLowerCase() === prefix.trim().toLowerCase()
+      );
+      if (!allowed) {
+        throw new Error(`Command rejected by security policy: 'env' wrapping '${wrappedText.slice(0, 50)}' is not in the allowlist.`);
+      }
+      rejectDangerousArgv(wrapped);
     }
   }
 }
@@ -282,17 +361,56 @@ const WIN_BASH_PATH: string | null = (() => {
   return null;
 })();
 
-// Files whose contents must never be auto-embedded into vector memory.
-// Reading them is allowed (they live inside the project root), but persisting
-// their contents into .solvent_memory.sqlite would copy credentials into
-// long-term storage that later surfaces in retrieval results.
-function isSensitivePath(p: string): boolean {
-  const base = path.basename(p).toLowerCase();
-  if (/^\.env(\..+)?$/.test(base)) return true;
-  if (/\.(pem|key|p12|pfx|crt|der)$/.test(base)) return true;
-  if (/^id_(rsa|dsa|ecdsa|ed25519)/.test(base)) return true;
-  if (/(credential|secret|token|apikey|api_key)/.test(base)) return true;
-  return false;
+const IMAGE_FILTERS = new Set(['grayscale', 'sepia', 'blur', 'sharpen']);
+
+// Directories that grep_files / replace_in_files never descend into.
+const GREP_EXCLUDED_DIRS = ['node_modules', '.git', 'dist', 'build'];
+
+function isInExcludedDir(line: string): boolean {
+  return GREP_EXCLUDED_DIRS.some(d => line.includes(`\\${d}\\`) || line.includes(`/${d}/`) || line.startsWith(`${d}\\`) || line.startsWith(`${d}/`));
+}
+
+/** `*.{ts,tsx}` / `*.ts` / `index.*` → basename matcher. */
+function globToBasenameRegex(glob: string): RegExp {
+  const base = glob.replace(/\\/g, '/').split('/').pop() || '*';
+  const alternatives: string[] = [];
+  const brace = base.match(/^(.*)\{([^}]+)\}(.*)$/);
+  if (brace) {
+    for (const alt of (brace[2] ?? '').split(',')) alternatives.push(`${brace[1] ?? ''}${alt}${brace[3] ?? ''}`);
+  } else {
+    alternatives.push(base);
+  }
+  const toRe = (g: string) => g.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.');
+  return new RegExp(`^(?:${alternatives.map(toRe).join('|')})$`, process.platform === 'win32' ? 'i' : '');
+}
+
+// Tools that write files, spawn processes or mutate persistent state —
+// DRY_RUN=true short-circuits every one of them.
+const MUTATING_TOOLS = new Set([
+  'write_file', 'create_file', 'edit_file', 'delete_file', 'move_file', 'replace_in_files', 'apply_patch',
+  'run_shell', 'run_tests', 'install_package', 'git_commit',
+  'native_backend_start', 'native_backend_stop',
+  'resize_image', 'crop_image', 'apply_image_filter',
+  'invalidate_memory', 'crystallize_memory', 'write_core_memory', 'delete_core_memory',
+]);
+
+// Windows binaries that are real .exe files and can be spawned without cmd.exe.
+const WINDOWS_NATIVE_EXES = new Set(['git', 'node', 'python', 'python3', 'py', 'findstr', 'where', 'tasklist', 'netstat']);
+
+// Arguments that are safe to place on a cmd.exe command line unquoted: no
+// spaces, quotes, `%`/`!` expansion, `^` escapes, or `& | < > ( )` operators.
+const CMD_SAFE_ARG = /^[\w@+=:,./\\~*-]+$/;
+
+/** Kill a child and its descendants (cmd.exe shims leave npm/node grandchildren behind). */
+function killProcessTree(proc: ReturnType<typeof spawn>): void {
+  if (process.platform === 'win32' && proc.pid) {
+    try {
+      spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+        .on('error', () => { try { proc.kill(); } catch { /* already gone */ } });
+      return;
+    } catch { /* fall through */ }
+  }
+  try { proc.kill(); } catch { /* already gone */ }
 }
 
 // Commands that require explicit opt-in via SOLVENT_ALLOW_SHELL=true
@@ -313,6 +431,16 @@ const DANGEROUS_COMMANDS = [
   'begin{system',   // awk system() escape, even if awk re-added later
   'begin{getline',  // awk getline pipe escape
 ];
+
+// Match each dangerous pattern on word boundaries — a plain substring test
+// rejected innocent commands (`git add .` contains "dd").
+// Patterns with a trailing space ('eval ', 'su ') keep requiring whitespace
+// after them, so `.exec(` inside a quoted argument doesn't match 'exec '.
+const DANGEROUS_COMMAND_RES = DANGEROUS_COMMANDS.map(p => {
+  const escaped = p.trim().toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const tail = p.endsWith(' ') ? '\\s' : '(?![\\w-])';
+  return new RegExp(`(?:^|[^\\w-])${escaped}${tail}`);
+});
 
 export class ToolService {
   private isDryRun = process.env.DRY_RUN === 'true';
@@ -343,7 +471,7 @@ export class ToolService {
     }
 
     // GUARD: Dry Run Mode
-    if (this.isDryRun && ['write_file', 'run_shell', 'invalidate_memory'].includes(toolName)) {
+    if (this.isDryRun && MUTATING_TOOLS.has(toolName)) {
       const msg = `[DRY RUN] Would execute ${toolName}`;
       logger.info(msg);
       await transactionService.logComplete(txId, { dry_run: true, message: msg });
@@ -411,35 +539,9 @@ export class ToolService {
           result = deleted ? `Deleted core memory key: ${key}` : `Key not found: ${key}`;
           break;
         }
-        case 'fetch_preview_source': {
-          const url = args.url as string;
-          if (!url || !url.startsWith('http')) {
-            result = { error: 'Invalid URL. Provide an http/https URL from the system prompt.' };
-            break;
-          }
-          try {
-            const response = await safeAxiosGet(url, {
-              timeout: 10_000,
-              headers: { Accept: 'text/html' },
-              responseType: 'text',
-              maxHops: 5,
-            });
-            const html = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
-            result = {
-              url,
-              html: html.length > 20_000 ? html.slice(0, 20_000) + '\n... (truncated)' : html,
-              length: html.length,
-            };
-          } catch (err: unknown) {
-            if (err instanceof UrlSafetyError) {
-              result = { error: 'Cannot fetch private/local addresses' };
-              break;
-            }
-            const msg = err instanceof Error ? err.message : String(err);
-            result = { error: `Failed to fetch preview: ${msg}` };
-          }
+        case 'fetch_preview_source':
+          result = await this.fetchPreviewSource(args.url as string);
           break;
-        }
         case 'get_file_outline':
           result = await this.getFileOutline(args.path as string);
           break;
@@ -450,7 +552,11 @@ export class ToolService {
             args.include as string | undefined
           );
           break;
+        // Every tool that writes, creates, moves or deletes a file goes
+        // through ensureApprovalForWrite — new paths need approval unless
+        // AUTO_APPROVE=true (set in .env by default).
         case 'edit_file':
+          await this.ensureApprovalForWrite(args.path as string);
           result = await this.editFile(
             args.path as string,
             args.old_content as string,
@@ -458,15 +564,20 @@ export class ToolService {
           );
           break;
         case 'create_file':
+          await this.ensureApprovalForWrite(args.path as string);
           result = await this.createFile(args.path as string, args.content as string);
           break;
         case 'delete_file':
+          await this.ensureApprovalForWrite(args.path as string);
           result = await this.deleteFile(args.path as string);
           break;
         case 'move_file':
+          // The destination is the new file being created.
+          await this.ensureApprovalForWrite(args.to as string);
           result = await this.moveFile(args.from as string, args.to as string);
           break;
         case 'replace_in_files':
+          await this.ensureApprovalForWrite((args.path as string | undefined) || '.');
           result = await this.replaceInFiles(
             args.pattern as string,
             args.replacement as string,
@@ -513,7 +624,8 @@ export class ToolService {
         case 'native_backend_start': {
           const { port, pid } = await nativeCopyManager.start(
             args.projectPath as string,
-            (args.port as number) ?? 3002
+            // Models sometimes send the port as a string; start() rejects non-integers.
+            args.port === undefined || args.port === null ? 3002 : Number(args.port)
           );
           result = { ok: true, port, pid, hint: 'Call native_backend_status to confirm readiness before declaring the server live.' };
           break;
@@ -527,10 +639,10 @@ export class ToolService {
           break;
 
         // ── Agent planning tools ──
-        // All three use sessionId='default' to match the prompt injection in
-        // baseOpenAIService which calls renderForPrompt('default').
+        // All three key the scratchpad by the request's chat session (falling back to
+        // 'default'), matching baseOpenAIService's renderForPrompt(options.sessionId || 'default').
         case 'create_plan': {
-          const sessionId = 'default';
+          const sessionId = getRequestContext()?.sessionId || 'default';
           const steps = (args.steps as string[]) || [];
           if (steps.length === 0) throw new Error('create_plan requires at least one step');
           const plan = agentScratchpadService.createPlan(sessionId, steps);
@@ -543,7 +655,7 @@ export class ToolService {
           break;
         }
         case 'update_plan': {
-          const sessionId = 'default';
+          const sessionId = getRequestContext()?.sessionId || 'default';
           const stepId = args.step_id as string;
           const status = args.status as string;
           if (!stepId || !status) throw new Error('update_plan requires step_id and status');
@@ -558,7 +670,7 @@ export class ToolService {
           break;
         }
         case 'reflect': {
-          const sessionId = 'default';
+          const sessionId = getRequestContext()?.sessionId || 'default';
           const verified = (args.verified as string[]) || [];
           const assumed = (args.assumed as string[]) || [];
           const next = args.next as string;
@@ -629,15 +741,21 @@ export class ToolService {
 
           const relPath = focusFile.replace(/\\/g, '/');
 
+          // projectRoot (optional, relative to the effective root) scopes
+          // both the type-check and the test-file lookup.
+          const focusRoot = typeof args.projectRoot === 'string' && args.projectRoot
+            ? validatePath(args.projectRoot)
+            : getEffectiveProjectRoot();
+
           // Use existing getErrors and filter to the target file
-          const allErrors = await this.getErrors();
+          const allErrors = await this.getErrors(focusRoot === getEffectiveProjectRoot() ? undefined : focusRoot);
           const relevantErrors = (allErrors.errors || []).filter((e: { file?: string; message?: string }) =>
             e.file?.includes(relPath) || e.file?.includes(path.basename(relPath))
           );
 
           // Check for corresponding test files
           const baseName = relPath.replace(/\.(ts|tsx|js|jsx)$/, '');
-          const effectiveRoot = getEffectiveProjectRoot();
+          const effectiveRoot = focusRoot;
           const testPatterns = [`${baseName}.test.ts`, `${baseName}.spec.ts`, `${baseName}.test.tsx`, `${baseName}.spec.tsx`];
           const testFiles = await Promise.all(
             testPatterns.map(async (tp) => {
@@ -814,10 +932,21 @@ export class ToolService {
     };
   }
 
+  /**
+   * `<dir>/<name>_<suffix><ext>` next to the source image, re-validated.
+   * (String.replace(ext, …) hit the first occurrence of the extension
+   * anywhere in the path — e.g. a `.png` directory — and broke when ext was ''.)
+   */
+  private deriveImageOutputPath(fullPath: string, suffix: string): string {
+    const ext = path.extname(fullPath);
+    const base = path.basename(fullPath, ext);
+    return validatePath(path.join(path.dirname(fullPath), `${base}_${suffix}${ext || '.png'}`));
+  }
+
   private async resizeImage(imagePath: string, width?: number, height?: number) {
     const fullPath = validatePath(imagePath);
-    const ext = path.extname(fullPath);
-    const outputPath = fullPath.replace(ext, `_resized_${Date.now()}${ext}`);
+    const outputPath = this.deriveImageOutputPath(fullPath, `resized_${Date.now()}`);
+    await this.ensureApprovalForWrite(outputPath); // new output file
     
     await sharp(fullPath)
       .resize(width, height)
@@ -833,8 +962,8 @@ export class ToolService {
 
   private async cropImage(imagePath: string, left: number, top: number, width: number, height: number) {
     const fullPath = validatePath(imagePath);
-    const ext = path.extname(fullPath);
-    const outputPath = fullPath.replace(ext, `_cropped_${Date.now()}${ext}`);
+    const outputPath = this.deriveImageOutputPath(fullPath, `cropped_${Date.now()}`);
+    await this.ensureApprovalForWrite(outputPath); // new output file
     
     await sharp(fullPath)
       .extract({ left, top, width, height })
@@ -849,9 +978,14 @@ export class ToolService {
   }
 
   private async applyImageFilter(imagePath: string, filter: 'grayscale' | 'sepia' | 'blur' | 'sharpen') {
+    // Validate before interpolating into the output filename — an arbitrary
+    // string here could carry path separators / traversal.
+    if (!IMAGE_FILTERS.has(filter)) {
+      throw new Error(`apply_image_filter: unknown filter '${String(filter).slice(0, 30)}'. Use one of: ${[...IMAGE_FILTERS].join(', ')}`);
+    }
     const fullPath = validatePath(imagePath);
-    const ext = path.extname(fullPath);
-    const outputPath = fullPath.replace(ext, `_filter_${filter}_${Date.now()}${ext}`);
+    const outputPath = this.deriveImageOutputPath(fullPath, `filter_${filter}_${Date.now()}`);
+    await this.ensureApprovalForWrite(outputPath); // new output file
     
     let transformer = sharp(fullPath);
     
@@ -1001,7 +1135,9 @@ export class ToolService {
     if (braveKey) {
       const response = await axios.get('https://api.search.brave.com/res/v1/web/search', {
         params: { q: query, count: 20 },
-        headers: { 'Accept': 'application/json', 'X-Subscription-Token': braveKey }
+        headers: { 'Accept': 'application/json', 'X-Subscription-Token': braveKey },
+        timeout: 15_000,
+        maxContentLength: 5 * 1024 * 1024,
       });
       return response.data;
     }
@@ -1009,7 +1145,9 @@ export class ToolService {
     const serperKey = process.env.SERPER_API_KEY;
     if (serperKey) {
       const response = await axios.post('https://google.serper.dev/search', { q: query }, {
-        headers: { 'X-API-KEY': serperKey, 'Content-Type': 'application/json' }
+        headers: { 'X-API-KEY': serperKey, 'Content-Type': 'application/json' },
+        timeout: 15_000,
+        maxContentLength: 5 * 1024 * 1024,
       });
       return response.data;
     }
@@ -1017,11 +1155,67 @@ export class ToolService {
     throw new Error("No search API key configured. Set BRAVE_SEARCH_API_KEY or SERPER_API_KEY.");
   }
 
+  /**
+   * Fetch the running app preview's HTML. Previews are almost always on
+   * loopback (`http://localhost:5173`, the native sidecar on :3002), which the
+   * SSRF guard in safeAxiosGet rejects — so loopback http(s) URLs are fetched
+   * directly with redirects disabled, except the backend's own port (its API
+   * and internal endpoints must not be reachable through the agent).
+   * Everything else still goes through safeAxiosGet.
+   */
+  private async fetchPreviewSource(url: string): Promise<Record<string, unknown>> {
+    if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) {
+      return { error: 'Invalid URL. Provide an http/https URL from the system prompt.' };
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(url);
+    } catch {
+      return { error: 'Invalid URL. Provide an http/https URL from the system prompt.' };
+    }
+    const host = parsed.hostname.toLowerCase();
+    const isLoopback = host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1';
+    const port = parsed.port ? Number(parsed.port) : parsed.protocol === 'https:' ? 443 : 80;
+    const backendPort = Number(process.env.PORT || 3001);
+
+    const opts = {
+      timeout: 10_000,
+      headers: { Accept: 'text/html' },
+      responseType: 'text' as const,
+      maxContentLength: 5 * 1024 * 1024,
+    };
+    try {
+      let response;
+      if (isLoopback) {
+        if (port === backendPort) {
+          return { error: `Cannot fetch the Solvent backend itself (port ${backendPort}). Use the app preview URL from the system prompt.` };
+        }
+        response = await axios.get(parsed.toString(), { ...opts, maxRedirects: 0, proxy: false });
+      } else {
+        response = await safeAxiosGet(url, { ...opts, maxHops: 5 });
+      }
+      const html = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
+      return {
+        url,
+        html: html.length > 20_000 ? html.slice(0, 20_000) + '\n... (truncated)' : html,
+        length: html.length,
+      };
+    } catch (err: unknown) {
+      if (err instanceof UrlSafetyError) {
+        return { error: 'Cannot fetch private/local addresses' };
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      return { error: `Failed to fetch preview: ${msg}` };
+    }
+  }
+
   private async fetchWebContent(url: string) {
     const response = await safeAxiosGet(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' },
       responseType: 'text',
       maxHops: 5,
+      timeout: 15_000,
+      maxContentLength: 5 * 1024 * 1024,
     });
     // Return a slice to avoid token overflow. Guard non-string bodies — JSON
     // responses arrive as objects when axios sniffs the content type.
@@ -1126,31 +1320,49 @@ export class ToolService {
     let binArgs: string[];
     if (process.platform === 'win32') {
       bin = 'findstr';
-      binArgs = ['/s', '/n', literal ? '/l' : '/r', pattern, ...this.expandGlobForFindstr(includeGlob, basePath)];
+      // `/c:` makes the whole pattern one search string — without it findstr
+      // splits on spaces into OR'd words, and a leading `/` reads as an option.
+      binArgs = ['/s', '/n', literal ? '/l' : '/r', `/c:${pattern}`, ...this.expandGlobForFindstr(includeGlob, basePath)];
     } else {
       bin = 'grep';
-      binArgs = ['-rn', ...(literal ? ['-F'] : []), ...includeArgs, '--', pattern, basePath];
+      binArgs = [
+        '-rn', ...(literal ? ['-F'] : []), ...includeArgs,
+        ...GREP_EXCLUDED_DIRS.map(d => `--exclude-dir=${d}`),
+        '--', pattern, basePath,
+      ];
     }
 
     return new Promise((resolve) => {
       const proc = spawn(bin, binArgs, {
         cwd: effectiveRoot,
+        windowsHide: true,
       });
 
       let output = '';
-      proc.stdout.on('data', (d: Buffer) => { output += d.toString(); });
-      proc.on('close', () => {
-        if (!output.trim()) {
-          resolve(`No matches found for "${pattern}"`);
-          return;
-        }
-        const lines = output.trim().split('\n').slice(0, 30);
-        const relativized = lines.map((l) => l.replace(effectiveRoot + pathSep, ''));
-        const suffix = output.trim().split('\n').length > 30 ? '\n... (results truncated at 30)' : '';
-        resolve(relativized.join('\n') + suffix);
-      });
-      proc.on('error', () => resolve(`No matches found for "${pattern}"`));
-      setTimeout(() => { proc.kill(); resolve(output.trim() || 'Search timed out'); }, 10_000);
+      let settled = false;
+      const MAX_OUTPUT = 1024 * 1024;
+      const finish = (text: string) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(text);
+      };
+      const format = (): string => {
+        // findstr can't exclude directories — drop node_modules/.git/etc. here.
+        const lines = output.trim().split(/\r?\n/).filter(l => l && !isInExcludedDir(l));
+        if (lines.length === 0) return `No matches found for "${pattern}"`;
+        const relativized = lines.slice(0, 30).map((l) => l.replace(effectiveRoot + pathSep, ''));
+        const suffix = lines.length > 30 ? '\n... (results truncated at 30)' : '';
+        return relativized.join('\n') + suffix;
+      };
+      const timer = setTimeout(() => {
+        proc.kill();
+        finish(output.trim() ? format() : 'Search timed out');
+      }, 10_000);
+      proc.stdout.on('data', (d: Buffer) => { if (output.length < MAX_OUTPUT) output += d.toString(); });
+      proc.stderr.on('data', () => { /* drain — findstr/grep warn about unreadable files */ });
+      proc.on('close', () => finish(format()));
+      proc.on('error', () => finish(`No matches found for "${pattern}"`));
     });
   }
 
@@ -1187,7 +1399,9 @@ export class ToolService {
       );
     }
 
-    const updated = fileContent.replace(oldContent, newContent);
+    // Function replacer: a string replacement would interpret `$&`, `$$`,
+    // `` $` `` and `$'` inside the new code and corrupt the file.
+    const updated = fileContent.replace(oldContent, () => newContent);
     await fs.writeFile(fullPath, updated, 'utf-8');
     return { status: 'success', path: filePath };
   }
@@ -1224,42 +1438,65 @@ export class ToolService {
     replacement: string,
     glob?: string,
     searchPath?: string
-  ): Promise<{ status: string; filesModified: number; files: string[] }> {
-    // literal: the replacement below is a literal split/join, so the search
-    // must be literal too — otherwise regex patterns find files the replace
-    // step then can't touch.
-    const grepResult = await this.grepFiles(pattern, searchPath || '.', glob || '*.{ts,tsx,js,jsx,css,json}', { literal: true });
-    if (grepResult.startsWith('No matches') || grepResult.startsWith('Search timed')) {
-      return { status: 'no_matches', filesModified: 0, files: [] };
-    }
+  ): Promise<{ status: string; filesModified: number; files: string[]; truncated?: boolean }> {
+    if (typeof pattern !== 'string' || pattern.length === 0) throw new Error('replace_in_files requires a non-empty pattern');
+    if (typeof replacement !== 'string') throw new Error('replace_in_files requires a replacement string');
 
-    const filePaths = [
-      ...new Set(
-        grepResult
-          .split('\n')
-          .filter((l) => !l.startsWith('...'))
-          .map((l) => l.split(':')[0])
-          .filter(Boolean)
-      ),
-    ];
+    // Walk the tree directly instead of parsing grep output: grep_files caps
+    // at 30 lines (silently skipping files) and its `file:line:` output split
+    // on ':' broke on Windows drive letters (`C:\...`).
+    const effectiveRoot = getEffectiveProjectRoot();
+    const basePath = validatePath(searchPath || '.');
+    const matcher = globToBasenameRegex(glob || '*.{ts,tsx,js,jsx,css,json}');
+    const MAX_FILES_SCANNED = 20_000;
+    const MAX_FILE_BYTES = 2 * 1024 * 1024;
+    const excluded = new Set(GREP_EXCLUDED_DIRS);
 
     const modified: string[] = [];
-    for (const fp of filePaths) {
-      if (!fp) continue;
+    let scanned = 0;
+    let truncated = false;
+    const stack: string[] = [basePath];
+    while (stack.length > 0) {
+      const dir = stack.pop()!;
+      let entries: import('fs').Dirent[];
       try {
-        const fullPath = validatePath(fp);
-        const content = await fs.readFile(fullPath, 'utf-8');
-        const updated = content.split(pattern).join(replacement);
-        if (updated !== content) {
-          await fs.writeFile(fullPath, updated, 'utf-8');
-          modified.push(fp);
-        }
+        entries = await fs.readdir(dir, { withFileTypes: true });
       } catch {
-        // skip unreadable files
+        continue;
       }
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          if (!excluded.has(entry.name)) stack.push(full);
+          continue;
+        }
+        if (!entry.isFile() || !matcher.test(entry.name)) continue;
+        if (isSensitivePath(full)) continue;
+        if (++scanned > MAX_FILES_SCANNED) { truncated = true; break; }
+        try {
+          const stat = await fs.stat(full);
+          if (stat.size > MAX_FILE_BYTES) continue;
+          const content = await fs.readFile(full, 'utf-8');
+          if (content.slice(0, 8192).includes('\0')) continue; // binary
+          if (!content.includes(pattern)) continue;
+          const updated = content.split(pattern).join(replacement);
+          if (updated !== content) {
+            await fs.writeFile(full, updated, 'utf-8');
+            modified.push(path.relative(effectiveRoot, full).split(path.sep).join('/'));
+          }
+        } catch {
+          // skip unreadable files
+        }
+      }
+      if (truncated) break;
     }
 
-    return { status: 'success', filesModified: modified.length, files: modified };
+    return {
+      status: modified.length > 0 ? 'success' : 'no_matches',
+      filesModified: modified.length,
+      files: modified,
+      ...(truncated ? { truncated: true } : {}),
+    };
   }
 
   private spawnProcess(
@@ -1267,21 +1504,59 @@ export class ToolService {
     args: string[],
     options: { cwd?: string; timeoutMs?: number }
   ): Promise<{ stdout: string; exitCode: number }> {
+    // Never hand argv to a shell: on Windows `shell: true` joins args with
+    // spaces into a cmd.exe command line, so `git commit -m "a & calc"` ran
+    // calc. Native executables (git, node, python) are spawned directly.
+    // npm/npx/etc. are .cmd shims that Windows can only run through cmd.exe,
+    // so those go through `cmd.exe /d /s /c` only after every argument has
+    // passed a strict charset check that leaves cmd nothing to interpret.
+    let executable = bin;
+    let spawnArgs = args;
+    let verbatim = false;
+    if (process.platform === 'win32' && !WINDOWS_NATIVE_EXES.has(commandBaseName(bin))) {
+      for (const a of [bin, ...args]) {
+        if (!CMD_SAFE_ARG.test(a)) {
+          return Promise.resolve({
+            stdout: `Rejected argument '${a.slice(0, 60)}': on Windows, arguments to ${bin} may only contain letters, digits and _ - . / \\ : @ = + , ~ * (no spaces, quotes or shell metacharacters).`,
+            exitCode: 1,
+          });
+        }
+      }
+      executable = process.env.ComSpec || 'cmd.exe';
+      spawnArgs = ['/d', '/s', '/c', `"${[bin, ...args].join(' ')}"`];
+      verbatim = true;
+    }
+
     return new Promise((resolve) => {
-      // On Windows, commands like npm/npx/git are .cmd scripts that require shell
-      const useShell = process.platform === 'win32';
-      const proc = spawn(bin, args, { cwd: options.cwd ?? getEffectiveProjectRoot(), shell: useShell });
+      let proc: ReturnType<typeof spawn>;
+      try {
+        proc = spawn(executable, spawnArgs, {
+          cwd: options.cwd ?? getEffectiveProjectRoot(),
+          shell: false,
+          windowsHide: true,
+          windowsVerbatimArguments: verbatim,
+        });
+      } catch (e: unknown) {
+        resolve({ stdout: e instanceof Error ? e.message : String(e), exitCode: 1 });
+        return;
+      }
       let stdout = '';
       let resolved = false;
+      const ms = options.timeoutMs ?? 30_000;
+      const timer = setTimeout(() => {
+        killProcessTree(proc);
+        done({ stdout: stdout + '\n[TIMED OUT]', exitCode: 1 });
+      }, ms);
       const done = (result: { stdout: string; exitCode: number }) => {
+        clearTimeout(timer);
         if (!resolved) { resolved = true; resolve(result); }
       };
-      proc.stdout.on('data', (d: Buffer) => { stdout += d.toString(); });
-      proc.stderr.on('data', (d: Buffer) => { stdout += d.toString(); });
+      const MAX = 1024 * 1024;
+      const append = (d: Buffer) => { if (stdout.length < MAX) stdout += d.toString(); };
+      proc.stdout?.on('data', append);
+      proc.stderr?.on('data', append);
       proc.on('close', (code) => done({ stdout, exitCode: code ?? 0 }));
       proc.on('error', (e: Error) => done({ stdout: e.message, exitCode: 1 }));
-      const ms = options.timeoutMs ?? 30_000;
-      setTimeout(() => { proc.kill(); done({ stdout: stdout + '\n[TIMED OUT]', exitCode: 1 }); }, ms);
     });
   }
 
@@ -1290,12 +1565,22 @@ export class ToolService {
     // validatePath: a relative cwd like "../../" must not escape the project.
     const workDir = cwd ? validatePath(cwd) : effectiveRoot;
     const cmd = command || 'npx tsc --noEmit --pretty false';
-    // spawnProcess uses shell:true on Windows — run_tests must pass the same
-    // security policy as run_shell or it becomes an allowlist bypass.
+    // run_tests must pass the same security policy as run_shell or it
+    // becomes an allowlist bypass.
     if (process.env.SOLVENT_ALLOW_SHELL !== 'true') {
       this.assertCommandAllowed(cmd);
     }
-    const parts = cmd.split(/\s+/);
+    // spawnProcess never uses a shell, so pipelines/redirects can't work here.
+    let lexedTest: ReturnType<typeof lexShellCommand>;
+    try {
+      lexedTest = lexShellCommand(cmd, 'posix');
+    } catch (err: unknown) {
+      throw new Error(`run_tests: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (lexedTest.stages.length !== 1 || lexedTest.stages[0]!.redirects.length > 0) {
+      throw new Error('run_tests: pipelines, chains and redirects are not supported — pass a single command (use run_shell for pipelines).');
+    }
+    const parts = lexedTest.stages[0]!.words.map(w => w.text);
     const bin = parts[0] ?? 'npx';
     const binArgs = parts.slice(1);
     const { stdout, exitCode } = await this.spawnProcess(bin, binArgs, { cwd: workDir, timeoutMs: 30_000 });
@@ -1320,9 +1605,13 @@ export class ToolService {
   private async installPackage(packages: string[], cwd?: string): Promise<{ status: string; packages: string[] }> {
     const effectiveRoot = getEffectiveProjectRoot();
     const workDir = cwd ? validatePath(cwd) : effectiveRoot;
-    // Package args reach a shell-spawned npm on Windows — restrict to the npm
-    // name/version charset and reject flag injection (leading '-').
-    const SAFE_PACKAGE = /^(@[a-z0-9~][\w.-]*\/)?[a-z0-9~][\w.-]*(@[\w.^~<>=+*-]+)?$/i;
+    // Package args reach npm.cmd (via cmd.exe) on Windows — restrict to the
+    // npm name charset plus a plain version/tag, with no `< > ^ = *` (cmd
+    // redirection/escape characters), and reject flag injection (leading '-').
+    const SAFE_PACKAGE = /^(@[a-z0-9-~][a-z0-9-._~]*\/)?[a-z0-9-~][a-z0-9-._~]*(@[a-zA-Z0-9._~+-]+)?$/;
+    if (!Array.isArray(packages) || packages.length === 0) {
+      throw new Error('install_package: packages must be a non-empty array');
+    }
     for (const pkg of packages) {
       if (typeof pkg !== 'string' || pkg.startsWith('-') || !SAFE_PACKAGE.test(pkg)) {
         throw new Error(`install_package: invalid package name '${String(pkg).slice(0, 60)}'`);
@@ -1339,12 +1628,14 @@ export class ToolService {
   }
 
   private async gitDiff(file?: string): Promise<string> {
-    const args = file ? ['diff', '--', file] : ['diff'];
+    // validatePath: the file must stay inside the project root.
+    const args = file ? ['diff', '--', validatePath(file)] : ['diff'];
     const { stdout } = await this.spawnProcess('git', args, {});
     return stdout.length > 8000 ? stdout.slice(0, 8000) + '\n... (diff truncated)' : stdout || '(no changes)';
   }
 
   private async gitCommitAll(message: string): Promise<{ status: string; message: string }> {
+    if (typeof message !== 'string' || !message.trim()) throw new Error('git_commit requires a non-empty message');
     await this.spawnProcess('git', ['add', '-A'], {});
     const { exitCode, stdout } = await this.spawnProcess('git', ['commit', '-m', message], {});
     if (exitCode !== 0) throw new Error(`git commit failed: ${stdout.slice(0, 300)}`);
@@ -1393,12 +1684,27 @@ export class ToolService {
     }
 
     // First, check for dangerous commands (always blocked)
-    for (const dangerous of DANGEROUS_COMMANDS) {
-      if (normalizedCommand.includes(dangerous.toLowerCase())) {
+    DANGEROUS_COMMANDS.forEach((dangerous, i) => {
+      if (DANGEROUS_COMMAND_RES[i]!.test(normalizedCommand)) {
         throw new Error(
           `Command rejected by security policy: Contains dangerous pattern '${dangerous}'. Set SOLVENT_ALLOW_SHELL=true to enable arbitrary command execution (not recommended).`
         );
       }
+    });
+
+    // Lex the command the way the routed shell will see it: quote-aware
+    // stage splitting, glued redirects, escape/quote removal, and expansion
+    // flags. Syntax we can't model safely (unclosed quotes, heredocs,
+    // process substitution, subshell parens) is rejected outright.
+    const dialect: ShellDialect = currentShellDialect();
+    let stages: ShellStage[];
+    try {
+      stages = lexShellCommand(command, dialect).stages;
+    } catch (err: unknown) {
+      if (err instanceof ShellSyntaxError) {
+        throw new Error(`Command rejected by security policy: ${err.message}`);
+      }
+      throw err;
     }
 
     // Validate every pipeline stage's first token against the allowlist, and
@@ -1410,33 +1716,36 @@ export class ToolService {
     // which also blocks single-stage traversal with no `cd` at all
     // (e.g. `cat ../../../etc/passwd`).
     let simulatedCwd = getEffectiveProjectRoot();
-    for (const stage of splitPipelineStages(command)) {
-      const stageLower = stage.toLowerCase();
+    for (const stage of stages) {
+      const stageText = stage.raw;
+      const stageLower = stageText.toLowerCase();
       const allowed = ALLOWED_COMMAND_PREFIXES.some(prefix =>
         stageLower.startsWith(prefix.toLowerCase()) || stageLower === prefix.trim().toLowerCase()
       );
-      if (!allowed) {
+      if (!allowed || stage.words.length === 0) {
         throw new Error(
-          `Command rejected by security policy: pipeline stage '${stage.substring(0, 50)}${stage.length > 50 ? '...' : ''}' is not in the allowlist. Allowed commands: ${ALLOWED_COMMAND_PREFIXES.join(', ')}.`
+          `Command rejected by security policy: pipeline stage '${stageText.substring(0, 50)}${stageText.length > 50 ? '...' : ''}' is not in the allowlist. Allowed commands: ${ALLOWED_COMMAND_PREFIXES.join(', ')}.`
         );
       }
-      rejectDangerousArgv(stage);
+      const argv = stage.words.map(w => w.text);
+      rejectDangerousArgv(argv);
 
-      const cdMatch = /^cd(?:\s+(.*))?$/i.exec(stage.trim());
-      if (cdMatch) {
-        const arg = (cdMatch[1] ?? '').trim();
+      if (argv[0]!.toLowerCase() === 'cd') {
+        // cmd.exe's `cd /d <path>` switches drive as well — the path is the next word.
+        const argWords = stage.words.slice(1).filter(w => !(dialect === 'cmd' && w.text.toLowerCase() === '/d'));
+        const argWord = argWords[0];
         // Bare `cd`, `cd -`, and `cd ~` all resolve via $HOME/$OLDPWD in a
         // real shell — none of which we control or can validate here — so
         // they're rejected outright rather than risking an untracked escape.
-        if (!arg || arg === '-' || arg === '~' || arg.startsWith('~/')) {
+        if (!argWord || argWord.text === '-' || argWord.expands || argWords.length > 1) {
           throw new Error(
-            `Command rejected by security policy: 'cd' with no argument (or '~'/'-') is not permitted — it may resolve outside the project root via $HOME.`
+            `Command rejected by security policy: 'cd' must take exactly one explicit path (no bare 'cd', '-', '~' or $VAR) — it may resolve outside the project root.`
           );
         }
-        const resolved = path.resolve(simulatedCwd, arg);
+        const resolved = path.resolve(simulatedCwd, argWord.text);
         if (!isPathWithinRoot(resolved)) {
           throw new Error(
-            `Command rejected by security policy: 'cd ${arg}' would move outside the permitted project root.`
+            `Command rejected by security policy: 'cd ${argWord.text}' would move outside the permitted project root.`
           );
         }
         simulatedCwd = resolved;
@@ -1463,8 +1772,9 @@ export class ToolService {
    *   most common pipe-based exfiltration patterns (e.g. `curl | bash`), but is
    *   not exhaustive. Set SOLVENT_ALLOW_SHELL=false in production to disable shell
    *   execution entirely if the feature is not needed.
-   * - Command arguments are split on whitespace only; quoted arguments with spaces
-   *   are not handled correctly (e.g. `grep "foo bar" file.txt` will break).
+   * - Arguments are lexed with shell quoting rules (utils/shellLexer.ts), but
+   *   only a subset of shell syntax is modelled; anything outside it (heredocs,
+   *   subshells, process substitution, $VAR/~ expansion) is rejected.
    */
   private async runShell(command: string): Promise<{ stdout: string; stderr: string }> {
     // Check if arbitrary shell execution is explicitly enabled
@@ -1509,7 +1819,16 @@ export class ToolService {
     // shell — `&` backgrounds, `$!`, `sleep`, `|| echo`, `/dev/null`, etc.
     // — none of which cmd.exe handles correctly). Fall back to cmd /c with
     // a narrow POSIX→cmd translation when git-bash isn't installed.
-    const useShell = hasShellMetacharacters(command);
+    // A real shell is needed for pipelines, redirects (even glued ones like
+    // `a>b`), globs and expansions. Otherwise spawn directly with the
+    // lexer's argv so quoted arguments (`grep "foo bar" f`) arrive intact.
+    let lexed: ReturnType<typeof lexShellCommand> | null = null;
+    try {
+      lexed = lexShellCommand(command, 'posix');
+    } catch {
+      lexed = null; // only reachable with SOLVENT_ALLOW_SHELL=true; let the shell parse it
+    }
+    const useShell = !lexed || lexed.needsShell || lexed.stages.length !== 1 || hasShellMetacharacters(command);
     let executable: string;
     let args: string[];
     let overridePath: string | null = null;
@@ -1531,7 +1850,7 @@ export class ToolService {
       executable = '/bin/sh';
       args = ['-c', command.trim()];
     } else {
-      const parts = command.trim().split(/\s+/);
+      const parts = lexed!.stages[0]!.words.map(w => w.text);
       const first = parts[0];
       if (!first) return Promise.reject(new Error('Empty command'));
       executable = first;

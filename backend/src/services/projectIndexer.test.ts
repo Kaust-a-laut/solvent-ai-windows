@@ -63,3 +63,14 @@ describe('indexProject', () => {
     expect(Buffer.byteLength(map, 'utf-8')).toBeLessThan(3072);
   });
 });
+
+describe('symbol DB (built during indexProject)', () => {
+  it('stores /-separated paths so file filters work on every platform', async () => {
+    const { querySymbols, hasSymbolIndex } = await import('./projectIndexer');
+    await indexProject(tmpDir);
+    expect(hasSymbolIndex(tmpDir)).toBe(true);
+    const hits = querySymbols(tmpDir, 'Button', { file: 'src/components/' });
+    expect(hits[0]?.file).toBe('src/components/Button.tsx');
+    expect(hits[0]?.kind).toBe('const');
+  });
+});

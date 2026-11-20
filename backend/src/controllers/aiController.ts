@@ -404,7 +404,7 @@ export class AIController {
       // Hold the frontend-supplied preview state + project scope in AsyncLocalStorage
       // so tools can read both without threading parameters through every call site.
       await requestContextStore.run(
-        { previewState: parseResult.data.previewState, projectRoot: resolvedProjectRoot },
+        { previewState: parseResult.data.previewState, projectRoot: resolvedProjectRoot, sessionId: parseResult.data.sessionId },
         async () => {
           await aiService.processAgentChat(data, (event) => sse.send(event));
         }

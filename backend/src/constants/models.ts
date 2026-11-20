@@ -531,17 +531,46 @@ export const CONTEXT_LIMITS: Record<string, number> = {
   'default': 8192
 };
 
+// Family fallbacks for ids not listed in CONTEXT_LIMITS, most specific first.
+// Values are the context the common hosts actually serve, not the larger
+// "up to" figures some model cards advertise.
+const CONTEXT_LIMIT_FAMILIES: Array<[RegExp, number]> = [
+  [/gemini/, 1_000_000],
+  [/claude[-_.]?(?:opus|sonnet|haiku)?[-_.]?4|claude[-_.](?:opus|sonnet|haiku)[-_.]4/, 200_000], // Claude 4.x
+  [/claude[-_.]?3/, 200_000],
+  [/kimi/, 262_144],
+  [/llama[-_.]?4/, 131_072],
+  [/llama[-_.]?3/, 128_000],
+  [/gpt[-_.]?oss/, 131_072],
+  [/gemma[-_.]?4/, 131_072],
+  [/gemma[-_.]?3/, 131_072],
+  [/nemotron/, 131_072],
+  [/deepseek/, 131_072],
+  [/gpt-4/, 128_000],
+  [/qwen|qwq|qvq/, 131_072],
+];
+
 export const getModelContextLimit = (modelName: string): number => {
-  if (!modelName) return CONTEXT_LIMITS['default'] ?? 8192;
-  const limit = CONTEXT_LIMITS[modelName];
-  if (limit !== undefined) return limit;
-  if (modelName.includes('gemini')) return 1000000;
-  if (modelName.includes('llama-3')) return 128000;
-  if (modelName.includes('gpt-4')) return 128000;
-  if (modelName.includes('claude-3')) return 200000;
-  if (modelName.includes('qwen')) return 131072;
-  
-  return CONTEXT_LIMITS['default'] ?? 8192;
+  const fallback = CONTEXT_LIMITS['default'] ?? 8192;
+  if (!modelName || typeof modelName !== 'string') return fallback;
+  // Object.hasOwn: names like "constructor" / "toString" must not resolve
+  // to inherited Object.prototype members.
+  const lookup = (key: string): number | undefined =>
+    Object.hasOwn(CONTEXT_LIMITS, key) ? CONTEXT_LIMITS[key] : undefined;
+
+  const exact = lookup(modelName);
+  if (exact !== undefined) return exact;
+
+  // OpenRouter / Ollama variant suffixes don't change the context window.
+  const base = modelName.replace(/:(?:free|cloud|beta|extended|nitro|floor|thinking)$/i, '');
+  const stripped = lookup(base);
+  if (stripped !== undefined) return stripped;
+
+  const lower = base.toLowerCase();
+  for (const [re, limit] of CONTEXT_LIMIT_FAMILIES) {
+    if (re.test(lower)) return limit;
+  }
+  return fallback;
 };
 
 /**

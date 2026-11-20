@@ -15,8 +15,8 @@ flowchart LR
   W1["Wave 1: Security, Utils & Electron\n(25 findings) — DONE"] --> W2["Wave 2: Routes, Controllers, Worker & Jobs\n(27 findings) — DONE"]
   W2 --> W3["Wave 3: AI Providers, Waterfall & Supervisor\n(34 findings) — DONE"]
   W3 --> W4A["Wave 4A: SQLite, HNSW, BM25, Vector & Context\n(14 findings) — DONE"]
-  W4A --> W4B["Wave 4B: Tools, Search, Sidecar, Harness & Storage\n(35 findings) — NEXT"]
-  W4B --> W5["Wave 5: Frontend Core (Services, Store, Lib, Hooks)\n(42 findings) — PENDING"]
+  W4A --> W4B["Wave 4B: Tools, Search, Sidecar, Harness & Storage\n(35 findings) — DONE"]
+  W4B --> W5["Wave 5: Frontend Core (Services, Store, Lib, Hooks)\n(42 findings) — NEXT"]
   W5 --> W6["Wave 6: Frontend Components & Zustand Selectors\n(81 findings) — PENDING"]
   W6 --> V["Wave 7: Regression Tests & Full Build/Lint Verification\n— PENDING"]
 ```
@@ -27,13 +27,13 @@ flowchart LR
 | **Wave 2** | Backend Worker, Jobs, Controllers, Routes & Settings | 27 | ✅ **Completed** | `backend tsc` PASS, 49 test files / 317 tests PASS |
 | **Wave 3** | AI Providers, Circuit Breaker, Tool Loops, Waterfall, Orchestration & Supervisor | 34 | ✅ **Completed** | `backend tsc` PASS |
 | **Wave 4 (Batch 1)** | SQLite Keyset Pagination, HNSW, BM25, Vector Search & Context Retrieval | 14 | ✅ **Completed** | `backend tsc` PASS |
-| **Wave 4 (Batch 2)** | Backend Tools, Patch Applier, Search/Browse, Sidecar, Harness, Image Services & Storage | 35 | ⏳ **Remaining** | To be verified via `backend tsc` + `vitest` |
+| **Wave 4 (Batch 2)** | Backend Tools, Patch Applier, Search/Browse, Sidecar, Harness, Image Services & Storage | 35 | ✅ **Completed** | `backend tsc` PASS, 57 test files / 423 tests PASS |
 | **Wave 5** | Frontend Core (`services/`, `store/`, `lib/`, `hooks/`, `main.tsx`, `types/`) | 42 | ⏳ **Remaining** | To be verified via `frontend tsc` + `vitest` |
 | **Wave 6** | Frontend Components (Coding IDE, Chat, Notepad, PiP, Browser, Vision, Settings, Selectors) | 81 | ⏳ **Remaining** | To be verified via `frontend tsc` + `vitest` + `lint` + `build` |
 
 ---
 
-## Part 1 — Completed Work: What Was Done & How (100 Findings)
+## Part 1 — Completed Work: What Was Done & How (135 Findings)
 
 ### 1.1 Wave 1 — Security, Core Utilities & Electron Main Process
 
@@ -99,9 +99,39 @@ flowchart LR
 
 ---
 
-## Part 2 — Remaining Work Specification: What Is Left, Why & How (158 Findings)
+### 1.5 Wave 4 (Batch 2) — Tools, Patching, Search, Sidecar, Harness, Image Services & Storage
+
+| IDs | File(s) | How It Was Fixed |
+|---|---|---|
+| `C014` | `toolService.ts` | `spawnProcess()` never uses `shell: true`: native `.exe`s (git/node/python) spawn directly; `.cmd` shims (npm/npx/…) go through `cmd.exe /d /s /c` only after every arg passes a strict charset (`CMD_SAFE_ARG`), otherwise the call is refused. `git_diff` runs `validatePath(file)`; `SAFE_PACKAGE` replaced with the spec regex (no `< > ^ = *`); `git_commit` requires a message; timeouts kill the process tree (`taskkill /T /F`). |
+| `C015` | `utils/shellLexer.ts` (new), `toolService.ts` | New quote/escape-aware lexer (posix + cmd dialects) splits stages and glued redirects (`a>../x`, `cat<x`), strips quotes, flags `$VAR`/`~`/`{a,b}`/`%VAR%` expansion, and rejects heredocs, process substitution, unquoted parens and unclosed quotes. `assertCommandAllowed()` checks lexed args/redirect targets (incl. `--flag=val` and glued `-o../x`) against the simulated cwd; `rejectDangerousArgv()` catches combined short flags (`python -uc`, `node -pe`), `--import`/`--loader`/`--inspect`, `npx -yp`, `npx node -e`, and commands wrapped by `env` (plus `NODE_OPTIONS=`/`LD_PRELOAD=`-style assignments). Dangerous-pattern matching is now word-bounded (`git add` no longer trips `dd`). Direct spawn uses lexed argv, so quoted args work. |
+| `H041` | `toolService.ts` | `apply_image_filter` validates `filter` against a set; all image outputs built via `deriveImageOutputPath()` (`dirname/basename_suffix.ext`, `.png` when ext is empty) and re-validated. `DRY_RUN` covers every mutating tool (`MUTATING_TOOLS`). `ensureApprovalForWrite()` now gates `create_file`, `edit_file`, `delete_file`, `move_file` (destination), `replace_in_files` and image outputs, alongside `write_file`/`apply_patch`; `AUTO_APPROVE=true` is set in `.env`, `.env.example` and the vitest env (set it to `false` to block new files until an approval UI exists). |
+| `H042` | `toolService.ts` | `editFile` uses a function replacer; `grepFiles` passes `/c:<pattern>`, excludes `node_modules/.git/dist/build`, drains stderr and clears its timer; `spawnProcess` clears its timer and caps output; `captureScreenWindows` drains stdout; `replaceInFiles` is a direct directory walk (no 30-result cap, no drive-colon split, skips binary/sensitive/>2 MB files); `webSearch`/`fetchWebContent` have `timeout: 15_000` + `maxContentLength: 5 MB`; shared `isSensitivePath` from `sensitivePaths.ts`. `runShell.test.ts` `find .` scoped to `backend/src/utils`. |
+| `H043` | `patchApplier.ts` | Diff + content normalized to LF (original EOL restored on output); pure insertions insert after line N and `-0,0` at index 0; context must have exactly as many lines as expected (no matching past EOF). |
+| `M041` | `toolService.ts`, `constants/tools.ts` | `fetch_preview_source` fetches loopback http(s) directly (`maxRedirects: 0`) except the backend's own `PORT`; `run_tests_focused` honours `projectRoot`; `replace_in_files` schema has `path`; `read_core_memory` has `required: []`. |
+| `H044` | `browseService.ts` | `UrlSafetyError` re-thrown from `fetchWithFallback`; image alt via `getAttribute('alt')`; Wayback `/web/2/`. |
+| `H045` | `searchService.ts` | `braveOffset()` = 0-based page index capped at 9; `Retry-After` capped at 10 s; Serper `timeout: 8000`; results without a string url dropped. |
+| `M029` | `intelligentSearchService.ts`, `utils/llmJson.ts` (new) | 1-based indexing detected once per response, indices de-duplicated, results sorted by score; `parseLlmJson()` strips `<think>`/fences/prose (also used by the proposer). |
+| `H046` | `linkPreviewService.ts` | Per-request regex clones; `absolutize()` http(s) only; code points range-checked; `maxContentLength` 2 MB then sliced to `HEAD_BUDGET`. |
+| `H047`, `H048` | `nativeCopyManager.ts`, `nativeCopyRoutes.ts` | Port validated (int 1024–65535) in `start`/`forceReclaimPort`/`findListeningPids`; netstat/lsof via `execFile` with exact `:PORT` LISTENING match; realpath containment for `projectPath`; `startingPromise` mutex; decoders + handlers bound to their own state; `error` sets `exitCode`; POSIX spawn `detached` with `-pid`→`pid` kill fallback; probe `try/finally` + `probing` guard; monotonic `seq` on log lines and `logsSince(ts, seq)` used by the SSE route. |
+| `H049`, `H050` | `harnessEvaluator.ts`, `proposerAgent.ts` | `slice(-50)`; evaluator accepts `MIN_SCORE_STANDARD` and `…_CONTEXT`, promotes/demotes items, moves count-capped items to `suppressed`, recomputes prompt tokens and a coverage-weighted acceptance proxy. Proposer: per-key bounds map (aliases, unknown/non-finite keys dropped), provider kept only when ready + keyed, `parseLlmJson`, `fallbackDeterministic(traces, ctx)` uses run/iteration and skips already-tried deltas. |
+| `H051`–`H053`, `M033` | `falService.ts`, `huggingFaceService.ts`, `localImageService.ts`, `pollinationsService.ts` | FAL polls `/status` then fetches the result (no `.response` wrapper) and downloads via `safeAxiosGet` (25 MB, `image/*` only). HF uses `router.huggingface.co/hf-inference/models/`, validates the model id, requires `image/*`. Local SD: loopback-only `localUrl`, `maxRedirects: 0`. Pollinations: 1,000-char prompt cap, 60 s timeout, 25 MB, `image/*` check. |
+| `H037`, `M026` | `storageProvider.ts`, `storageService.ts` | Keys hashed (sha256) into filenames, `ready` promise awaited, TTL persisted as `expiresAt`, atomic writes; `incr()` keeps remaining TTL; opportunistic sweep of expired entries past 1,000 keys. |
+| `H038` | `conversationStorageService.ts`, `routes/aiRoutes.ts` | `index.json` holds summaries (`messageCount`, 200-char `preview`, no messages/images; old indexes stripped on read); all writes serialized and atomic; corrupt session files overwritten; always sorted newest-first; search loads session files and skips non-string content. `GET /sessions?search=` uses `findSessions()` (hits carry the matched message for GlobalSearch excerpts; `total` is now capped at `offset + limit`). |
+| `H039`, `M027` | `codebaseIndexer.ts`, `projectIndexer.ts` | Sensitive/lock files excluded; pending changes snapshot-and-cleared before indexing (failures re-queued, follow-up run scheduled); `deleteByFilePath()` before re-chunking; links resolved from returned ids; hashes recorded after successful indexing and persisted atomically. `indexProject()` builds the symbol DB in its single pass; paths `/`-normalized; `symbolDB` is an `LRUMap(20)`. |
+| `H040`, `M031`, `L003` | `transactionService.ts`, `traceLogger.ts`, `telemetryService.ts`, `utils/jsonlAppender.ts` (new), `utils/redaction.ts` | Shared `JsonlAppender` serializes appends + rotation (20 MB, 2 generations). Audit log: `randomUUID()` ids, content args dropped and results suppressed for sensitive paths, `redactSecretStrings()` (env assignments, sk-/AKIA/ghp_/xox/AIza/hf_/gsk_/JWT/PEM) applied in `safeForAudit`, bounded size estimate instead of full `JSON.stringify`. Trace reads include `.1.jsonl` so patches survive rotation. |
+| `M028`, `M030`, `M032`, `M039`, `M040`, `L002`, `L004`–`L006` | `fileService.ts`, `mcpClient.ts`, `agentScratchpad.ts`, `requestContext.ts`, `aiController.ts`, `conversationWindow.ts`, `constants/models.ts`, `coreMemory.ts`, `previewStashStore.ts`, `backupManager.ts`, `messageUtils.ts`, `server.ts` | Filenames used verbatim with separators/dot-names rejected and `encodeURIComponent` URLs; MCP typed client map, close-on-reconnect, `disconnectAll()` on shutdown, env allowlist (no API keys/`BACKEND_INTERNAL_SECRET`), accurate counts; scratchpad keyed by request `sessionId` (now in `RequestContext`), 20 reflections/session, `LRUMap(100)`; conversation window trims recent messages to budget, counts wrapper tokens, caps transcript at 48k chars with groq→fireworks→openrouter fallback, hashes full text; `getModelContextLimit` uses `Object.hasOwn`, strips `:free`/`:cloud`, adds Claude 4/Llama 4/GPT-OSS/Kimi/Gemma 4/Nemotron/DeepSeek families; core memory `Object.hasOwn` + atomic writes; preview stash capped at 50 sessions; backups use ms+random filenames, single read/validate and atomic restore; data URLs parsed with `indexOf(';base64,')`. |
+
+New tests: `shellLexer.test.ts`, `toolService.wave4b.test.ts`, `patchApplier.test.ts`, `nativeCopyManager.test.ts`, `harnessEvaluator.test.ts`, `llmJson.test.ts`, `jsonlAppender.test.ts`, `wave4bMisc.test.ts`, plus additions to the conversation-storage, storage, project-indexer and backup suites. The three baseline failures (`create_file` leftover file, `get_errors` and `find` timeouts) also pass now.
+
+---
+
+## Part 2 — Remaining Work Specification: What Is Left, Why & How (123 Findings)
 
 ### 2.1 Wave 4 (Batch 2) — Backend Tools, Patching, Search, Sidecar, Harness, Image Services & Storage (35 Findings)
+
+> [!NOTE]
+> ✅ **Completed** — see §1.5 for what was done. The spec below is kept for reference.
 
 #### A. Tool Execution, Shell Containment & Unified Diff Patching (`C014`, `C015`, `H041`, `H042`, `H043`, `M041`)
 1. **[toolService.ts](file:///C:/Users/Name/solvent-ai-windows/backend/src/services/toolService.ts)**

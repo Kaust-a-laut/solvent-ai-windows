@@ -13,7 +13,9 @@ export default defineConfig({
       SOLVENT_EMBEDDING_CACHE_PATH: './.vitest-tmp/solvent_embedding_cache.json',
       SOLVENT_HNSW_PATH: './.vitest-tmp/solvent_hnsw.bin',
       SOLVENT_BACKUP_DIR: './.vitest-tmp/backups',
-      SOLVENT_ENABLE_HTTP_SHELL: 'false'
+      SOLVENT_ENABLE_HTTP_SHELL: 'false',
+      // Matches the shipped .env default; the approval-gate tests flip it off.
+      AUTO_APPROVE: 'true'
     }
   },
 });

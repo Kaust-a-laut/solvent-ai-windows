@@ -158,7 +158,8 @@ export const TOOL_DEFINITIONS = [
     description: "Read all entries in your persistent core memory. Core memory is always visible to you in the system prompt, but this tool lets you get the raw data.",
     parameters: {
       type: "OBJECT",
-      properties: {}
+      properties: {},
+      required: []
     }
   },
   {
@@ -190,7 +191,7 @@ export const TOOL_DEFINITIONS = [
     parameters: {
       type: "OBJECT",
       properties: {
-        url: { type: "STRING", description: "The full preview URL (e.g. http://localhost:3000) — use the URL from the system prompt" }
+        url: { type: "STRING", description: "The full preview URL from the system prompt (e.g. http://localhost:5173). Loopback preview ports are allowed; the Solvent backend's own port is not." }
       },
       required: ["url"]
     }
@@ -333,7 +334,8 @@ export const TOOL_DEFINITIONS = [
       properties: {
         pattern: { type: "STRING", description: "Exact string to find and replace" },
         replacement: { type: "STRING", description: "Replacement text" },
-        glob: { type: "STRING", description: "File pattern to limit scope, e.g. '*.tsx' (default: *.{ts,tsx,js,jsx,css,json})" }
+        glob: { type: "STRING", description: "File pattern to limit scope, e.g. '*.tsx' (default: *.{ts,tsx,js,jsx,css,json})" },
+        path: { type: "STRING", description: "Directory to search, relative to the project root (default: project root). node_modules, .git, dist and build are skipped." }
       },
       required: ["pattern", "replacement"]
     }
@@ -519,7 +521,7 @@ export const TOOL_DEFINITIONS = [
       type: "OBJECT",
       properties: {
         file: { type: "STRING", description: "File path to check. If a test file exists (e.g. foo.test.ts), tests will also be run." },
-        projectRoot: { type: "STRING", description: "Project root directory (optional, defaults to configured project)" }
+        projectRoot: { type: "STRING", description: "Project directory relative to the project root, e.g. 'projects/1' (optional, defaults to the configured project)" }
       },
       required: ["file"]
     }

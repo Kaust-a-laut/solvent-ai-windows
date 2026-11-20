@@ -1,6 +1,7 @@
 import { searchService } from './searchService';
 import { AIProviderFactory } from './aiProviderFactory';
 import { logger } from '../utils/logger';
+import { parseLlmJson } from '../utils/llmJson';
 
 interface RankedResult {
   title: string;
@@ -216,22 +217,36 @@ Sort by score descending. Include ALL results — the UI handles visual differen
         }
       );
 
-      const parsed = JSON.parse(response);
-      const ranked: RankedResult[] = [];
+      const parsed = parseLlmJson<{ results?: Array<{ index?: unknown; score?: unknown }>; removed?: number }>(response);
+      const items = (Array.isArray(parsed.results) ? parsed.results : [])
+        .filter((it): it is { index: number; score?: unknown } => Number.isInteger(it?.index));
 
-      for (const item of parsed.results || []) {
-        // Handle both 0-based and 1-based indices from LLM
-        let original = results[item.index];
-        if (!original && item.index > 0) original = results[item.index - 1];
+      // Decide 0- vs 1-based once for the whole list. The old per-item
+      // fallback (`results[i] ?? results[i - 1]`) shifted every 1-based item
+      // by one and duplicated the last result.
+      const oneBased = items.length > 0
+        && !items.some(it => it.index === 0)
+        && Math.max(...items.map(it => it.index)) === results.length;
+
+      const seen = new Set<number>();
+      const scored: Array<{ original: SearchResultItem; score: number }> = [];
+      for (const item of items) {
+        const idx = oneBased ? item.index - 1 : item.index;
+        if (seen.has(idx)) continue;
+        const original = results[idx];
         if (!original) continue;
-        ranked.push({
-          title: original.title,
-          link: original.link,
-          snippet: original.snippet,
-          position: ranked.length + 1,
-          relevanceScore: typeof item.score === 'number' ? item.score : 50,
-        });
+        seen.add(idx);
+        const score = typeof item.score === 'number' && Number.isFinite(item.score) ? item.score : 50;
+        scored.push({ original, score });
       }
+      scored.sort((a, b) => b.score - a.score);
+      const ranked: RankedResult[] = scored.map(({ original, score }, i) => ({
+        title: original.title,
+        link: original.link,
+        snippet: original.snippet,
+        position: i + 1,
+        relevanceScore: score,
+      }));
 
       // If all results were filtered out (too strict), fall back to showing raw results
       // This handles general queries like "latest ai news" where strict relevance filtering
@@ -306,7 +321,7 @@ Include all URLs that informed the answer (up to 8).`,
         }
       );
 
-      const parsed = JSON.parse(response);
+      const parsed = parseLlmJson<{ answer?: string; sources?: Synthesis['sources'] }>(response);
       logger.info(`[IntelligentSearch] Synthesis generated from ${parsed.sources?.length || 0} sources`);
       return {
         answer: parsed.answer || '',

@@ -13,17 +13,25 @@ export interface LinkPreview {
 const HEAD_BUDGET = 64 * 1024; // 64KB is plenty for <head>
 const FETCH_TIMEOUT_MS = 8000;
 
+// String.fromCodePoint throws RangeError outside 0..0x10FFFF (`&#9999999;`),
+// which turned one bad entity into a failed preview.
+const safeCodePoint = (cp: number, original: string): string =>
+  Number.isInteger(cp) && cp >= 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : original;
+
 const decodeEntities = (s: string): string =>
   s
-    .replace(/&amp;/g, '&')
+    .replace(/&#x([0-9a-f]+);/gi, (m, h) => safeCodePoint(parseInt(h, 16), m))
+    .replace(/&#(\d+);/g, (m, n) => safeCodePoint(parseInt(n, 10), m))
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&apos;/g, "'")
-    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
-    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(parseInt(n, 10)));
+    .replace(/&amp;/g, '&');
 
+// META_TAG / LINK_TAG are /g, so each request clones them — a shared /g regex
+// keeps .lastIndex after an early `break`, and the next request would start
+// scanning mid-document and miss tags.
 const META_TAG = /<meta\b[^>]*>/gi;
 const ATTR_RE = /(\w[\w:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g;
 const TITLE_RE = /<title[^>]*>([\s\S]*?)<\/title>/i;
@@ -41,9 +49,16 @@ const parseAttrs = (tag: string): Record<string, string> => {
   return out;
 };
 
+// Only http(s) — `javascript:` / `data:` image or favicon URLs would be
+// rendered by the frontend as-is.
 const absolutize = (base: URL, ref: string | undefined): string | undefined => {
   if (!ref) return undefined;
-  try { return new URL(ref, base).toString(); } catch { return undefined; }
+  try {
+    const u = new URL(ref, base);
+    return u.protocol === 'http:' || u.protocol === 'https:' ? u.toString() : undefined;
+  } catch {
+    return undefined;
+  }
 };
 
 export async function fetchLinkPreview(url: string): Promise<LinkPreview> {
@@ -59,7 +74,10 @@ export async function fetchLinkPreview(url: string): Promise<LinkPreview> {
       },
       responseType: 'text',
       maxHops: 5,
-      maxContentLength: HEAD_BUDGET * 2, // axios uses bytes; double-budget gives slack for headers
+      // axios aborts (rather than truncates) past maxContentLength, so a
+      // HEAD_BUDGET-sized cap failed on nearly every real page. Allow a
+      // normal page and slice to HEAD_BUDGET below.
+      maxContentLength: 2 * 1024 * 1024,
       transformResponse: [(data) => data], // keep raw string
     });
 
@@ -73,8 +91,9 @@ export async function fetchLinkPreview(url: string): Promise<LinkPreview> {
     const tw: Record<string, string> = {};
     const named: Record<string, string> = {};
 
+    const metaRe = new RegExp(META_TAG.source, META_TAG.flags);
     let mt: RegExpExecArray | null;
-    while ((mt = META_TAG.exec(html)) !== null) {
+    while ((mt = metaRe.exec(html)) !== null) {
       const attrs = parseAttrs(mt[0]);
       const property = attrs['property'] || '';
       const name = attrs['name'] || '';
@@ -86,8 +105,9 @@ export async function fetchLinkPreview(url: string): Promise<LinkPreview> {
     }
 
     let favicon: string | undefined;
+    const linkRe = new RegExp(LINK_TAG.source, LINK_TAG.flags);
     let lt: RegExpExecArray | null;
-    while ((lt = LINK_TAG.exec(html)) !== null) {
+    while ((lt = linkRe.exec(html)) !== null) {
       const attrs = parseAttrs(lt[0]);
       const rel = (attrs['rel'] || '').toLowerCase();
       if (rel.includes('icon') && attrs['href']) {

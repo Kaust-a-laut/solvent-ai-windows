@@ -23,9 +23,9 @@ export function normalizeMessagesForOllama(messages: ChatMessage[]): Array<{ rol
     };
     
     if (m.image) {
-      const matches = m.image.match(/^data:(.+);base64,(.+)$/);
-      if (matches) {
-        msg.images = [matches[2]!];
+      const parsed = extractImageFromDataUrl(m.image);
+      if (parsed) {
+        msg.images = [parsed.data];
       }
     }
     
@@ -49,10 +49,14 @@ export function normalizeMessagesForGemini(messages: ChatMessage[]): Array<{ rol
  * Returns null if the string is not a valid image data URL.
  */
 export function extractImageFromDataUrl(dataUrl: string): { data: string; mimeType: string } | null {
-  const matches = dataUrl.match(/^data:(.+);base64,(.+)$/);
-  if (!matches) return null;
-  return {
-    data: matches[2]!,
-    mimeType: matches[1]!
-  };
+  // indexOf instead of /^data:(.+);base64,(.+)$/: the greedy `.+` backtracks
+  // across multi-MB payloads, `.` stops at the line breaks that wrapped
+  // base64 often contains, and a `;base64,` inside the data shifted the split.
+  if (typeof dataUrl !== 'string' || !dataUrl.startsWith('data:')) return null;
+  const marker = dataUrl.indexOf(';base64,');
+  if (marker <= 'data:'.length) return null;
+  const mimeType = dataUrl.slice('data:'.length, marker);
+  const data = dataUrl.slice(marker + ';base64,'.length).replace(/\s+/g, '');
+  if (!data) return null;
+  return { data, mimeType };
 }

@@ -198,7 +198,9 @@ describe('run_shell pipes and redirects', () => {
 
   it('still allows find without -exec', async () => {
     const result = await toolService
-      .executeTool('run_shell', { command: 'find . -name "*.ts" -type f' })
+      // Scoped to a small directory: `find .` from the repo root walks
+      // node_modules and blew the 15s timeout under full-suite load.
+      .executeTool('run_shell', { command: 'find backend/src/utils -name "*.ts" -type f' })
       .catch((err: Error) => err);
     if (result instanceof Error) {
       expect(result.message).not.toMatch(/security policy|allowlist|find/i);

@@ -24,7 +24,8 @@ describe('BackupManager', () => {
 
     const files = await fs.readdir(testDir);
     expect(files.length).toBe(1);
-    expect(files[0]).toMatch(/^backup_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.json$/);
+    // ms timestamp + random suffix so two backups in one second don't collide
+    expect(files[0]).toMatch(/^backup_\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z_[0-9a-f]{6}\.json$/);
   });
 
   it('should rotate backups keeping only maxBackups', async () => {

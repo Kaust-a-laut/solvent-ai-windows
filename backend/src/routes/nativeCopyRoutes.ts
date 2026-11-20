@@ -99,7 +99,7 @@ router.get('/logs', (req, res) => {
       return;
     }
     try {
-      const lines = nativeCopyManager.logsSince(lastTs);
+      const lines = nativeCopyManager.logsSince(lastTs, lastSeq);
       for (const line of lines) {
         const lineSeq = (line as { seq?: number }).seq;
         if (typeof lineSeq === 'number') {

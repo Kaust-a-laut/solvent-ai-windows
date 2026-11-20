@@ -33,7 +33,7 @@ const normalizeForCompare = (p: string) => (process.platform === 'win32' ? p.toL
  * any non-existent trailing path segments. Prevents symlink escapes for both
  * existing paths and not-yet-created write targets.
  */
-function realPathWithMissingTailSync(target: string): string {
+export function realPathWithMissingTailSync(target: string): string {
   const resolved = path.resolve(target);
   let current = resolved;
   const tail: string[] = [];

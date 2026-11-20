@@ -15,6 +15,33 @@ export interface MCPToolDefinition {
   inputSchema: Record<string, unknown>;
 }
 
+/** The subset of the MCP SDK Client this manager uses. */
+interface MCPClientLike {
+  connect(transport: unknown): Promise<void>;
+  listTools(): Promise<{ tools?: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }> }>;
+  callTool(req: { name: string; arguments: Record<string, unknown> }): Promise<{ content?: Array<{ type?: string; text?: string }> } & Record<string, unknown>>;
+  close?(): Promise<void>;
+}
+
+// Environment variables an MCP server subprocess may inherit. Everything
+// else — notably every provider API key and BACKEND_INTERNAL_SECRET — stays
+// in the backend; a server that needs a credential gets it via config.env.
+const SAFE_ENV_KEYS = [
+  'PATH', 'Path', 'PATHEXT', 'HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH',
+  'APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA', 'ProgramFiles', 'ProgramFiles(x86)', 'SystemRoot', 'SYSTEMROOT', 'WINDIR', 'ComSpec', 'COMSPEC',
+  'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL', 'TERM', 'SHELL', 'USER', 'USERNAME', 'LOGNAME',
+  'NODE_ENV', 'NODE_EXTRA_CA_CERTS',
+];
+
+function buildServerEnv(extra?: Record<string, string>): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of SAFE_ENV_KEYS) {
+    const v = process.env[key];
+    if (typeof v === 'string') env[key] = v;
+  }
+  return { ...env, ...(extra ?? {}) };
+}
+
 /**
  * MCPClientManager provides a bridge to Model Context Protocol servers.
  *
@@ -28,6 +55,7 @@ export class MCPClientManager {
   private serverConfigs: Map<string, MCPServerConfig> = new Map();
   private discoveredTools: Map<string, MCPToolDefinition> = new Map();
   private connected: Map<string, boolean> = new Map();
+  private clients: Map<string, MCPClientLike> = new Map();
 
   /**
    * Register an MCP server configuration. Does NOT connect immediately.
@@ -52,7 +80,7 @@ export class MCPClientManager {
    * Returns the list of discovered tool definitions.
    *
    * NOTE: Full implementation requires @modelcontextprotocol/sdk.
-   * The stub returns an empty array until the SDK is installed.
+   * Returns an empty array until the SDK is installed.
    */
   async connectAll(): Promise<MCPToolDefinition[]> {
     const tools: MCPToolDefinition[] = [];
@@ -68,11 +96,16 @@ export class MCPClientManager {
       }
     }
 
-    logger.info(`[MCP] Connected ${this.connected.size} server(s), discovered ${tools.length} tool(s)`);
+    // Count servers that actually connected (the map also holds failures).
+    const connectedCount = [...this.connected.values()].filter(Boolean).length;
+    logger.info(`[MCP] Connected ${connectedCount}/${this.serverConfigs.size} server(s), discovered ${tools.length} tool(s)`);
     return tools;
   }
 
   private async connectServer(name: string, config: MCPServerConfig): Promise<void> {
+    // Reconnecting must not leak the previous stdio subprocess.
+    await this.closeClient(name);
+
     // Try to load the MCP SDK dynamically
     try {
       // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -83,34 +116,51 @@ export class MCPClientManager {
       const transport = new StdioClientTransport({
         command: config.command,
         args: config.args,
-        env: { ...process.env, ...config.env },
+        env: buildServerEnv(config.env),
       });
 
-      const client = new Client({ name: 'solvent-ai', version: '1.0.0' });
+      const client = new Client({ name: 'solvent-ai', version: '1.0.0' }) as MCPClientLike;
       await client.connect(transport);
 
       // Store client for later tool calls
-      (this as any)._clients = (this as any)._clients || new Map();
-      (this as any)._clients.set(name, client);
-
+      this.clients.set(name, client);
       this.connected.set(name, true);
       logger.info(`[MCP] Connected to ${name}`);
-    } catch (error: any) {
-      if (error?.code === 'MODULE_NOT_FOUND') {
+    } catch (error: unknown) {
+      if ((error as { code?: string })?.code === 'MODULE_NOT_FOUND') {
         logger.debug('[MCP] @modelcontextprotocol/sdk not installed — MCP tools unavailable. Run: npm i @modelcontextprotocol/sdk');
       }
       throw error;
     }
   }
 
+  private async closeClient(name: string): Promise<void> {
+    const existing = this.clients.get(name);
+    if (!existing) return;
+    this.clients.delete(name);
+    this.connected.set(name, false);
+    for (const [toolName, def] of this.discoveredTools) {
+      if (def.serverName === name) this.discoveredTools.delete(toolName);
+    }
+    try {
+      await existing.close?.();
+    } catch (err) {
+      logger.warn(`[MCP] Error closing ${name}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /** Close every connected MCP server (call on shutdown). */
+  async disconnectAll(): Promise<void> {
+    await Promise.all([...this.clients.keys()].map(name => this.closeClient(name)));
+  }
+
   private async discoverTools(serverName: string): Promise<MCPToolDefinition[]> {
-    const clients: Map<string, any> = (this as any)._clients;
-    const client = clients?.get(serverName);
+    const client = this.clients.get(serverName);
     if (!client) return [];
 
     try {
       const result = await client.listTools();
-      const tools: MCPToolDefinition[] = (result.tools ?? []).map((t: any) => {
+      const tools: MCPToolDefinition[] = (result.tools ?? []).map((t) => {
         const prefixedName = `mcp__${serverName}__${t.name}`;
         const def: MCPToolDefinition = {
           name: prefixedName,
@@ -134,19 +184,18 @@ export class MCPClientManager {
     const def = this.discoveredTools.get(prefixedName);
     if (!def) throw new Error(`Unknown MCP tool: ${prefixedName}`);
 
-    const clients: Map<string, any> = (this as any)._clients;
-    const client = clients?.get(def.serverName);
+    const client = this.clients.get(def.serverName);
     if (!client) throw new Error(`MCP server ${def.serverName} not connected`);
 
     // Extract the original tool name (remove mcp__serverName__ prefix)
-    const originalName = prefixedName.replace(`mcp__${def.serverName}__`, '');
+    const originalName = prefixedName.slice(`mcp__${def.serverName}__`.length);
     const result = await client.callTool({ name: originalName, arguments: args });
 
     // MCP returns { content: [{ type: 'text', text: '...' }] }
     if (result?.content && Array.isArray(result.content)) {
       const textParts = result.content
-        .filter((c: any) => c.type === 'text')
-        .map((c: any) => c.text)
+        .filter((c) => c?.type === 'text')
+        .map((c) => c.text ?? '')
         .join('\n');
       return { text: textParts, raw: result };
     }
@@ -156,7 +205,7 @@ export class MCPClientManager {
   /**
    * Convert discovered MCP tools to OpenAI tool format for injection.
    */
-  toOpenAITools(): Array<{ type: string; function: { name: string; description: string; parameters: any } }> {
+  toOpenAITools(): Array<{ type: string; function: { name: string; description: string; parameters: Record<string, unknown> } }> {
     return Array.from(this.discoveredTools.values()).map(def => ({
       type: 'function',
       function: {

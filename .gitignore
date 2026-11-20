@@ -15,7 +15,10 @@ electron/preload.js
 
 # Runtime data (Solvent agent state)
 .solvent_audit.jsonl
+.solvent_audit.*.jsonl
 .solvent_telemetry.jsonl
+.solvent_telemetry.*.jsonl
+.solvent_retrieval_traces.*.jsonl
 .solvent_model_registry.json
 .solvent_memory.json
 .solvent_memory.sqlite

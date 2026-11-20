@@ -1,5 +1,11 @@
 import { randomUUID } from 'crypto';
 import { logger } from '../utils/logger';
+import { LRUMap } from '../utils/lruMap';
+
+// Bounds: scratchpads are created per chat session and reflections are
+// appended on every `reflect` call, so neither may grow without limit.
+const MAX_SCRATCHPADS = 100;
+const MAX_REFLECTIONS_PER_SESSION = 20;
 
 export interface PlanStep {
   id: string;
@@ -29,7 +35,7 @@ export interface AgentScratchpad {
  * on every subsequent API call so the model always sees the current plan state.
  */
 export class AgentScratchpadService {
-  private scratchpads: Map<string, AgentScratchpad> = new Map();
+  private scratchpads = new LRUMap<string, AgentScratchpad>(MAX_SCRATCHPADS);
 
   /** Get existing scratchpad or create a new one for the session. */
   getOrCreate(sessionId: string): AgentScratchpad {
@@ -79,6 +85,9 @@ export class AgentScratchpadService {
       next,
     };
     pad.reflections.push(reflection);
+    if (pad.reflections.length > MAX_REFLECTIONS_PER_SESSION) {
+      pad.reflections.splice(0, pad.reflections.length - MAX_REFLECTIONS_PER_SESSION);
+    }
     pad.updatedAt = new Date().toISOString();
     logger.info(`[Scratchpad] Added reflection for session ${sessionId}: "${next.slice(0, 80)}"`);
     return reflection;

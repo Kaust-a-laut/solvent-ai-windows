@@ -23,6 +23,8 @@ export interface PreviewState {
 export interface RequestContext {
   previewState?: PreviewState;
   projectRoot?: string;
+  /** Chat session id — scopes per-session tool state (agent scratchpad). */
+  sessionId?: string;
 }
 
 export const requestContextStore = new AsyncLocalStorage<RequestContext>();

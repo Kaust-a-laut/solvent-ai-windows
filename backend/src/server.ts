@@ -46,6 +46,7 @@ import { vectorService } from './services/vectorService';
 import { modelAvailabilityService } from './services/modelAvailabilityService';
 import { modelRegistryService } from './services/modelRegistryService';
 import { nativeCopyManager } from './services/nativeCopyManager';
+import { mcpClientManager } from './services/mcpClient';
 
 const app = express();
 const httpServer = createServer(app);
@@ -455,6 +456,12 @@ async function gracefulShutdown(signal: string): Promise<void> {
     logger.info('[Server] Vector index flushed');
   } catch (error) {
     logger.warn('[Server] Error flushing vector index', error);
+  }
+
+  try {
+    await mcpClientManager.disconnectAll();
+  } catch (error) {
+    logger.warn('[Server] Error closing MCP clients', error);
   }
 
   try {

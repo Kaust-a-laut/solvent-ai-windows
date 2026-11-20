@@ -16,12 +16,24 @@ export class PreviewStashStore {
   private store = new Map<string, { data: PreviewStash; expiry: number }>();
   private pruneInterval: ReturnType<typeof setInterval>;
 
-  constructor(private ttlMs: number = 600_000, private pruneIntervalMs: number = 60_000) {
+  constructor(
+    private ttlMs: number = 600_000,
+    private pruneIntervalMs: number = 60_000,
+    private maxSessions: number = 50,
+  ) {
     this.pruneInterval = setInterval(() => this.prune(), pruneIntervalMs);
     this.pruneInterval.unref(); // Don't keep process alive
   }
 
   set(sessionId: string, data: PreviewStash): void {
+    // Bound the map: each stash can hold a full body HTML snapshot, and the
+    // 10-minute TTL alone doesn't cap how many sessions accumulate.
+    this.store.delete(sessionId); // re-insert so Map order tracks recency
+    while (this.store.size >= this.maxSessions) {
+      const oldest = this.store.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.store.delete(oldest);
+    }
     this.store.set(sessionId, {
       data: { ...data, updatedAt: Date.now() },
       expiry: Date.now() + this.ttlMs,

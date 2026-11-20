@@ -17,7 +17,9 @@ const turndown = new TurndownService({
 turndown.addRule('images', {
   filter: 'img',
   replacement: (_content, node) => {
-    const alt = (node as { attribs?: Record<string, string> })?.attribs?.['alt'] || '';
+    // Turndown hands us a DOM Element (domino), not a Cheerio node — `attribs`
+    // is always undefined there, which silently dropped every alt text.
+    const alt = (node as { getAttribute?: (k: string) => string | null }).getAttribute?.('alt') ?? '';
     return alt ? `*[${alt}]*` : '';
   },
 });
@@ -96,6 +98,9 @@ class BrowseService {
     try {
       return await this.fetchHtml(url);
     } catch (error: unknown) {
+      // Preserve SSRF rejections so fetchPage() can report them as such —
+      // wrapping them below made its `instanceof UrlSafetyError` branch dead.
+      if (error instanceof UrlSafetyError) throw error;
       const err = error as { response?: { status?: number }; restricted?: boolean; restrictedResult?: unknown; message?: string; code?: string };
       const status = err?.response?.status;
 
@@ -103,7 +108,9 @@ class BrowseService {
       if (status === 401 || status === 403) {
         logger.info(`[BrowseService] Got ${status} from ${url}, trying Wayback Machine...`);
         try {
-          const waybackUrl = `https://web.archive.org/web/2024/${url}`;
+          // `/web/2/` redirects to the most recent snapshot (a hardcoded year
+          // pins results to stale captures).
+          const waybackUrl = `https://web.archive.org/web/2/${url}`;
           const waybackResponse = await this.fetchHtml(waybackUrl);
           logger.info(`[BrowseService] Wayback fallback succeeded for ${url}`);
           return waybackResponse;

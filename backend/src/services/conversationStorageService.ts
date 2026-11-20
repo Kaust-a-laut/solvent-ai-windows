@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fs from 'fs/promises';
 import path from 'path';
 import { logger } from '../utils/logger';
+import { AtomicFileSystem } from '../utils/fileSystem';
 import { Message } from '../types/frontend';
 
 export interface StoredSession {
@@ -39,10 +40,44 @@ export interface ConversationStorageOptions {
   baseDir?: string;
 }
 
+/**
+ * What index.json stores per session: metadata only. Embedding full
+ * `messages[]` (including base64 images) for every session made the index
+ * grow without bound and be rewritten in full on every save.
+ */
+export type SessionSummary = Omit<StoredSession, 'messages'> & {
+  /** First ~200 chars of the first text message, for list/search previews. */
+  preview?: string;
+};
+
+/** A session summary as returned by search, with the matched message attached (text only). */
+export type SessionSearchHit = SessionSummary & { messages: Array<Pick<StoredMessage, 'id' | 'role' | 'content' | 'timestamp'>> };
+
+const PREVIEW_CHARS = 200;
+
+function toSummary(session: StoredSession | (SessionSummary & { messages?: unknown })): SessionSummary {
+  const { messages, ...rest } = session as StoredSession & { preview?: string };
+  const msgs = Array.isArray(messages) ? (messages as StoredMessage[]) : [];
+  const firstText = msgs.find(m => typeof m?.content === 'string' && m.content.trim().length > 0);
+  return {
+    ...rest,
+    metadata: {
+      modelsUsed: rest.metadata?.modelsUsed ?? [],
+      tokenEstimate: rest.metadata?.tokenEstimate ?? 0,
+      tags: rest.metadata?.tags ?? [],
+      messageCount: rest.metadata?.messageCount ?? msgs.length,
+    },
+    preview: firstText ? firstText.content.slice(0, PREVIEW_CHARS) : rest.preview,
+  };
+}
+
 export class ConversationStorageService {
   private readonly sessionsDir: string;
   private readonly indexFile: string;
   private readonly directoryReady: Promise<void>;
+  // Serializes every read-modify-write of session files and index.json —
+  // concurrent saves used to interleave and drop each other's index entries.
+  private writeChain: Promise<unknown> = Promise.resolve();
 
   constructor(options: ConversationStorageOptions = {}) {
     this.sessionsDir = options.baseDir
@@ -63,6 +98,12 @@ export class ConversationStorageService {
     }
   }
 
+  private withLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.writeChain.then(fn, fn);
+    this.writeChain = run.catch(() => undefined);
+    return run;
+  }
+
   private getSessionFilePath(sessionId: string): string {
     if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) {
       throw new Error('Invalid session ID');
@@ -75,29 +116,37 @@ export class ConversationStorageService {
    */
   async saveSession(session: StoredSession): Promise<void> {
     await this.directoryReady;
-    try {
-      const filePath = this.getSessionFilePath(session.id);
-      
-      // Check for concurrent modification
+    return this.withLock(async () => {
       try {
-        const existingData = await fs.readFile(filePath, 'utf-8');
-        const existing = JSON.parse(existingData);
-        if (existing.updatedAt > session.updatedAt) {
-          logger.warn('[ConversationStorage] Concurrent modification detected, skipping save');
-          return; // Skip save - newer version exists
+        const filePath = this.getSessionFilePath(session.id);
+
+        // Check for concurrent modification
+        try {
+          const existingData = await fs.readFile(filePath, 'utf-8');
+          let existing: { updatedAt?: number } | null = null;
+          try {
+            existing = JSON.parse(existingData);
+          } catch {
+            // A corrupt file must not wedge the session forever — overwrite it.
+            logger.warn(`[ConversationStorage] Existing session file ${session.id} is corrupt — overwriting`);
+          }
+          if (existing && typeof existing.updatedAt === 'number' && existing.updatedAt > session.updatedAt) {
+            logger.warn('[ConversationStorage] Concurrent modification detected, skipping save');
+            return; // Skip save - newer version exists
+          }
+        } catch (e: unknown) {
+          const err = e as NodeJS.ErrnoException;
+          if (err.code !== 'ENOENT') throw e; // File doesn't exist is OK
         }
-      } catch (e: unknown) {
-        const err = e as NodeJS.ErrnoException;
-        if (err.code !== 'ENOENT') throw e; // File doesn't exist is OK
+
+        await AtomicFileSystem.writeJson(filePath, session);
+        await this.updateIndex(session);
+        logger.debug(`[ConversationStorage] Saved session ${session.id}`);
+      } catch (error) {
+        logger.error('[ConversationStorage] Failed to save session', error);
+        throw error;
       }
-      
-      await fs.writeFile(filePath, JSON.stringify(session, null, 2), 'utf-8');
-      await this.updateIndex(session);
-      logger.debug(`[ConversationStorage] Saved session ${session.id}`);
-    } catch (error) {
-      logger.error('[ConversationStorage] Failed to save session', error);
-      throw error;
-    }
+    });
   }
 
   /**
@@ -119,25 +168,37 @@ export class ConversationStorageService {
     }
   }
 
-  /**
-   * List all sessions, optionally filtered by mode
-   */
-  async listSessions(mode?: string): Promise<StoredSession[]> {
+  private async readIndex(): Promise<SessionSummary[]> {
+    let raw: string;
     try {
-      const indexData = await fs.readFile(this.indexFile, 'utf-8');
-      const index: StoredSession[] = JSON.parse(indexData);
-      
-      if (mode) {
-        return index.filter(s => s.mode === mode);
-      }
-      
-      // Sort by updatedAt descending
-      return index.sort((a, b) => b.updatedAt - a.updatedAt);
+      raw = await fs.readFile(this.indexFile, 'utf-8');
     } catch (error: unknown) {
-      const err = error as NodeJS.ErrnoException;
-      if (err.code === 'ENOENT') {
-        return [];
-      }
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      throw error;
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      logger.warn('[ConversationStorage] index.json is corrupt — treating as empty');
+      return [];
+    }
+    // Older index files embedded full messages[] — strip them on read.
+    return Array.isArray(parsed)
+      ? parsed.filter((s): s is StoredSession => !!s && typeof s === 'object' && typeof (s as StoredSession).id === 'string').map(toSummary)
+      : [];
+  }
+
+  /**
+   * List all sessions (summaries, newest first), optionally filtered by mode
+   */
+  async listSessions(mode?: string): Promise<SessionSummary[]> {
+    try {
+      const index = await this.readIndex();
+      const filtered = mode ? index.filter(s => s.mode === mode) : index;
+      // Always newest first — the mode-filtered path used to skip sorting.
+      return filtered.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0));
+    } catch (error: unknown) {
       logger.error('[ConversationStorage] Failed to list sessions', error);
       throw error;
     }
@@ -147,42 +208,62 @@ export class ConversationStorageService {
    * Delete a session
    */
   async deleteSession(sessionId: string): Promise<void> {
-    try {
-      const filePath = this.getSessionFilePath(sessionId);
-      await fs.unlink(filePath);
-      await this.removeFromIndex(sessionId);
-      logger.info(`[ConversationStorage] Deleted session ${sessionId}`);
-    } catch (error: unknown) {
-      const err = error as NodeJS.ErrnoException;
-      if (err.code !== 'ENOENT') {
+    return this.withLock(async () => {
+      try {
+        const filePath = this.getSessionFilePath(sessionId);
+        await fs.unlink(filePath);
+        await this.removeFromIndex(sessionId);
+        logger.info(`[ConversationStorage] Deleted session ${sessionId}`);
+      } catch (error: unknown) {
+        const err = error as NodeJS.ErrnoException;
+        if (err.code === 'ENOENT') {
+          await this.removeFromIndex(sessionId);
+          return;
+        }
         logger.error('[ConversationStorage] Failed to delete session', error);
         throw error;
       }
+    });
+  }
+
+  /**
+   * Search across all sessions for a query (message content, plus titles
+   * when `includeTitles` is set). Loads each session file since the index
+   * no longer carries message bodies.
+   */
+  async findSessions(query: string, options: { limit?: number; mode?: string; includeTitles?: boolean } = {}): Promise<SessionSearchHit[]> {
+    const limit = options.limit ?? 20;
+    const queryLower = String(query ?? '').toLowerCase();
+    if (!queryLower) return [];
+    const hits: SessionSearchHit[] = [];
+    for (const summary of await this.listSessions(options.mode)) {
+      if (hits.length >= limit) break;
+      let session: StoredSession | null = null;
+      try {
+        session = await this.loadSession(summary.id);
+      } catch {
+        continue; // corrupt / unreadable session file
+      }
+      const match = (session?.messages ?? []).find(
+        m => typeof m?.content === 'string' && m.content.toLowerCase().includes(queryLower)
+      );
+      if (match) {
+        hits.push({ ...summary, messages: [{ id: match.id, role: match.role, content: match.content, timestamp: match.timestamp }] });
+      } else if (options.includeTitles && typeof summary.title === 'string' && summary.title.toLowerCase().includes(queryLower)) {
+        const first = (session?.messages ?? []).find(m => typeof m?.content === 'string');
+        hits.push({ ...summary, messages: first ? [{ id: first.id, role: first.role, content: first.content, timestamp: first.timestamp }] : [] });
+      }
     }
+    return hits;
   }
 
   /**
    * Search across all sessions for a query
    */
-  async searchSessions(query: string, limit: number = 20): Promise<{ session: StoredSession, match: StoredMessage }[]> {
+  async searchSessions(query: string, limit: number = 20): Promise<{ session: SessionSummary, match: StoredMessage }[]> {
     try {
-      const sessions = await this.listSessions();
-      const results: { session: StoredSession, match: StoredMessage }[] = [];
-      const queryLower = query.toLowerCase();
-
-      for (const session of sessions) {
-        for (const message of session.messages) {
-          if (message.content.toLowerCase().includes(queryLower)) {
-            results.push({ session, match: message });
-            if (results.length >= limit) {
-              return results;
-            }
-            break; // One match per session is enough
-          }
-        }
-      }
-
-      return results;
+      const hits = await this.findSessions(query, { limit });
+      return hits.map(({ messages, ...session }) => ({ session, match: messages[0] as StoredMessage }));
     } catch (error) {
       logger.error('[ConversationStorage] Search failed', error);
       return [];
@@ -236,45 +317,36 @@ export class ConversationStorageService {
   }
 
   /**
-   * Update the session index
+   * Update the session index (caller holds the write lock)
    */
   private async updateIndex(session: StoredSession): Promise<void> {
     try {
-      let index: StoredSession[] = [];
-      try {
-        const data = await fs.readFile(this.indexFile, 'utf-8');
-        index = JSON.parse(data);
-      } catch {
-        // Index doesn't exist yet
-      }
-
+      const index = await this.readIndex();
+      const summary = toSummary(session);
       const existingIndex = index.findIndex(s => s.id === session.id);
       if (existingIndex >= 0) {
-        index[existingIndex] = session;
+        index[existingIndex] = summary;
       } else {
-        index.push(session);
+        index.push(summary);
       }
-
-      await fs.writeFile(this.indexFile, JSON.stringify(index, null, 2), 'utf-8');
+      await AtomicFileSystem.writeJson(this.indexFile, index);
     } catch (error) {
       logger.error('[ConversationStorage] Index update failed', error);
     }
   }
 
   /**
-   * Remove a session from the index
+   * Remove a session from the index (caller holds the write lock)
    */
   private async removeFromIndex(sessionId: string): Promise<void> {
     try {
-      const data = await fs.readFile(this.indexFile, 'utf-8');
-      const index: StoredSession[] = JSON.parse(data);
+      const index = await this.readIndex();
       const filtered = index.filter(s => s.id !== sessionId);
-      await fs.writeFile(this.indexFile, JSON.stringify(filtered, null, 2), 'utf-8');
-    } catch (error: unknown) {
-      const err = error as NodeJS.ErrnoException;
-      if (err.code !== 'ENOENT') {
-        logger.error('[ConversationStorage] Index removal failed', error);
+      if (filtered.length !== index.length) {
+        await AtomicFileSystem.writeJson(this.indexFile, filtered);
       }
+    } catch (error: unknown) {
+      logger.error('[ConversationStorage] Index removal failed', error);
     }
   }
 }

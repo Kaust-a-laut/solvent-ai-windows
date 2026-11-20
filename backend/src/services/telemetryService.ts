@@ -1,6 +1,6 @@
-import fs from 'fs/promises';
 import path from 'path';
 import { logger } from '../utils/logger';
+import { JsonlAppender, DEFAULT_JSONL_ROTATION } from '../utils/jsonlAppender';
 
 interface TelemetryEvent {
   id: string;
@@ -17,10 +17,11 @@ interface TelemetryEvent {
 }
 
 class TelemetryService {
-  private logPath: string;
+  private appender: JsonlAppender;
 
   constructor() {
-    this.logPath = path.resolve(__dirname, '../../../.solvent_telemetry.jsonl');
+    // Rotated at 20MB (2 generations kept) — it used to append forever.
+    this.appender = new JsonlAppender(path.resolve(__dirname, '../../../.solvent_telemetry.jsonl'), DEFAULT_JSONL_ROTATION);
   }
 
   async logTransaction(event: Omit<TelemetryEvent, 'timestamp'>) {
@@ -32,20 +33,15 @@ class TelemetryService {
     // Structured log for real-time dev visibility; [TELEMETRY] prefix is parseable by aggregators
     logger.info(`[TELEMETRY] ${JSON.stringify(entry)}`);
 
-    // 2. Persistent Append-Only Log (JSONL)
-    const line = JSON.stringify(entry) + '\n';
-    try {
-      await fs.appendFile(this.logPath, line);
-    } catch (err) {
-      logger.error('Failed to write telemetry:', err);
-    }
+    // 2. Persistent Append-Only Log (JSONL); write failures are logged, never thrown.
+    await this.appender.append(JSON.stringify(entry));
   }
 
   // Optional: Simple analytics
   async getStats() {
     // In a real app, this would read the file and aggregate
     // For now, we return a placeholder or implement a simple tail
-    return { status: "active", logPath: this.logPath };
+    return { status: "active", logPath: this.appender.path };
   }
 }
 

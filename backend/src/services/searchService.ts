@@ -11,6 +11,22 @@ interface BraveSearchResult {
   index?: number;
 }
 
+/**
+ * Brave's `offset` is a 0-based *page* index capped at 9 — not an item
+ * offset. `(page - 1) * 20` returned HTTP 422 for every page >= 2.
+ */
+function braveOffset(page: number): number {
+  const safePage = Number.isFinite(page) && page >= 1 ? Math.floor(page) : 1;
+  return Math.min(9, safePage - 1);
+}
+
+/** Retry-After in ms, bounded so a hostile/huge header can't stall a request. */
+function retryDelayMs(retryAfter: string | undefined, attempt: number): number {
+  const sec = parseInt(retryAfter || '', 10);
+  const ms = Number.isFinite(sec) && sec > 0 ? sec * 1000 : 2000 * (attempt + 1);
+  return Math.min(ms, 10_000);
+}
+
 interface DirectoryNode {
   name: string;
   files: string[];
@@ -47,7 +63,7 @@ export class SearchService {
       return this.webSearch(query, page);
     }
 
-    const offset = (page - 1) * 20;
+    const offset = braveOffset(page);
 
     const fetchEndpoint = async (endpoint: string, resultKey: string, retries = 2) => {
       for (let attempt = 0; attempt <= retries; attempt++) {
@@ -65,8 +81,10 @@ export class SearchService {
             },
             timeout: 8000,
           });
-          const rawResults = response.data[resultKey]?.results || [];
-          return rawResults.map((r: BraveSearchResult) => ({
+          const rawResults: BraveSearchResult[] = response.data?.[resultKey]?.results || [];
+          // Drop malformed items — a result without a string url crashed the
+          // dedupe step below (`r.link.replace`).
+          return rawResults.filter(r => typeof r?.url === 'string' && r.url.length > 0).map((r: BraveSearchResult) => ({
             title: r.title,
             link: r.url,
             snippet: r.description,
@@ -76,9 +94,9 @@ export class SearchService {
           const err = error as { response?: { status?: number; headers?: Record<string, string>; data?: unknown }; message?: string };
           const is429 = err?.response?.status === 429;
           if (is429 && attempt < retries) {
-            const waitSec = parseInt(err?.response?.headers?.['retry-after'] || '', 10) || (2 * (attempt + 1));
-            logger.warn(`[SearchService] ${resultKey} 429 — retrying in ${waitSec}s (attempt ${attempt + 1}/${retries})`);
-            await new Promise(r => setTimeout(r, waitSec * 1000));
+            const waitMs = retryDelayMs(err?.response?.headers?.['retry-after'], attempt);
+            logger.warn(`[SearchService] ${resultKey} 429 — retrying in ${waitMs}ms (attempt ${attempt + 1}/${retries})`);
+            await new Promise(r => setTimeout(r, waitMs));
             continue;
           }
           logger.warn(`[SearchService] ${resultKey} endpoint failed: ${err.message}`);
@@ -98,6 +116,7 @@ export class SearchService {
     const merged: Array<{ title: string; link: string; snippet: string; source: string }> = [];
 
     for (const r of [...newsResults, ...webResults]) {
+      if (typeof r?.link !== 'string') continue;
       const normalizedUrl = r.link.replace(/\/$/, '').toLowerCase();
       if (!seen.has(normalizedUrl)) {
         seen.add(normalizedUrl);
@@ -115,7 +134,7 @@ export class SearchService {
   }
 
   private async braveSearch(query: string, page: number = 1, retries: number = 2) {
-    const offset = (page - 1) * 20;
+    const offset = braveOffset(page);
     const isNewsQuery = /news|latest|articles|headlines/i.test(query);
     const endpoint = isNewsQuery
       ? 'https://api.search.brave.com/res/v1/news/search'
@@ -168,9 +187,9 @@ export class SearchService {
         const err = error as { response?: { status?: number; headers?: Record<string, string>; data?: unknown }; message?: string };
         const is429 = err?.response?.status === 429;
         if (is429 && attempt < retries) {
-          const waitSec = parseInt(err?.response?.headers?.['retry-after'] || '', 10) || (2 * (attempt + 1));
-          logger.warn(`[SearchService] Brave 429 — retrying in ${waitSec}s (attempt ${attempt + 1}/${retries})`);
-          await new Promise(r => setTimeout(r, waitSec * 1000));
+          const waitMs = retryDelayMs(err?.response?.headers?.['retry-after'], attempt);
+          logger.warn(`[SearchService] Brave 429 — retrying in ${waitMs}ms (attempt ${attempt + 1}/${retries})`);
+          await new Promise(r => setTimeout(r, waitMs));
           continue;
         }
         logger.error(`[SearchService] Brave Search Error: ${err.response?.data ? JSON.stringify(err.response.data) : err.message}`);
@@ -196,7 +215,9 @@ export class SearchService {
         headers: {
           'X-API-KEY': config.SERPER_API_KEY,
           'Content-Type': 'application/json'
-        }
+        },
+        timeout: 8000,
+        maxContentLength: 5 * 1024 * 1024,
       });
 
       logger.info(`[SearchService] Serper (${isNewsQuery ? 'news' : 'search'}) responded with status: ${response.status}`);

@@ -8,17 +8,36 @@ import { createHash } from 'crypto';
 const RECENT_PAIRS_TO_KEEP = 4;
 const SUMMARY_MODEL = 'llama-3.3-70b-versatile';
 
+// Summarizers tried in order; the first ready provider wins.
+const SUMMARY_PROVIDERS: Array<{ provider: string; model: string }> = [
+  { provider: 'groq', model: SUMMARY_MODEL },
+  { provider: 'fireworks', model: 'accounts/fireworks/models/gpt-oss-120b' },
+  { provider: 'openrouter', model: 'meta-llama/llama-3.1-8b-instruct' },
+];
+
+// Cap on the transcript sent to the summarizer — an unbounded history
+// overflowed the summary model's own context and the call failed outright.
+const MAX_TRANSCRIPT_CHARS = 48_000;
+
 // In-memory cache for conversation summaries to avoid re-summarizing
 const summaryCache = new Map<string, { summary: string; timestamp: number }>();
 const MAX_CACHE_ENTRIES = 20;
 const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 /**
- * Compute a hash for a set of messages to use as cache key.
+ * Compute a hash for a set of messages to use as cache key. Hashes the full
+ * text — keying on the first 200 chars made distinct conversations with a
+ * shared prefix collide and reuse each other's summaries.
  */
 function hashMessages(messages: ChatMessage[]): string {
-  const text = messages.map(m => `${m.role}:${m.content?.slice(0, 200)}`).join('|');
-  return createHash('sha256').update(text).digest('hex').slice(0, 16);
+  const hash = createHash('sha256');
+  for (const m of messages) {
+    hash.update(m.role);
+    hash.update('\u0000');
+    hash.update(typeof m.content === 'string' ? m.content : JSON.stringify(m.content ?? ''));
+    hash.update('\u0001');
+  }
+  return hash.digest('hex').slice(0, 32);
 }
 
 /**
@@ -38,9 +57,16 @@ function evictStaleCache() {
   }
 }
 
+/** Keep the head and tail of an over-long transcript. */
+function capTranscript(transcript: string): string {
+  if (transcript.length <= MAX_TRANSCRIPT_CHARS) return transcript;
+  const half = Math.floor(MAX_TRANSCRIPT_CHARS / 2);
+  return `${transcript.slice(0, half)}\n\n[… ${transcript.length - MAX_TRANSCRIPT_CHARS} characters omitted …]\n\n${transcript.slice(-half)}`;
+}
+
 /**
  * Summarize a block of messages into a concise summary.
- * Falls back to truncation if the LLM call fails.
+ * Falls back to truncation if every summarizer fails.
  */
 async function summarizeMessages(messages: ChatMessage[]): Promise<string> {
   const cacheKey = hashMessages(messages);
@@ -51,30 +77,37 @@ async function summarizeMessages(messages: ChatMessage[]): Promise<string> {
     return cached.summary;
   }
 
-  try {
-    const groq = await AIProviderFactory.getProvider('groq');
-    const transcript = messages
-      .map(m => `${m.role.toUpperCase()}: ${m.content}`)
-      .join('\n\n');
+  const transcript = capTranscript(
+    messages.map(m => `${m.role.toUpperCase()}: ${m.content}`).join('\n\n')
+  );
+  const prompt = [
+    { role: 'system' as const, content: 'You are a conversation summarizer. Produce a concise summary that preserves key decisions, questions, code references, and technical context. Omit greetings and filler.' },
+    { role: 'user' as const, content: `Summarize the following conversation segment in 3-5 dense paragraphs:\n\n${transcript}` },
+  ];
 
-    const summary = await groq.complete([
-      { role: 'system', content: 'You are a conversation summarizer. Produce a concise summary that preserves key decisions, questions, code references, and technical context. Omit greetings and filler.' },
-      { role: 'user', content: `Summarize the following conversation segment in 3-5 dense paragraphs:\n\n${transcript}` }
-    ], { model: SUMMARY_MODEL, temperature: 0.1, maxTokens: 512 });
+  let lastError = 'no summarizer provider available';
+  for (const { provider: name, model } of SUMMARY_PROVIDERS) {
+    try {
+      const provider = await AIProviderFactory.getProvider(name);
+      if (!provider.isReady()) continue;
+      const summary = await provider.complete(prompt, { model, temperature: 0.1, maxTokens: 512 });
+      if (!summary || !summary.trim()) continue;
 
-    // Cache the result
-    evictStaleCache();
-    summaryCache.set(cacheKey, { summary, timestamp: Date.now() });
-
-    return summary;
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    logger.warn(`[ConversationWindow] Summarization failed, falling back to truncation: ${message}`);
-    // Fallback: take first and last message of the block
-    const first = messages[0]?.content?.slice(0, 200) || '';
-    const last = messages[messages.length - 1]?.content?.slice(0, 200) || '';
-    return `[Earlier conversation truncated. First message: "${first}..." Last message: "${last}..."]`;
+      // Cache the result
+      evictStaleCache();
+      summaryCache.set(cacheKey, { summary, timestamp: Date.now() });
+      return summary;
+    } catch (err: unknown) {
+      lastError = err instanceof Error ? err.message : String(err);
+      logger.debug(`[ConversationWindow] Summarizer ${name} failed: ${lastError}`);
+    }
   }
+
+  logger.warn(`[ConversationWindow] Summarization failed, falling back to truncation: ${lastError}`);
+  // Fallback: take first and last message of the block
+  const first = messages[0]?.content?.slice(0, 200) || '';
+  const last = messages[messages.length - 1]?.content?.slice(0, 200) || '';
+  return `[Earlier conversation truncated. First message: "${first}..." Last message: "${last}..."]`;
 }
 
 export interface FitResult {
@@ -82,6 +115,9 @@ export interface FitResult {
   wasTruncated: boolean;
   summarizedCount: number;
 }
+
+const summaryHeader = (count: number, truncated: boolean) =>
+  `[CONVERSATION SUMMARY — ${count} earlier messages compressed${truncated ? ', truncated' : ''}]\n\n`;
 
 /**
  * Fit a conversation into a token budget using a three-tier strategy:
@@ -113,8 +149,18 @@ export async function fitConversation(
 
   // Always keep the most recent messages (last N pairs)
   const recentCount = Math.min(conversationMessages.length, RECENT_PAIRS_TO_KEEP * 2);
-  const recentMessages = conversationMessages.slice(-recentCount);
-  const olderMessages = conversationMessages.slice(0, -recentCount);
+  let recentMessages = conversationMessages.slice(-recentCount);
+  let olderMessages = conversationMessages.slice(0, conversationMessages.length - recentCount);
+
+  const systemTokens = estimateMessagesTokens(systemMessages);
+
+  // If system + recent alone exceed the budget, drop the oldest "recent"
+  // messages (never the latest one) — returning them all used to send a
+  // request that was still over budget.
+  while (recentMessages.length > 1 && systemTokens + estimateMessagesTokens(recentMessages) > tokenBudget) {
+    olderMessages = [...olderMessages, recentMessages[0]!];
+    recentMessages = recentMessages.slice(1);
+  }
 
   // If no older messages to summarize, we can only keep what fits
   if (olderMessages.length === 0) {
@@ -126,10 +172,11 @@ export async function fitConversation(
     };
   }
 
-  // Calculate token budget available for the summary
-  const systemTokens = estimateMessagesTokens(systemMessages);
+  // Calculate token budget available for the summary, net of the summary
+  // message's own header and per-message overhead.
   const recentTokens = estimateMessagesTokens(recentMessages);
-  const summaryBudget = tokenBudget - systemTokens - recentTokens;
+  const wrapperTokens = estimateMessagesTokens([{ role: 'system', content: summaryHeader(olderMessages.length, true) + '...' }]);
+  const summaryBudget = tokenBudget - systemTokens - recentTokens - wrapperTokens;
 
   if (summaryBudget <= 100) {
     // No room for a summary — just keep system + recent
@@ -148,7 +195,7 @@ export async function fitConversation(
   if (summaryTokens <= summaryBudget) {
     const summaryMessage: ChatMessage = {
       role: 'system',
-      content: `[CONVERSATION SUMMARY — ${olderMessages.length} earlier messages compressed]\n\n${summary}`
+      content: `${summaryHeader(olderMessages.length, false)}${summary}`
     };
 
     return {
@@ -163,7 +210,7 @@ export async function fitConversation(
   const truncatedSummary = summary.slice(0, maxSummaryChars);
   const summaryMessage: ChatMessage = {
     role: 'system',
-    content: `[CONVERSATION SUMMARY — ${olderMessages.length} earlier messages compressed, truncated]\n\n${truncatedSummary}...`
+    content: `${summaryHeader(olderMessages.length, true)}${truncatedSummary}...`
   };
 
   return {

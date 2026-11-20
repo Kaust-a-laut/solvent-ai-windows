@@ -69,7 +69,7 @@ export class FileService {
           name: file,
           size: stats.size,
           createdAt: stats.birthtime,
-          url: `/files/${file}`
+          url: `/files/${encodeURIComponent(file)}`
         };
       }));
 
@@ -80,16 +80,26 @@ export class FileService {
     }
   }
 
+  /**
+   * Resolve a bare upload filename to its path. The name is used verbatim —
+   * the old character substitution (`my file.png` → `my_file.png`) made
+   * deletes target a different file than the one listed — and anything that
+   * could name another directory is rejected outright.
+   */
   private validateFileName(fileName: string): string {
     if (!fileName || typeof fileName !== 'string') {
       throw new SolventError('Filename is required', SolventErrorCode.VALIDATION_ERROR, { status: 400 });
     }
-    if (fileName.includes('..') || path.isAbsolute(fileName)) {
+    if (
+      fileName === '.' || fileName === '..' ||
+      fileName.includes('/') || fileName.includes('\\') || fileName.includes('\0') ||
+      path.isAbsolute(fileName)
+    ) {
       throw new SolventError('Invalid filename: path traversal detected', SolventErrorCode.VALIDATION_ERROR, { status: 400 });
     }
-    const sanitized = fileName.replace(/[^\w\-./]/g, '_');
-    const filePath = path.join(this.uploadDir, sanitized);
-    if (!filePath.startsWith(this.uploadDir)) {
+    const uploadRoot = path.resolve(this.uploadDir);
+    const filePath = path.resolve(uploadRoot, fileName);
+    if (!filePath.startsWith(uploadRoot + path.sep)) {
       throw new SolventError('Invalid filename: path escape attempt', SolventErrorCode.VALIDATION_ERROR, { status: 400 });
     }
     return filePath;

@@ -1,7 +1,8 @@
 import { readFileSync, existsSync } from 'fs';
-import { mkdir, writeFile } from 'fs/promises';
+import { mkdir } from 'fs/promises';
 import path from 'path';
 import { logger } from '../utils/logger';
+import { AtomicFileSystem } from '../utils/fileSystem';
 
 interface CoreEntry {
   key: string;
@@ -46,7 +47,9 @@ export class CoreMemory {
       throw new Error('Core memory full — delete an entry before adding a new one');
     }
 
-    const limit = this.keyLimits[key] ?? this.keyLimits['default']!;
+    // Object.hasOwn: a key like "constructor" or "__proto__" used to resolve
+    // to an inherited Object.prototype member and bypass the length limit.
+    const limit = Object.hasOwn(this.keyLimits, key) ? this.keyLimits[key]! : this.keyLimits['default']!;
     if (value.length > limit) {
       throw new Error(`Value exceeds max length ${limit} for key "${key}". Consider storing details in vector memory instead.`);
     }
@@ -82,7 +85,9 @@ export class CoreMemory {
     this.pendingSave = this.pendingSave.catch(() => undefined)
       .then(async () => {
         await mkdir(path.dirname(this.filePath), { recursive: true });
-        await writeFile(this.filePath, JSON.stringify(data, null, 2));
+        // Atomic temp-file + rename: a crash mid-write no longer truncates
+        // the core memory file.
+        await AtomicFileSystem.writeJson(this.filePath, data);
       })
       .catch((err: unknown) => {
         logger.error('[CoreMemory] Failed to save:', err instanceof Error ? err.message : String(err));

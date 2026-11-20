@@ -30,7 +30,9 @@ export interface PatchResult {
  *   +added line
  */
 export function parseUnifiedDiff(diff: string): Hunk[] {
-  const lines = diff.split('\n');
+  // Normalize CRLF: otherwise an empty context line is '\r', which matches
+  // none of the prefixes below and truncates the hunk at the first blank line.
+  const lines = diff.replace(/\r\n?/g, '\n').split('\n');
   const hunks: Hunk[] = [];
   let i = 0;
 
@@ -100,15 +102,16 @@ export function parseUnifiedDiff(diff: string): Hunk[] {
  * Uses context line matching for robustness against small drifts.
  */
 export function applyHunks(content: string, hunks: Hunk[]): PatchResult {
-  const fileLines = content.split('\n');
+  // Work on LF-normalized lines and restore the file's own line ending on
+  // output, so CRLF files neither mismatch context nor come back mixed.
+  const eol = content.includes('\r\n') ? '\r\n' : '\n';
+  const fileLines = content.replace(/\r\n?/g, '\n').split('\n');
   let hunksApplied = 0;
 
   // Apply hunks in reverse order so line numbers remain valid
   const sortedHunks = [...hunks].sort((a, b) => b.oldStart - a.oldStart);
 
   for (const hunk of sortedHunks) {
-    const startIdx = hunk.oldStart - 1; // Convert to 0-based
-
     // Build the new lines for this hunk
     const newLines: string[] = [];
     const expectedOldLines: string[] = [];
@@ -122,11 +125,20 @@ export function applyHunks(content: string, hunks: Hunk[]): PatchResult {
       }
     }
 
-    // Verify context matches (with tolerance for whitespace drift)
-    const actualLines = fileLines.slice(startIdx, startIdx + expectedOldLines.length);
-    let contextMatches = true;
+    // 1-based -> 0-based. A pure insertion (`-N,0`) inserts *after* line N,
+    // and `@@ -0,0 +1,N @@` (new file / top of file) inserts at index 0 —
+    // `oldStart - 1` would be -1 there, and splice(-1) inserts before the
+    // last line instead.
+    const startIdx = expectedOldLines.length === 0
+      ? Math.max(0, Math.min(hunk.oldStart, fileLines.length))
+      : Math.max(0, hunk.oldStart - 1);
 
-    for (let j = 0; j < expectedOldLines.length; j++) {
+    // Verify context matches (with tolerance for whitespace drift). Lines
+    // past EOF must not "match" expected blank lines.
+    const actualLines = fileLines.slice(startIdx, startIdx + expectedOldLines.length);
+    let contextMatches = actualLines.length === expectedOldLines.length;
+
+    for (let j = 0; contextMatches && j < expectedOldLines.length; j++) {
       const expected = expectedOldLines[j]?.trim() ?? '';
       const actual = actualLines[j]?.trim() ?? '';
       if (expected !== actual) {
@@ -142,8 +154,8 @@ export function applyHunks(content: string, hunks: Hunk[]): PatchResult {
       for (let offset = -window; offset <= window; offset++) {
         const tryStart = Math.max(0, startIdx + offset);
         const tryLines = fileLines.slice(tryStart, tryStart + expectedOldLines.length);
-        let match = true;
-        for (let j = 0; j < expectedOldLines.length; j++) {
+        let match = tryLines.length === expectedOldLines.length;
+        for (let j = 0; match && j < expectedOldLines.length; j++) {
           if ((tryLines[j]?.trim() ?? '') !== (expectedOldLines[j]?.trim() ?? '')) {
             match = false;
             break;
@@ -176,7 +188,7 @@ export function applyHunks(content: string, hunks: Hunk[]): PatchResult {
 
   return {
     success: true,
-    newContent: fileLines.join('\n'),
+    newContent: fileLines.join(eol),
     hunksApplied,
   };
 }

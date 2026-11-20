@@ -1,6 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { logger } from './logger';
 import { AtomicFileSystem } from './fileSystem';
 
@@ -21,8 +21,10 @@ export class BackupManager {
 
       const content = await fs.readFile(this.sourcePath, 'utf-8');
       const data = JSON.parse(content);
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      const backupFileName = `backup_${timestamp}.json`;
+      // Millisecond timestamp + random suffix: two backups in the same second
+      // used to overwrite each other. Still sorts chronologically by name.
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      const backupFileName = `backup_${timestamp}_${randomBytes(3).toString('hex')}.json`;
       const backupPath = path.join(this.backupDir, backupFileName);
 
       // Compute checksum on canonical JSON string (matches validation)
@@ -67,19 +69,24 @@ export class BackupManager {
   }
 
   async validateBackup(backupPath: string): Promise<boolean> {
+    return (await this.readValidBackup(backupPath)) !== undefined;
+  }
+
+  /** Read + checksum-verify a backup once; returns its data, or undefined if invalid. */
+  private async readValidBackup(backupPath: string): Promise<unknown | undefined> {
     try {
       const content = await fs.readFile(backupPath, 'utf-8');
-      const parsed = JSON.parse(content);
+      const parsed = JSON.parse(content) as { _checksum?: string; data?: unknown };
 
       if (!parsed._checksum || parsed.data === undefined) {
-        return false;
+        return undefined;
       }
 
       const recomputed = this.computeChecksum(JSON.stringify(parsed.data));
-      return recomputed === parsed._checksum;
+      return recomputed === parsed._checksum ? parsed.data : undefined;
     } catch (error) {
       logger.error(`[BackupManager] Backup validation failed: ${backupPath}`, error);
-      return false;
+      return undefined;
     }
   }
 
@@ -93,12 +100,12 @@ export class BackupManager {
 
       for (const file of backupFiles) {
         const backupPath = path.join(this.backupDir, file);
-        const isValid = await this.validateBackup(backupPath);
+        // Validate and restore from the same read (the old code re-read the
+        // file after validating it), and restore atomically.
+        const data = await this.readValidBackup(backupPath);
 
-        if (isValid) {
-          const content = await fs.readFile(backupPath, 'utf-8');
-          const parsed = JSON.parse(content);
-          await fs.writeFile(this.sourcePath, JSON.stringify(parsed.data, null, 2));
+        if (data !== undefined) {
+          await AtomicFileSystem.writeJson(this.sourcePath, data);
           logger.info(`[BackupManager] Restored from backup: ${file}`);
           return true;
         } else {

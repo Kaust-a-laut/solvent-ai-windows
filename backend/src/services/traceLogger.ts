@@ -1,6 +1,7 @@
-import { appendFile, stat, rename, unlink, access, readFile } from 'fs/promises';
+import { readFile } from 'fs/promises';
 import path from 'path';
 import { logger } from '../utils/logger';
+import { JsonlAppender, rotatedPath, DEFAULT_JSONL_ROTATION } from '../utils/jsonlAppender';
 import { ContextProvenance } from './contextService';
 
 export interface HarnessSnapshot {
@@ -49,29 +50,16 @@ interface OutcomePatch {
 }
 
 const TRACE_FILE = path.join(process.cwd(), '.solvent_retrieval_traces.jsonl');
-const ROTATE_1 = path.join(process.cwd(), '.solvent_retrieval_traces.1.jsonl');
-const ROTATE_2 = path.join(process.cwd(), '.solvent_retrieval_traces.2.jsonl');
-const MAX_SIZE_BYTES = 50 * 1024 * 1024; // 50MB
+const ROTATE_1 = rotatedPath(TRACE_FILE, 1);
 
-async function rotateIfNeeded(): Promise<void> {
-  try {
-    await access(TRACE_FILE);
-    const { size } = await stat(TRACE_FILE);
-    if (size <= MAX_SIZE_BYTES) return;
-    // Rotate: .2 is deleted, .1 becomes .2, current becomes .1
-    try { await unlink(ROTATE_2); } catch { /* .2 may not exist */ }
-    try { await rename(ROTATE_1, ROTATE_2); } catch { /* .1 may not exist */ }
-    await rename(TRACE_FILE, ROTATE_1);
-  } catch {
-    // File doesn't exist yet — no rotation needed
-  }
-}
+// 20MB per file (2 rotated generations kept). Appends and rotations are
+// serialized on one queue so concurrent writers can't race the rename.
+const appender = new JsonlAppender(TRACE_FILE, DEFAULT_JSONL_ROTATION);
 
 class TraceLogger {
   async appendTrace(trace: RetrievalTrace): Promise<void> {
     try {
-      await rotateIfNeeded();
-      await appendFile(TRACE_FILE, JSON.stringify(trace) + '\n', 'utf-8');
+      await appender.append(JSON.stringify(trace));
     } catch (err) {
       // Fire-and-forget: never let trace logging crash the main request
       logger.warn(`[TraceLogger] Failed to write trace: ${err}`);
@@ -80,28 +68,39 @@ class TraceLogger {
 
   async updateOutcome(traceId: string, outcome: NonNullable<RetrievalTrace['outcome']>): Promise<void> {
     try {
-      await rotateIfNeeded();
       const patch: OutcomePatch = {
         type: 'outcome_patch',
         traceId,
         outcome,
         ts: new Date().toISOString(),
       };
-      await appendFile(TRACE_FILE, JSON.stringify(patch) + '\n', 'utf-8');
+      await appender.append(JSON.stringify(patch));
     } catch (err) {
       logger.warn(`[TraceLogger] Failed to write outcome patch: ${err}`);
     }
   }
 
-  async readTraces(filePath: string = TRACE_FILE): Promise<RetrievalTrace[]> {
-    try {
-      const content = await readFile(filePath, 'utf-8');
-      const lines = content.trim().split('\n').filter(Boolean);
+  /**
+   * Read traces (oldest first) with outcome patches applied. With no
+   * argument this reads the most recent rotated generation and the live
+   * file together, so a patch written after a rotation still lands on its
+   * trace and "recent traces" don't reset to zero right after rotating.
+   */
+  async readTraces(filePath?: string): Promise<RetrievalTrace[]> {
+    const files = filePath ? [filePath] : [ROTATE_1, TRACE_FILE];
 
-      const traces = new Map<string, RetrievalTrace>();
-      const patches = new Map<string, RetrievalTrace['outcome']>();
+    const traces = new Map<string, RetrievalTrace>();
+    const patches = new Map<string, RetrievalTrace['outcome']>();
 
-      for (const line of lines) {
+    for (const file of files) {
+      let content: string;
+      try {
+        content = await readFile(file, 'utf-8');
+      } catch {
+        continue; // missing generation
+      }
+      for (const line of content.split('\n')) {
+        if (!line.trim()) continue;
         try {
           const record = JSON.parse(line);
           if (record.type === 'outcome_patch') {
@@ -113,17 +112,15 @@ class TraceLogger {
           // Skip malformed lines
         }
       }
-
-      // Apply patches — last patch for a given traceId wins
-      for (const [traceId, outcome] of patches) {
-        const trace = traces.get(traceId);
-        if (trace) trace.outcome = outcome;
-      }
-
-      return [...traces.values()];
-    } catch {
-      return [];
     }
+
+    // Apply patches — last patch for a given traceId wins
+    for (const [traceId, outcome] of patches) {
+      const trace = traces.get(traceId);
+      if (trace) trace.outcome = outcome;
+    }
+
+    return [...traces.values()];
   }
 }
 

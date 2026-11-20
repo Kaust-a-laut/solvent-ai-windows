@@ -1,12 +1,14 @@
 import fs from 'fs/promises';
 import path from 'path';
+import { LRUMap } from '../utils/lruMap';
 
 const IGNORE_DIRS = new Set([
   'node_modules', '.git', 'dist', 'build', '.next', 'coverage', '.cache', 'out', '.turbo',
   '.solvent_sessions', '__pycache__', '.pytest_cache', '.mypy_cache',
 ]);
-const EXPORT_REGEX =
-  /^export\s+(?:default\s+)?(?:async\s+)?(?:function|class|const|let|var|type|interface|enum)\s+(\w+)/;
+// Group 1 = declaration kind, group 2 = exported name.
+const EXPORT_REGEX_WITH_KIND =
+  /^export\s+(?:default\s+)?(?:async\s+)?(function|class|const|let|var|type|interface|enum)\s+(\w+)/;
 const MAX_SYMBOL_FILES = 3000;  // 10x increase — handles medium-sized projects
 const MAX_EXPORTS = 500;        // 10x increase — captures more symbols
 const MAX_FILES_PER_DIR = 50;   // more files per directory
@@ -88,38 +90,20 @@ export async function indexProject(projectRoot: string): Promise<string> {
     parts.push('Project: (no package.json)');
   }
 
-  // File tree
+  // File tree — one walk, reused for the symbol DB below (the old code
+  // walked and read up to 3,000 files a second time in buildSymbolIndex).
   const { tree, allFiles } = await scanDir(projectRoot, 0);
   parts.push('\nFile tree:');
   parts.push(tree.trimEnd());
 
-  // Key exports
-  const symbols: string[] = [];
-  let scanned = 0;
-  for (const f of allFiles) {
-    if (scanned >= MAX_SYMBOL_FILES || symbols.length >= MAX_EXPORTS) break;
-    if (!/\.(ts|tsx|js|jsx)$/.test(f)) continue;
-    try {
-      const content = await fs.readFile(f, 'utf-8');
-      content.split('\n').forEach((line, idx) => {
-        const m = line.match(EXPORT_REGEX);
-        if (m && symbols.length < MAX_EXPORTS) {
-          symbols.push(`  ${m[1]} → ${path.relative(projectRoot, f)}:${idx + 1}`);
-        }
-      });
-      scanned++;
-    } catch {
-      // skip unreadable files
-    }
-  }
+  // Key exports + queryable symbol DB, from a single read of each file.
+  const entries = await collectSymbols(projectRoot, allFiles);
+  symbolDB.set(projectRoot, entries);
 
-  if (symbols.length > 0) {
+  if (entries.length > 0) {
     parts.push('\nKey exports:');
-    parts.push(symbols.join('\n'));
+    parts.push(entries.map(e => `  ${e.name} → ${e.file}:${e.line}`).join('\n'));
   }
-
-  // Build the queryable symbol DB in the background (non-blocking)
-  void buildSymbolIndex(projectRoot);
 
   return parts.join('\n');
 }
@@ -129,27 +113,24 @@ export async function indexProject(projectRoot: string): Promise<string> {
 export interface SymbolEntry {
   name: string;
   kind: 'function' | 'class' | 'interface' | 'type' | 'const' | 'enum' | 'other';
-  file: string;  // relative to project root
+  file: string;  // relative to project root, always '/'-separated
   line: number;
   signature: string;
 }
 
-const KIND_REGEX = /^export\s+(?:default\s+)?(?:async\s+)?(function|class|const|let|var|type|interface|enum)\s+(\w+)/;
+const KIND_REGEX = EXPORT_REGEX_WITH_KIND;
 
-// In-memory symbol DB per project root. Rebuilt on each indexProject call.
-const symbolDB: Map<string, SymbolEntry[]> = new Map();
+// In-memory symbol DB per project root, bounded so a long session that
+// touches many projects can't grow it without limit.
+const MAX_INDEXED_PROJECTS = 20;
+const symbolDB = new LRUMap<string, SymbolEntry[]>(MAX_INDEXED_PROJECTS);
 
 /** Check if the symbol index has been built for a project root. */
 export function hasSymbolIndex(projectRoot: string): boolean {
   return symbolDB.has(projectRoot);
 }
 
-/**
- * Build (or rebuild) the symbol index for a project.
- * Called automatically by indexProject, but can be called standalone.
- */
-export async function buildSymbolIndex(projectRoot: string): Promise<SymbolEntry[]> {
-  const { allFiles } = await scanDir(projectRoot, 0);
+async function collectSymbols(projectRoot: string, allFiles: string[]): Promise<SymbolEntry[]> {
   const entries: SymbolEntry[] = [];
   let scanned = 0;
 
@@ -158,7 +139,9 @@ export async function buildSymbolIndex(projectRoot: string): Promise<SymbolEntry
     if (!/\.(ts|tsx|js|jsx)$/.test(f)) continue;
     try {
       const content = await fs.readFile(f, 'utf-8');
-      const relPath = path.relative(projectRoot, f);
+      // '/'-separated so querySymbols' `file` filter works the same on
+      // Windows (where path.relative yields backslashes) as elsewhere.
+      const relPath = path.relative(projectRoot, f).split(path.sep).join('/');
       content.split('\n').forEach((line, idx) => {
         const m = line.match(KIND_REGEX);
         if (m && entries.length < MAX_EXPORTS) {
@@ -177,7 +160,17 @@ export async function buildSymbolIndex(projectRoot: string): Promise<SymbolEntry
       scanned++;
     } catch { /* skip */ }
   }
+  return entries;
+}
 
+/**
+ * Build (or rebuild) the symbol index for a project.
+ * indexProject builds it as part of its own scan; call this standalone when
+ * only the symbol DB is needed.
+ */
+export async function buildSymbolIndex(projectRoot: string): Promise<SymbolEntry[]> {
+  const { allFiles } = await scanDir(projectRoot, 0);
+  const entries = await collectSymbols(projectRoot, allFiles);
   symbolDB.set(projectRoot, entries);
   return entries;
 }

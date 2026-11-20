@@ -333,15 +333,16 @@ router.get('/sessions', async (req, res) => {
     const parsedLimit = parseClampedInt(req.query.limit, 50, 1, 200);
     const parsedOffset = parseClampedInt(req.query.offset, 0, 0, 100_000);
 
-    let sessions = await storageService.listSessions(mode);
-
-    if (search) {
-      const query = search.toLowerCase();
-      sessions = sessions.filter(s =>
-        (typeof s.title === 'string' && s.title.toLowerCase().includes(query)) ||
-        (Array.isArray(s.messages) && s.messages.some(m => typeof m.content === 'string' && m.content.toLowerCase().includes(query)))
-      );
-    }
+    // The index holds summaries only (no message bodies), so content search
+    // goes through findSessions, which reads the session files. Hits carry
+    // the matched message in `messages` for the frontend's excerpt.
+    const sessions = search
+      ? await storageService.findSessions(search, {
+          mode,
+          includeTitles: true,
+          limit: parsedOffset + parsedLimit,
+        })
+      : await storageService.listSessions(mode);
 
     const paginated = sessions.slice(parsedOffset, parsedOffset + parsedLimit);
     res.json({ sessions: paginated, total: sessions.length });

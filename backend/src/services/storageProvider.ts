@@ -6,18 +6,29 @@ export interface IStorageProvider {
 
 import fs from 'fs/promises';
 import path from 'path';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { AtomicFileSystem } from '../utils/fileSystem';
+
+interface CacheRecord {
+  /** Epoch ms after which the entry is expired; 0 = never. */
+  expiresAt: number;
+  value: unknown;
+}
 
 export class FileStorageProvider implements IStorageProvider {
   private baseDir: string;
   private cacheDir: string;
   private tracesDir: string;
+  // Directory creation is async — every operation awaits it, so the first
+  // get/set after construction can't race ahead of mkdir.
+  private ready: Promise<void>;
 
   constructor() {
     this.baseDir = path.join(process.cwd(), '.solvent');
     this.cacheDir = path.join(this.baseDir, 'cache');
     this.tracesDir = path.join(this.baseDir, 'traces');
-    this.init();
+    this.ready = this.init();
+    this.ready.catch(() => { /* surfaced again by the awaiting operation */ });
   }
 
   private async init() {
@@ -25,22 +36,43 @@ export class FileStorageProvider implements IStorageProvider {
     await fs.mkdir(this.tracesDir, { recursive: true });
   }
 
+  /**
+   * Keys are hashed into the filename — joining a raw key let `../../x`
+   * read or write outside the cache directory.
+   */
+  private cachePath(key: string): string {
+    const digest = createHash('sha256').update(String(key)).digest('hex');
+    return path.join(this.cacheDir, `${digest}.json`);
+  }
+
   async get(key: string): Promise<unknown | null> {
-    const cachePath = path.join(this.cacheDir, `${key}.json`);
+    await this.ready;
+    const cachePath = this.cachePath(key);
     try {
-      const data = await fs.readFile(cachePath, 'utf-8');
-      return JSON.parse(data);
+      const parsed = JSON.parse(await fs.readFile(cachePath, 'utf-8')) as Partial<CacheRecord>;
+      if (parsed && typeof parsed === 'object' && 'expiresAt' in parsed && 'value' in parsed) {
+        if (parsed.expiresAt && Date.now() > parsed.expiresAt) {
+          await fs.unlink(cachePath).catch(() => { /* already gone */ });
+          return null;
+        }
+        return parsed.value ?? null;
+      }
+      return null;
     } catch {
       return null;
     }
   }
 
-  async set(key: string, value: unknown): Promise<void> {
-    const cachePath = path.join(this.cacheDir, `${key}.json`);
-    await fs.writeFile(cachePath, JSON.stringify(value, null, 2));
+  /** @param ttl seconds; omitted or 0 = no expiry. */
+  async set(key: string, value: unknown, ttl?: number): Promise<void> {
+    await this.ready;
+    const expiresAt = typeof ttl === 'number' && Number.isFinite(ttl) && ttl > 0 ? Date.now() + ttl * 1000 : 0;
+    const record: CacheRecord = { expiresAt, value };
+    await AtomicFileSystem.writeJson(this.cachePath(key), record);
   }
 
   async saveTrace(data: Record<string, unknown>): Promise<string> {
+    await this.ready;
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const traceId = `trace-${timestamp}-${randomBytes(4).toString('hex')}`;
     const tracePath = path.join(this.tracesDir, `${traceId}.json`);
